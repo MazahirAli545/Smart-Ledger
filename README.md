@@ -1,97 +1,123 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# UtilsApp
 
-# Getting Started
+A cross-platform mobile application built with React Native.
 
-> **Note**: Make sure you have completed the [Set Up Your Environment](https://reactnative.dev/docs/set-up-your-environment) guide before proceeding.
+## Project Structure
 
-## Step 1: Start Metro
-
-First, you will need to run **Metro**, the JavaScript build tool for React Native.
-
-To start the Metro dev server, run the following command from the root of your React Native project:
-
-```sh
-# Using npm
-npm start
-
-# OR using Yarn
-yarn start
+```
+UtilsApp/
+  ├── __tests__/                # Test files
+  ├── android/                  # Android native project files
+  ├── ios/                      # iOS native project files
+  ├── src/
+  │   └── screens/              # App screens
+  │       └── Auth/             # Authentication-related screens
+  ├── App.tsx                   # Main App entry point
+  ├── index.js                  # Entry point for React Native
+  ├── app.json                  # App configuration
+  ├── package.json              # Project dependencies and scripts
+  ├── tsconfig.json             # TypeScript configuration
+  ├── yarn.lock                 # Yarn lockfile
+  └── README.md                 # Project documentation
 ```
 
-## Step 2: Build and run your app
+## Getting Started
 
-With Metro running, open a new terminal window/pane from the root of your React Native project, and use one of the following commands to build and run your Android or iOS app:
+### Prerequisites
+- Node.js
+- Yarn or npm
+- React Native CLI
+- Android Studio / Xcode (for native builds)
 
-### Android
+### Installation
+1. Clone the repository:
+   ```sh
+   git clone <repo-url>
+   cd UtilsApp
+   ```
+2. Install dependencies:
+   ```sh
+   yarn install
+   # or
+   npm install
+   ```
 
-```sh
-# Using npm
-npm run android
+### Running the App
+- **Android:**
+  ```sh
+  npx react-native run-android
+  ```
+- **iOS:**
+  ```sh
+  npx react-native run-ios
+  ```
 
-# OR using Yarn
-yarn android
-```
+## App Flow & Features
 
-### iOS
+### 1. Splash & Onboarding
+- **Splash Screen:** When the app launches, a splash screen with a branded image and loader is shown for a brief moment.
+- **Onboarding Screen:** After the splash, users see an onboarding screen introducing the app's value: "AI Powered Entry System" for business accounting. Users can choose to **Sign In** or **Create Account**.
 
-For iOS, remember to install CocoaPods dependencies (this only needs to be run on first clone or after updating native deps).
+### 2. Authentication
+- **Sign In:**
+  - Users enter their mobile number.
+  - An OTP is sent for verification.
+  - After entering the OTP, users are authenticated.
+  - Option to navigate to account creation if they don't have an account.
+- **Create Account:**
+  - Users provide business name, owner name, mobile number, business type, and (optionally) GST number.
+  - Must agree to Terms of Service and Privacy Policy.
+  - OTP verification is required for mobile number.
+  - On successful verification, users proceed to the setup wizard.
 
-The first time you create a new project, run the Ruby bundler to install CocoaPods itself:
+### 3. Setup Wizard
+A multi-step onboarding process to personalize the app for the user's business:
+1. **Business Details:** Select business size, industry, monthly transaction volume, and current accounting software.
+2. **Team Setup:** Specify team size. Learn about available roles: Admin, Accountant, Data Entry, Viewer.
+3. **Preferences:** Choose preferred language. Select features of interest (Voice Input, OCR Scanning, WhatsApp Integration).
+4. **Bank Details:** Enter bank name, account number, and IFSC code. Bank details are encrypted and used only for reconciliation.
+5. **Final Step:** State primary goal (e.g., automate accounting, GST compliance). Optionally describe current accounting challenges. Summary of personalized features enabled for the user.
 
-```sh
-bundle install
-```
+Each step includes a progress bar and navigation (Next/Previous).
 
-Then, and every time you update your native dependencies, run:
+### 4. Navigation
+- The app uses a stack navigator.
+- Main screens:
+  - Onboarding
+  - SignIn
+  - CreateAccount
+  - SetupWizard (with sub-steps: TeamSetup, Preferences, BankDetails, FinalStep)
+- Navigation is handled programmatically after each step or action.
 
-```sh
-bundle exec pod install
-```
+### 5. User Experience
+- **Modern UI:** Uses gradients, icons, and clear progress indicators.
+- **Validation:** Input fields are validated (e.g., mobile number length, OTP length, required fields).
+- **Accessibility:** Keyboard dismiss, clear labels, and touchable areas for better usability.
 
-For more information, please visit [CocoaPods Getting Started guide](https://guides.cocoapods.org/using/getting-started.html).
+---
 
-```sh
-# Using npm
-npm run ios
+## Example User Journey
 
-# OR using Yarn
-yarn ios
-```
+1. **New User:**
+   - Opens app → Splash → Onboarding → Create Account → OTP Verification → Setup Wizard (5 steps) → App is ready, personalized.
+2. **Returning User:**
+   - Opens app → Splash → Onboarding → Sign In → OTP Verification → App home/dashboard.
 
-If everything is set up correctly, you should see your new app running in the Android Emulator, iOS Simulator, or your connected device.
+---
 
-This is one way to run your app — you can also build it directly from Android Studio or Xcode.
+## Key Screens & Components
+- `OnboardingScreen.tsx` – Welcome and intro.
+- `SignInScreen.tsx` – Mobile/OTP login.
+- `CreateAccountScreen.tsx` – Registration and OTP.
+- `SetupWizard.tsx` – Orchestrates the multi-step setup.
+- `SetupWizardScreen.tsx`, `TeamSetupScreen.tsx`, `PreferencesScreen.tsx`, `BankDetailsScreen.tsx`, `FinalStepScreen.tsx` – Individual steps in the setup wizard.
 
-## Step 3: Modify your app
+---
 
-Now that you have successfully run the app, let's make changes!
+## Extending the App
+- Add more screens to the stack navigator in `App.tsx`.
+- Each setup step is modular and can be extended or reordered.
+- Business logic for authentication and data submission can be integrated with backend APIs.
 
-Open `App.tsx` in your text editor of choice and make some changes. When you save, your app will automatically update and reflect these changes — this is powered by [Fast Refresh](https://reactnative.dev/docs/fast-refresh).
-
-When you want to forcefully reload, for example to reset the state of your app, you can perform a full reload:
-
-- **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Dev Menu**, accessed via <kbd>Ctrl</kbd> + <kbd>M</kbd> (Windows/Linux) or <kbd>Cmd ⌘</kbd> + <kbd>M</kbd> (macOS).
-- **iOS**: Press <kbd>R</kbd> in iOS Simulator.
-
-## Congratulations! :tada:
-
-You've successfully run and modified your React Native App. :partying_face:
-
-### Now what?
-
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [docs](https://reactnative.dev/docs/getting-started).
-
-# Troubleshooting
-
-If you're having issues getting the above steps to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
-
-# Learn More
-
-To learn more about React Native, take a look at the following resources:
-
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+## Folder Details
+- `src/screens/Auth/`
