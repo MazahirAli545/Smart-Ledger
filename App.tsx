@@ -17,6 +17,7 @@ import TeamSetupScreen from './src/screens/Auth/TeamSetupScreen';
 import PreferencesScreen from './src/screens/Auth/PreferencesScreen';
 import BankDetailsScreen from './src/screens/Auth/BankDetailsScreen';
 import FinalStepScreen from './src/screens/Auth/FinalStepScreen';
+import { OnboardingProvider } from './src/context/OnboardingContext';
 
 const Stack = createStackNavigator();
 
@@ -45,19 +46,20 @@ const App: React.FC = () => {
   }
 
   return (
-    <NavigationContainer>
-      <Stack.Navigator screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="Onboarding" component={OnboardingScreen} />
-        <Stack.Screen name="SignIn" component={SignInScreen} />
-        <Stack.Screen name="CreateAccount" component={CreateAccountScreen} />
-        <Stack.Screen name="SetupWizard" component={SetupWizardScreen} />
-        <Stack.Screen name="TeamSetup" component={TeamSetupScreen} />
-        
-        <Stack.Screen name="Preferences" component={PreferencesScreen} />
-        <Stack.Screen name="BankDetailsScreen" component={BankDetailsScreen} />
-        <Stack.Screen name="FinalStepScreen" component={FinalStepScreen} />
-      </Stack.Navigator>
-    </NavigationContainer>
+    <OnboardingProvider>
+      <NavigationContainer>
+        <Stack.Navigator screenOptions={{ headerShown: false }}>
+          <Stack.Screen name="Onboarding" component={OnboardingScreen} />
+          <Stack.Screen name="SignIn" component={SignInScreen} />
+          <Stack.Screen name="CreateAccount" component={CreateAccountScreen} />
+          <Stack.Screen name="SetupWizard" component={SetupWizardScreen} />
+          <Stack.Screen name="TeamSetup" component={TeamSetupScreen} />
+          <Stack.Screen name="Preferences" component={PreferencesScreen} />
+          <Stack.Screen name="BankDetailsScreen" component={BankDetailsScreen} />
+          <Stack.Screen name="FinalStepScreen" component={FinalStepScreen} />
+        </Stack.Navigator>
+      </NavigationContainer>
+    </OnboardingProvider>
   );
 };
 

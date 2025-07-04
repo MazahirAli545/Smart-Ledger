@@ -1,0 +1,13 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Screens Directory Guide
+
+- The [src/screens/](mdc:src/screens) directory contains all the main UI screens for the application.
+- The onboarding and authentication-related screens are organized under [src/screens/Auth/](mdc:src/screens/Auth).
+- The [OnboardingScreen.tsx](mdc:src/screens/OnboardingScreen.tsx) file is the entry point for the onboarding flow.
+- Each screen is typically a React component responsible for a specific step or feature in the user journey.
+- Navigation between screens is managed via React Navigation, with each screen registered in the main navigator (see [App.tsx](mdc:App.tsx)).
+

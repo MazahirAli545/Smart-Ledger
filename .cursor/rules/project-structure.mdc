@@ -1,0 +1,16 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Project Structure Guide
+
+- The main entry point is [App.tsx](mdc:App.tsx), which sets up the navigation and wraps the app in providers.
+- All business logic and screens are under the [src/](mdc:src) directory.
+- Authentication and onboarding screens are in [src/screens/Auth/](mdc:src/screens/Auth).
+- The onboarding context for multi-step forms is defined in [src/context/OnboardingContext.tsx](mdc:src/context/OnboardingContext.tsx).
+- API utilities and endpoints are in [src/api/index.ts](mdc:src/api/index.ts).
+- Android and iOS native code are in [android/](mdc:android) and [ios/](mdc:ios) respectively.
+- Project configuration files include [package.json](mdc:package.json), [tsconfig.json](mdc:tsconfig.json), and [babel.config.js](mdc:babel.config.js).
+- Tests are located in [__tests__/](mdc:__tests__).
+

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Image, Platform } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Image, Platform, SafeAreaView } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
@@ -49,94 +49,99 @@ const PreferencesScreen: React.FC = () => {
   };
 
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: '#f6fafc' }} contentContainerStyle={{ flexGrow: 1 }}>
-     
-      {/* Logo and App Name */}
-      <View style={styles.logoContainer}>
-        <Image source={LOGO} style={styles.logo} />
-        <Text style={styles.appName}>Smart Ledger</Text>
-      </View>
-       {/* Setup Wizard Badge */}
-       <View style={styles.badgeRow}>
-        <LinearGradient
-          colors={['#4f8cff', '#1ecb81']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 0 }}
-          style={styles.setupBadge}
-        >
-          <Text style={styles.setupBadgeText}>Setup Wizard</Text>
-        </LinearGradient>
-      </View>
-      {/* Progress Bar */}
-      <View style={styles.progressRow}>
-        <Text style={styles.progressText}>Step 3 of 5</Text>
-        <Text style={styles.progressTextRight}>60% Complete</Text>
-      </View>
-      <View style={styles.progressBarBg}>
-        <View style={styles.progressBarFill} />
-      </View>
-      {/* Card Container */}
-      <View style={styles.card}>
-        <Image source={{ uri: MIC_ICON }} style={styles.micIcon} />
-        <Text style={styles.cardHeading}>Preferences</Text>
-        <Text style={styles.cardSubtext}>Customize your Smart Ledger experience</Text>
-        {/* Preferred Language */}
-        <Text style={styles.label}>Preferred Language</Text>
-        <View style={styles.pickerWrapper}>
-          <Picker
-            selectedValue={language}
-            onValueChange={setLanguage}
-            style={styles.picker}
-            itemStyle={styles.pickerItem}
-            dropdownIconColor="#8a94a6"
-          >
-            <Picker.Item label="Select your preferred language" value="" color="#8a94a6" />
-            {languages.map((lang) => (
-              <Picker.Item key={lang} label={lang} value={lang} />
-            ))}
-          </Picker>
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView contentContainerStyle={{ flexGrow: 1 }}>
+        {/* Logo and App Name */}
+        <View style={styles.logoContainer}>
+          <Image source={LOGO} style={styles.logo} />
+          <Text style={styles.appName}>Smart Ledger</Text>
         </View>
-        {/* Features */}
-        <Text style={styles.label}>Features you're most interested in:</Text>
-        {features.map((feature) => {
-          const selected = selectedFeatures.includes(feature.key);
-          return (
-            <TouchableOpacity
-              key={feature.key}
-              style={[styles.featureBox, selected && styles.featureBoxSelected]}
-              onPress={() => toggleFeature(feature.key)}
-              activeOpacity={0.8}
-            >
-              <View style={styles.featureRow}>
-                <Image source={{ uri: feature.icon }} style={styles.featureIcon} />
-                <Text style={styles.featureLabel}>{feature.label}</Text>
-                {selected && <Image source={{ uri: CHECK_ICON }} style={styles.checkIcon} />}
-              </View>
-            </TouchableOpacity>
-          );
-        })}
-        {/* Navigation Buttons */}
-        <View style={styles.buttonRow}>
-          <TouchableOpacity style={styles.prevButton} onPress={() => navigation.navigate('TeamSetup')}>
-            <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
-          </TouchableOpacity>
+         {/* Setup Wizard Badge */}
+         <View style={styles.badgeRow}>
           <LinearGradient
             colors={['#4f8cff', '#1ecb81']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 0 }}
-            style={styles.gradientButton}
+            style={styles.setupBadge}
           >
-            <TouchableOpacity style={styles.nextButton} onPress={() => navigation.navigate('BankDetailsScreen')}>
-              <Text style={styles.nextButtonText}>Next {'\u2192'}</Text>
-            </TouchableOpacity>
+            <Text style={styles.setupBadgeText}>Setup Wizard</Text>
           </LinearGradient>
         </View>
-      </View>
-    </ScrollView>
+        {/* Progress Bar */}
+        <View style={styles.progressRow}>
+          <Text style={styles.progressText}>Step 3 of 5</Text>
+          <Text style={styles.progressTextRight}>60% Complete</Text>
+        </View>
+        <View style={styles.progressBarBg}>
+          <View style={styles.progressBarFill} />
+        </View>
+        {/* Card Container */}
+        <View style={styles.card}>
+          <Image source={{ uri: MIC_ICON }} style={styles.micIcon} />
+          <Text style={styles.cardHeading}>Preferences</Text>
+          <Text style={styles.cardSubtext}>Customize your Smart Ledger experience</Text>
+          {/* Preferred Language */}
+          <Text style={styles.label}>Preferred Language</Text>
+          <View style={styles.pickerWrapper}>
+            <Picker
+              selectedValue={language}
+              onValueChange={setLanguage}
+              style={styles.picker}
+              itemStyle={styles.pickerItem}
+              dropdownIconColor="#8a94a6"
+            >
+              <Picker.Item label="Select your preferred language" value="" color="#8a94a6" />
+              {languages.map((lang) => (
+                <Picker.Item key={lang} label={lang} value={lang} />
+              ))}
+            </Picker>
+          </View>
+          {/* Features */}
+          <Text style={styles.label}>Features you're most interested in:</Text>
+          {features.map((feature) => {
+            const selected = selectedFeatures.includes(feature.key);
+            return (
+              <TouchableOpacity
+                key={feature.key}
+                style={[styles.featureBox, selected && styles.featureBoxSelected]}
+                onPress={() => toggleFeature(feature.key)}
+                activeOpacity={0.8}
+              >
+                <View style={styles.featureRow}>
+                  <Image source={{ uri: feature.icon }} style={styles.featureIcon} />
+                  <Text style={styles.featureLabel}>{feature.label}</Text>
+                  {selected && <Image source={{ uri: CHECK_ICON }} style={styles.checkIcon} />}
+                </View>
+              </TouchableOpacity>
+            );
+          })}
+          {/* Navigation Buttons */}
+          <View style={styles.buttonRow}>
+            <TouchableOpacity style={styles.prevButton} onPress={() => navigation.navigate('TeamSetup')}>
+              <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
+            </TouchableOpacity>
+            <LinearGradient
+              colors={['#4f8cff', '#1ecb81']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.gradientButton}
+            >
+              <TouchableOpacity style={styles.nextButton} onPress={() => navigation.navigate('BankDetailsScreen')}>
+                <Text style={styles.nextButtonText}>Next {'\u2192'}</Text>
+              </TouchableOpacity>
+            </LinearGradient>
+          </View>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#f6fafc',
+  },
   badgeRow: {
     alignItems: 'center',
     marginBottom: 8,

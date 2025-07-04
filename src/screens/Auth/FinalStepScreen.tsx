@@ -1,9 +1,12 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Image } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Image, SafeAreaView, Alert } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
+import { useOnboarding } from '../../context/OnboardingContext';
+// import { onboardingUser } from '../../api';
+import { BASE_URL } from '../../api';
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
 const CHECK_ICON = 'https://img.icons8.com/color/96/26e07f/ok--v1.png';
@@ -18,103 +21,166 @@ const goals = [
 
 type RootStackParamList = {
   BankDetailsScreen: undefined;
+  Dashboard: undefined;
   // ... other screens if needed
 };
 
 const FinalStepScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
+  const { data, setData } = useOnboarding();
   const [goal, setGoal] = useState('');
   const [challenges, setChallenges] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleGoalChange = (goal: string) => setData(prev => ({ ...prev, primaryGoal: goal }));
+  const handleChallengesChange = (challenges: string) => setData(prev => ({ ...prev, currentChallenges: challenges }));
+
+  const handleCompleteSetup = async () => {
+    if (!goal) {
+      Alert.alert('Required', 'Please select your primary goal');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    // Sync local state to context before sending
+    setData(prev => ({
+      ...prev,
+      primaryGoal: goal,
+      currentChallenges: challenges,
+    }));
+
+    const payload = {
+      ...data,
+      primaryGoal: goal,
+      currentChallenges: challenges,
+    };
+    console.log('Onboarding payload:', payload);
+
+    try {
+      const response = await fetch(`${BASE_URL}/user/onboarding`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const result = await response.json();
+
+      if (response.ok && result.code === 200) {
+        // Handle successful onboarding
+        Alert.alert('Success', 'Onboarding completed successfully!', [
+          { text: 'OK', onPress: () => navigation.navigate('Dashboard') }
+        ]);
+      } else {
+        throw new Error(result.message || 'Onboarding failed');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to complete onboarding');
+      Alert.alert('Error', err.message || 'Failed to complete onboarding');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: '#f6fafc' }} contentContainerStyle={{ flexGrow: 1 }}>
-      {/* Logo and App Name */}
-      <View style={styles.logoContainer}>
-        <Image source={LOGO} style={styles.logo} />
-        <Text style={styles.appName}>Smart Ledger</Text>
-      </View>
-      {/* Setup Wizard Badge */}
-      <View style={styles.badgeRow}>
-        <LinearGradient
-          colors={['#4f8cff', '#1ecb81']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 0 }}
-          style={styles.setupBadge}
-        >
-          <Text style={styles.setupBadgeText}>Setup Wizard</Text>
-        </LinearGradient>
-      </View>
-      {/* Progress Bar */}
-      <View style={styles.progressRow}>
-        <Text style={styles.progressText}>Step 5 of 5</Text>
-        <Text style={styles.progressTextRight}>100% Complete</Text>
-      </View>
-      <View style={styles.progressBarBg}>
-        <View style={styles.progressBarFill} />
-      </View>
-      {/* Card Container */}
-      <View style={styles.card}>
-        <Image source={{ uri: CHECK_ICON }} style={styles.checkIcon} />
-        <Text style={styles.cardHeading}>Almost Done!</Text>
-        <Text style={styles.cardSubtext}>Tell us about your goals and challenges</Text>
-        {/* Primary Goal Dropdown */}
-        <Text style={styles.label}>Primary Goal with Smart Ledger</Text>
-        <View style={styles.pickerWrapper}>
-          <Picker
-            selectedValue={goal}
-            onValueChange={setGoal}
-            style={styles.picker}
-            itemStyle={styles.pickerItem}
-            dropdownIconColor="#8a94a6"
-          >
-            <Picker.Item label="What's your main goal?" value="" color="#8a94a6" />
-            {goals.map((g) => (
-              <Picker.Item key={g} label={g} value={g} />
-            ))}
-          </Picker>
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView contentContainerStyle={{ flexGrow: 1 }}>
+        {/* Logo and App Name */}
+        <View style={styles.logoContainer}>
+          <Image source={LOGO} style={styles.logo} />
+          <Text style={styles.appName}>Smart Ledger</Text>
         </View>
-        {/* Current Challenges */}
-        <Text style={styles.label}>Current Challenges (Optional)</Text>
-        <TextInput
-          style={styles.textArea}
-          placeholder="Tell us about any accounting challenges you face..."
-          value={challenges}
-          onChangeText={setChallenges}
-          placeholderTextColor="#8a94a6"
-          multiline
-          numberOfLines={4}
-        />
-        {/* Info Box */}
-        <View style={styles.infoBox}>
-          <Text style={styles.infoTitle}>🎉 You're all set!</Text>
-          <Text style={styles.infoText}>Based on your preferences, we've customized Smart Ledger for your business. You'll have access to:</Text>
-          <Text style={styles.bullet}>• Voice input in your preferred language</Text>
-          <Text style={styles.bullet}>• Industry-specific transaction categories</Text>
-          <Text style={styles.bullet}>• Customized dashboard for your business size</Text>
-          <Text style={styles.bullet}>• GST compliance tools</Text>
-        </View>
-        {/* Navigation Buttons */}
-        <View style={styles.buttonRow}>
-          <TouchableOpacity style={styles.prevButton} onPress={() => navigation.navigate('BankDetailsScreen')}>
-            <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
-          </TouchableOpacity>
+        {/* Setup Wizard Badge */}
+        <View style={styles.badgeRow}>
           <LinearGradient
             colors={['#4f8cff', '#1ecb81']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 0 }}
-            style={styles.gradientButton}
+            style={styles.setupBadge}
           >
-            <TouchableOpacity style={styles.nextButton} onPress={() => {}}>
-              <Text style={styles.nextButtonText}>Complete Setup {'\u2192'}</Text>
-            </TouchableOpacity>
+            <Text style={styles.setupBadgeText}>Setup Wizard</Text>
           </LinearGradient>
         </View>
-      </View>
-    </ScrollView>
+        {/* Progress Bar */}
+        <View style={styles.progressRow}>
+          <Text style={styles.progressText}>Step 5 of 5</Text>
+          <Text style={styles.progressTextRight}>100% Complete</Text>
+        </View>
+        <View style={styles.progressBarBg}>
+          <View style={styles.progressBarFill} />
+        </View>
+        {/* Card Container */}
+        <View style={styles.card}>
+          <Image source={{ uri: CHECK_ICON }} style={styles.checkIcon} />
+          <Text style={styles.cardHeading}>Almost Done!</Text>
+          <Text style={styles.cardSubtext}>Tell us about your goals and challenges</Text>
+          {/* Primary Goal Dropdown */}
+          <Text style={styles.label}>Primary Goal with Smart Ledger</Text>
+          <View style={styles.pickerWrapper}>
+            <Picker
+              selectedValue={goal}
+              onValueChange={setGoal}
+              style={styles.picker}
+              itemStyle={styles.pickerItem}
+              dropdownIconColor="#8a94a6"
+            >
+              <Picker.Item label="What's your main goal?" value="" color="#8a94a6" />
+              {goals.map((g) => (
+                <Picker.Item key={g} label={g} value={g} />
+              ))}
+            </Picker>
+          </View>
+          {/* Current Challenges */}
+          <Text style={styles.label}>Current Challenges (Optional)</Text>
+          <TextInput
+            style={styles.textArea}
+            placeholder="Tell us about any accounting challenges you face..."
+            value={challenges}
+            onChangeText={setChallenges}
+            placeholderTextColor="#8a94a6"
+            multiline
+            numberOfLines={4}
+          />
+          {/* Info Box */}
+          <View style={styles.infoBox}>
+            <Text style={styles.infoTitle}>🎉 You're all set!</Text>
+            <Text style={styles.infoText}>Based on your preferences, we've customized Smart Ledger for your business. You'll have access to:</Text>
+            <Text style={styles.bullet}>• Voice input in your preferred language</Text>
+            <Text style={styles.bullet}>• Industry-specific transaction categories</Text>
+            <Text style={styles.bullet}>• Customized dashboard for your business size</Text>
+            <Text style={styles.bullet}>• GST compliance tools</Text>
+          </View>
+          {/* Navigation Buttons */}
+          <View style={styles.buttonRow}>
+            <TouchableOpacity style={styles.prevButton} onPress={() => navigation.navigate('BankDetailsScreen')}>
+              <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
+            </TouchableOpacity>
+            <LinearGradient
+              colors={['#4f8cff', '#1ecb81']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.gradientButton}
+            >
+              <TouchableOpacity style={styles.nextButton} onPress={handleCompleteSetup}>
+                <Text style={styles.nextButtonText}>Complete Setup {'\u2192'}</Text>
+              </TouchableOpacity>
+            </LinearGradient>
+          </View>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#f6fafc',
+  },
   logoContainer: {
     flexDirection: 'row',
     alignItems: 'center',

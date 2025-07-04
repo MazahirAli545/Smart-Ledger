@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet, Image, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, Image, TouchableOpacity, SafeAreaView } from 'react-native';
 import { StackNavigationProp } from '@react-navigation/stack';
 
 // Define navigation prop type
@@ -12,32 +12,37 @@ const HERO_IMAGE = 'https://images.unsplash.com/photo-1461749280684-dccba630e2f6
 
 const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ navigation }) => {
   return (
-    <View style={styles.container}>
-      <Image source={{ uri: HERO_IMAGE }} style={styles.heroImage} resizeMode="cover" />
-      <Text style={styles.title}>Smart Ledger</Text>
-      <Text style={styles.subtitle}>AI Powered Entry System</Text>
-      <Text style={styles.description}>
-        Simplify your business accounting with smart data entry from PDFs, images, and voice. All your records are automatically organized and seamlessly connected to your Chartered Accountant.
-      </Text>
-      <View style={styles.buttonRow}>
-        <TouchableOpacity style={styles.button} onPress={() => navigation.navigate('SignIn')}>
-          <Text style={styles.buttonText}>Sign In</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={[styles.button, styles.getStartedButton]} onPress={() => navigation.navigate('CreateAccount')}>
-          <Text style={[styles.buttonText, styles.getStartedText]}>Create on here</Text>
-        </TouchableOpacity>
+    <SafeAreaView style={styles.safeArea}>
+      <View style={styles.container}>
+        <Image source={{ uri: HERO_IMAGE }} style={styles.heroImage} resizeMode="cover" />
+        <Text style={styles.title}>Smart Ledger</Text>
+        <Text style={styles.subtitle}>AI Powered Entry System</Text>
+        <Text style={styles.description}>
+          Simplify your business accounting with smart data entry from PDFs, images, and voice. All your records are automatically organized and seamlessly connected to your Chartered Accountant.
+        </Text>
+        <View style={styles.buttonRow}>
+          <TouchableOpacity style={styles.button} onPress={() => navigation.navigate('SignIn')}>
+            <Text style={styles.buttonText}>Sign In</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.button, styles.getStartedButton]} onPress={() => navigation.navigate('CreateAccount')}>
+            <Text style={[styles.buttonText, styles.getStartedText]}>Create on here</Text>
+          </TouchableOpacity>
+        </View>
       </View>
-    </View>
+    </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#f8f9fa',
+  },
   container: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
-    backgroundColor: '#f8f9fa',
   },
   heroImage: {
     width: '100%',

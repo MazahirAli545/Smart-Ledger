@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Image, Platform } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Image, Platform, SafeAreaView } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
@@ -47,115 +47,121 @@ const SetupWizardScreen: React.FC = () => {
   const [accountingSoftware, setAccountingSoftware] = useState('');
 
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: '#f6fafc' }} contentContainerStyle={{ flexGrow: 1 }}>
-      {/* Logo and App Name */}
-      <View style={styles.logoContainer}>
-        <Image source={LOGO} style={styles.logo} />
-        <Text style={styles.appName}>Smart Ledger</Text>
-      </View>
-      {/* Setup Wizard Badge */}
-      <View style={styles.badgeRow}>
-        <LinearGradient
-          colors={['#4f8cff', '#1ecb81']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 0 }}
-          style={styles.setupBadge}
-        >
-          <Text style={styles.setupBadgeText}>Setup Wizard</Text>
-        </LinearGradient>
-      </View>
-      {/* Progress Bar */}
-      <View style={styles.progressRow}>
-        <Text style={styles.progressText}>Step 1 of 5</Text>
-        <Text style={styles.progressTextRight}>20% Complete</Text>
-      </View>
-      <View style={styles.progressBarBg}>
-        <View style={styles.progressBarFill} />
-      </View>
-      {/* Card Container */}
-      <View style={styles.card}>
-        <Image source={{ uri: BUSINESS_ICON }} style={styles.businessIcon} />
-        <Text style={styles.cardHeading}>Tell us about your business</Text>
-        <Text style={styles.cardSubtext}>Help us customize Smart Ledger for your needs</Text>
-        {/* Business Size */}
-        <Text style={styles.label}>Business Size</Text>
-        <View style={styles.pickerWrapper}>
-          <Picker
-            selectedValue={businessSize}
-            onValueChange={setBusinessSize}
-            style={styles.picker}
-            itemStyle={styles.pickerItem}
-            dropdownIconColor="#8a94a6"
-          >
-            <Picker.Item label="Select business size" value="" color="#8a94a6" />
-            {businessSizes.map((size) => (
-              <Picker.Item key={size} label={size} value={size} />
-            ))}
-          </Picker>
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView contentContainerStyle={{ flexGrow: 1 }}>
+        {/* Logo and App Name */}
+        <View style={styles.logoContainer}>
+          <Image source={LOGO} style={styles.logo} />
+          <Text style={styles.appName}>Smart Ledger</Text>
         </View>
-        {/* Industry */}
-        <Text style={styles.label}>Industry</Text>
-        <View style={styles.pickerWrapper}>
-          <Picker
-            selectedValue={industry}
-            onValueChange={setIndustry}
-            style={styles.picker}
-            itemStyle={styles.pickerItem}
-            dropdownIconColor="#8a94a6"
-          >
-            <Picker.Item label="Select your industry" value="" color="#8a94a6" />
-            {industries.map((ind) => (
-              <Picker.Item key={ind} label={ind} value={ind} />
-            ))}
-          </Picker>
-        </View>
-        {/* Monthly Transaction Volume */}
-        <Text style={styles.label}>Monthly Transaction Volume</Text>
-        <View style={styles.pickerWrapper}>
-          <Picker
-            selectedValue={transactionVolume}
-            onValueChange={setTransactionVolume}
-            style={styles.picker}
-            itemStyle={styles.pickerItem}
-            dropdownIconColor="#8a94a6"
-          >
-            <Picker.Item label="Select transaction volume" value="" color="#8a94a6" />
-            {transactionVolumes.map((vol) => (
-              <Picker.Item key={vol} label={vol} value={vol} />
-            ))}
-          </Picker>
-        </View>
-        {/* Current Accounting Software */}
-        <Text style={styles.label}>Current Accounting Software (if any)</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="e.g., Tally, QuickBooks, Excel, None"
-          value={accountingSoftware}
-          onChangeText={setAccountingSoftware}
-          placeholderTextColor="#8a94a6"
-        />
-        {/* Navigation Buttons */}
-        <View style={styles.buttonRow}>
-          <TouchableOpacity style={[styles.prevButton, { opacity: 0.5 }]} disabled={true}>
-            <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
-          </TouchableOpacity>
+        {/* Setup Wizard Badge */}
+        <View style={styles.badgeRow}>
           <LinearGradient
             colors={['#4f8cff', '#1ecb81']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 0 }}
-            style={styles.gradientButton}
+            style={styles.setupBadge}
           >
-            <TouchableOpacity style={styles.nextButton} onPress={() => navigation.navigate('TeamSetup')}>
-              <Text style={styles.nextButtonText}>Next {'\u2192'}</Text>
-            </TouchableOpacity>
+            <Text style={styles.setupBadgeText}>Setup Wizard</Text>
           </LinearGradient>
         </View>
-      </View>
-    </ScrollView>
+        {/* Progress Bar */}
+        <View style={styles.progressRow}>
+          <Text style={styles.progressText}>Step 1 of 5</Text>
+          <Text style={styles.progressTextRight}>20% Complete</Text>
+        </View>
+        <View style={styles.progressBarBg}>
+          <View style={styles.progressBarFill} />
+        </View>
+        {/* Card Container */}
+        <View style={styles.card}>
+          <Image source={{ uri: BUSINESS_ICON }} style={styles.businessIcon} />
+          <Text style={styles.cardHeading}>Tell us about your business</Text>
+          <Text style={styles.cardSubtext}>Help us customize Smart Ledger for your needs</Text>
+          {/* Business Size */}
+          <Text style={styles.label}>Business Size</Text>
+          <View style={styles.pickerWrapper}>
+            <Picker
+              selectedValue={businessSize}
+              onValueChange={setBusinessSize}
+              style={styles.picker}
+              itemStyle={styles.pickerItem}
+              dropdownIconColor="#8a94a6"
+            >
+              <Picker.Item label="Select business size" value="" color="#8a94a6" />
+              {businessSizes.map((size) => (
+                <Picker.Item key={size} label={size} value={size} />
+              ))}
+            </Picker>
+          </View>
+          {/* Industry */}
+          <Text style={styles.label}>Industry</Text>
+          <View style={styles.pickerWrapper}>
+            <Picker
+              selectedValue={industry}
+              onValueChange={setIndustry}
+              style={styles.picker}
+              itemStyle={styles.pickerItem}
+              dropdownIconColor="#8a94a6"
+            >
+              <Picker.Item label="Select your industry" value="" color="#8a94a6" />
+              {industries.map((ind) => (
+                <Picker.Item key={ind} label={ind} value={ind} />
+              ))}
+            </Picker>
+          </View>
+          {/* Monthly Transaction Volume */}
+          <Text style={styles.label}>Monthly Transaction Volume</Text>
+          <View style={styles.pickerWrapper}>
+            <Picker
+              selectedValue={transactionVolume}
+              onValueChange={setTransactionVolume}
+              style={styles.picker}
+              itemStyle={styles.pickerItem}
+              dropdownIconColor="#8a94a6"
+            >
+              <Picker.Item label="Select transaction volume" value="" color="#8a94a6" />
+              {transactionVolumes.map((vol) => (
+                <Picker.Item key={vol} label={vol} value={vol} />
+              ))}
+            </Picker>
+          </View>
+          {/* Current Accounting Software */}
+          <Text style={styles.label}>Current Accounting Software (if any)</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="e.g., Tally, QuickBooks, Excel, None"
+            value={accountingSoftware}
+            onChangeText={setAccountingSoftware}
+            placeholderTextColor="#8a94a6"
+          />
+          {/* Navigation Buttons */}
+          <View style={styles.buttonRow}>
+            <TouchableOpacity style={[styles.prevButton, { opacity: 0.5 }]} disabled={true}>
+              <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
+            </TouchableOpacity>
+            <LinearGradient
+              colors={['#4f8cff', '#1ecb81']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.gradientButton}
+            >
+              <TouchableOpacity style={styles.nextButton} onPress={() => navigation.navigate('TeamSetup')}>
+                <Text style={styles.nextButtonText}>Next {'\u2192'}</Text>
+              </TouchableOpacity>
+            </LinearGradient>
+          </View>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#f6fafc',
+  },
   logoContainer: {
     flexDirection: 'row',
     alignItems: 'center',

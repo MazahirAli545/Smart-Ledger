@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Image, Platform } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Image, Platform, SafeAreaView } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
@@ -28,82 +28,88 @@ const TeamSetupScreen: React.FC = () => {
   const [teamSize, setTeamSize] = useState('');
 
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: '#f6fafc' }} contentContainerStyle={{ flexGrow: 1 }}>
-      {/* Logo and App Name */}
-      <View style={styles.logoContainer}>
-        <Image source={LOGO} style={styles.logo} />
-        <Text style={styles.appName}>Smart Ledger</Text>
-      </View>
-      {/* Setup Wizard Badge */}
-      <View style={styles.badgeRow}>
-        <LinearGradient
-          colors={['#4f8cff', '#1ecb81']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 0 }}
-          style={styles.setupBadge}
-        >
-          <Text style={styles.setupBadgeText}>Setup Wizard</Text>
-        </LinearGradient>
-      </View>
-      {/* Progress Bar */}
-      <View style={styles.progressRow}>
-        <Text style={styles.progressText}>Step 2 of 5</Text>
-        <Text style={styles.progressTextRight}>40% Complete</Text>
-      </View>
-      <View style={styles.progressBarBg}>
-        <View style={styles.progressBarFill} />
-      </View>
-      {/* Card Container */}
-      <View style={styles.card}>
-        <Image source={{ uri: TEAM_ICON }} style={styles.teamIcon} />
-        <Text style={styles.cardHeading}>Team Setup</Text>
-        <Text style={styles.cardSubtext}>Configure access for your team members</Text>
-        {/* Team Size */}
-        <Text style={styles.label}>Team Size</Text>
-        <View style={styles.pickerWrapper}>
-          <Picker
-            selectedValue={teamSize}
-            onValueChange={setTeamSize}
-            style={styles.picker}
-            itemStyle={styles.pickerItem}
-            dropdownIconColor="#8a94a6"
-          >
-            <Picker.Item label="How many people will use Smart Ledger?" value="" color="#8a94a6" />
-            {teamSizes.map((size) => (
-              <Picker.Item key={size} label={size} value={size} />
-            ))}
-          </Picker>
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView contentContainerStyle={{ flexGrow: 1 }}>
+        {/* Logo and App Name */}
+        <View style={styles.logoContainer}>
+          <Image source={LOGO} style={styles.logo} />
+          <Text style={styles.appName}>Smart Ledger</Text>
         </View>
-        {/* Team Roles Info Box */}
-        <View style={styles.infoBox}>
-          <Text style={styles.infoTitle}>Team Roles Available:</Text>
-          <Text style={styles.infoItem}><Text style={styles.bold}>• Admin:</Text> Full access to all features</Text>
-          <Text style={styles.infoItem}><Text style={styles.bold}>• Accountant:</Text> Manage transactions and reports</Text>
-          <Text style={styles.infoItem}><Text style={styles.bold}>• Data Entry:</Text> Add transactions only</Text>
-          <Text style={styles.infoItem}><Text style={styles.bold}>• Viewer:</Text> View reports only</Text>
-        </View>
-        {/* Navigation Buttons */}
-        <View style={styles.buttonRow}>
-          <TouchableOpacity style={styles.prevButton} onPress={() => navigation.navigate('SetupWizard')}>
-            <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
-          </TouchableOpacity>
+        {/* Setup Wizard Badge */}
+        <View style={styles.badgeRow}>
           <LinearGradient
             colors={['#4f8cff', '#1ecb81']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 0 }}
-            style={styles.gradientButton}
+            style={styles.setupBadge}
           >
-            <TouchableOpacity style={styles.nextButton} onPress={() => navigation.navigate('Preferences')}>
-              <Text style={styles.nextButtonText}>Next {'\u2192'}</Text>
-            </TouchableOpacity>
+            <Text style={styles.setupBadgeText}>Setup Wizard</Text>
           </LinearGradient>
         </View>
-      </View>
-    </ScrollView>
+        {/* Progress Bar */}
+        <View style={styles.progressRow}>
+          <Text style={styles.progressText}>Step 2 of 5</Text>
+          <Text style={styles.progressTextRight}>40% Complete</Text>
+        </View>
+        <View style={styles.progressBarBg}>
+          <View style={styles.progressBarFill} />
+        </View>
+        {/* Card Container */}
+        <View style={styles.card}>
+          <Image source={{ uri: TEAM_ICON }} style={styles.teamIcon} />
+          <Text style={styles.cardHeading}>Team Setup</Text>
+          <Text style={styles.cardSubtext}>Configure access for your team members</Text>
+          {/* Team Size */}
+          <Text style={styles.label}>Team Size</Text>
+          <View style={styles.pickerWrapper}>
+            <Picker
+              selectedValue={teamSize}
+              onValueChange={setTeamSize}
+              style={styles.picker}
+              itemStyle={styles.pickerItem}
+              dropdownIconColor="#8a94a6"
+            >
+              <Picker.Item label="How many people will use Smart Ledger?" value="" color="#8a94a6" />
+              {teamSizes.map((size) => (
+                <Picker.Item key={size} label={size} value={size} />
+              ))}
+            </Picker>
+          </View>
+          {/* Team Roles Info Box */}
+          <View style={styles.infoBox}>
+            <Text style={styles.infoTitle}>Team Roles Available:</Text>
+            <Text style={styles.infoItem}><Text style={styles.bold}>• Admin:</Text> Full access to all features</Text>
+            <Text style={styles.infoItem}><Text style={styles.bold}>• Accountant:</Text> Manage transactions and reports</Text>
+            <Text style={styles.infoItem}><Text style={styles.bold}>• Data Entry:</Text> Add transactions only</Text>
+            <Text style={styles.infoItem}><Text style={styles.bold}>• Viewer:</Text> View reports only</Text>
+          </View>
+          {/* Navigation Buttons */}
+          <View style={styles.buttonRow}>
+            <TouchableOpacity style={styles.prevButton} onPress={() => navigation.navigate('SetupWizard')}>
+              <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
+            </TouchableOpacity>
+            <LinearGradient
+              colors={['#4f8cff', '#1ecb81']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.gradientButton}
+            >
+              <TouchableOpacity style={styles.nextButton} onPress={() => navigation.navigate('Preferences')}>
+                <Text style={styles.nextButtonText}>Next {'\u2192'}</Text>
+              </TouchableOpacity>
+            </LinearGradient>
+          </View>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#f6fafc',
+  },
   logoContainer: {
     flexDirection: 'row',
     alignItems: 'center',
