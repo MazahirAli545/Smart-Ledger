@@ -1,9 +1,19 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Image, Platform, SafeAreaView } from 'react-native';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  Image,
+  Platform,
+  SafeAreaView,
+} from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
+import { useOnboarding } from '../../context/OnboardingContext';
 
 // Define the navigation param list
 type RootStackParamList = {
@@ -14,18 +24,30 @@ type RootStackParamList = {
 };
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
-const TEAM_ICON = 'https://img.icons8.com/ios-filled/100/4caf50/conference-call.png'; // Placeholder green team icon
+const TEAM_ICON =
+  'https://img.icons8.com/ios-filled/100/4caf50/conference-call.png'; // Placeholder green team icon
 
-const teamSizes = [
-  'Just me',
-  '2-5 people',
-  '6-10 people',
-  'More than 10',
-];
+const teamSizes = ['Just me', '2-5 people', '6-10 people', 'More than 10'];
 
 const TeamSetupScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
-  const [teamSize, setTeamSize] = useState('');
+  const { data, setData } = useOnboarding();
+  const [teamSize, setTeamSize] = useState(data.teamSize || '');
+
+  const handleTeamSizeChange = (value: string) => {
+    setTeamSize(value);
+    setData(prev => ({ ...prev, teamSize: value }));
+  };
+
+  const handleNext = () => {
+    // Save team size to context before navigating
+    setData(prev => ({
+      ...prev,
+      teamSize: teamSize || '2-5 people', // Default value if none selected
+    }));
+
+    navigation.navigate('Preferences');
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -58,19 +80,25 @@ const TeamSetupScreen: React.FC = () => {
         <View style={styles.card}>
           <Image source={{ uri: TEAM_ICON }} style={styles.teamIcon} />
           <Text style={styles.cardHeading}>Team Setup</Text>
-          <Text style={styles.cardSubtext}>Configure access for your team members</Text>
+          <Text style={styles.cardSubtext}>
+            Configure access for your team members
+          </Text>
           {/* Team Size */}
           <Text style={styles.label}>Team Size</Text>
           <View style={styles.pickerWrapper}>
             <Picker
               selectedValue={teamSize}
-              onValueChange={setTeamSize}
+              onValueChange={handleTeamSizeChange}
               style={styles.picker}
               itemStyle={styles.pickerItem}
               dropdownIconColor="#8a94a6"
             >
-              <Picker.Item label="How many people will use Smart Ledger?" value="" color="#8a94a6" />
-              {teamSizes.map((size) => (
+              <Picker.Item
+                label="How many people will use Smart Ledger?"
+                value=""
+                color="#8a94a6"
+              />
+              {teamSizes.map(size => (
                 <Picker.Item key={size} label={size} value={size} />
               ))}
             </Picker>
@@ -78,14 +106,28 @@ const TeamSetupScreen: React.FC = () => {
           {/* Team Roles Info Box */}
           <View style={styles.infoBox}>
             <Text style={styles.infoTitle}>Team Roles Available:</Text>
-            <Text style={styles.infoItem}><Text style={styles.bold}>• Admin:</Text> Full access to all features</Text>
-            <Text style={styles.infoItem}><Text style={styles.bold}>• Accountant:</Text> Manage transactions and reports</Text>
-            <Text style={styles.infoItem}><Text style={styles.bold}>• Data Entry:</Text> Add transactions only</Text>
-            <Text style={styles.infoItem}><Text style={styles.bold}>• Viewer:</Text> View reports only</Text>
+            <Text style={styles.infoItem}>
+              <Text style={styles.bold}>• Admin:</Text> Full access to all
+              features
+            </Text>
+            <Text style={styles.infoItem}>
+              <Text style={styles.bold}>• Accountant:</Text> Manage transactions
+              and reports
+            </Text>
+            <Text style={styles.infoItem}>
+              <Text style={styles.bold}>• Data Entry:</Text> Add transactions
+              only
+            </Text>
+            <Text style={styles.infoItem}>
+              <Text style={styles.bold}>• Viewer:</Text> View reports only
+            </Text>
           </View>
           {/* Navigation Buttons */}
           <View style={styles.buttonRow}>
-            <TouchableOpacity style={styles.prevButton} onPress={() => navigation.navigate('SetupWizard')}>
+            <TouchableOpacity
+              style={styles.prevButton}
+              onPress={() => navigation.navigate('SetupWizard')}
+            >
               <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
             </TouchableOpacity>
             <LinearGradient
@@ -94,7 +136,7 @@ const TeamSetupScreen: React.FC = () => {
               end={{ x: 1, y: 0 }}
               style={styles.gradientButton}
             >
-              <TouchableOpacity style={styles.nextButton} onPress={() => navigation.navigate('Preferences')}>
+              <TouchableOpacity style={styles.nextButton} onPress={handleNext}>
                 <Text style={styles.nextButtonText}>Next {'\u2192'}</Text>
               </TouchableOpacity>
             </LinearGradient>
@@ -318,4 +360,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default TeamSetupScreen; 
+export default TeamSetupScreen;

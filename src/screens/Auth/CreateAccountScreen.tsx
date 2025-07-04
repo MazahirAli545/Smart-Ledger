@@ -1,12 +1,29 @@
 import React, { useState, useRef } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Image, Platform, SafeAreaView } from 'react-native';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  Image,
+  Platform,
+  SafeAreaView,
+} from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import CheckBox from '@react-native-community/checkbox';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
-import { registerUser, RegisterPayload, sendOtpApi, verifyOtpApi } from '../../api';
+import {
+  registerUser,
+  RegisterPayload,
+  sendOtpApi,
+  verifyOtpApi,
+} from '../../api';
 import axios from 'axios';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useOnboarding } from '../../context/OnboardingContext';
 
 // Define the navigation param list
 type RootStackParamList = {
@@ -28,6 +45,7 @@ const businessTypes = [
 
 const CreateAccountScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
+  const { setData } = useOnboarding();
   const [businessName, setBusinessName] = useState('');
   const [ownerName, setOwnerName] = useState('');
   const [mobileNumber, setMobileNumber] = useState('');
@@ -66,7 +84,10 @@ const CreateAccountScreen: React.FC = () => {
     };
     try {
       const response = await sendOtpApi(payload);
-      const otpFromBackend = response?.data?.otp !== undefined && response?.data?.otp !== null ? String(response.data.otp) : null;
+      const otpFromBackend =
+        response?.data?.otp !== undefined && response?.data?.otp !== null
+          ? String(response.data.otp)
+          : null;
       setRegisterOtp(otpFromBackend);
       setBackendOtp(otpFromBackend);
       setOtpSent(true);
@@ -74,7 +95,9 @@ const CreateAccountScreen: React.FC = () => {
       setLoading(false);
     } catch (err: any) {
       setLoading(false);
-      setError(typeof err === 'string' ? err : err.message || 'Failed to send OTP');
+      setError(
+        typeof err === 'string' ? err : err.message || 'Failed to send OTP',
+      );
     }
   };
 
@@ -83,38 +106,25 @@ const CreateAccountScreen: React.FC = () => {
     setOtp('');
   };
 
-  // const handleVerify = async () => {
-  //   setLoading(true);
-  //   setError(null);
-  //   try {
-  //     const verifyResponse = await verifyOtpApi({ mobileNumber, otp });
-  //     if (verifyResponse && verifyResponse.code === 200) {
-  //       setError(null);
-  //       setLoading(false);
-  //       navigation.navigate('SetupWizard');
-  //     } else if (verifyResponse && verifyResponse.message) {
-  //       setError(verifyResponse.message);
-  //       setLoading(false);
-  //     } else {
-  //       setError('Invalid OTP');
-  //       setLoading(false);
-  //     }
-  //   } catch (err: any) {
-  //     setLoading(false);
-  //     setError(typeof err === 'string' ? err : err.message || 'Invalid OTP');
-  //   }
-  // };
-
-  // Button enabled only if all required fields are filled and checkbox is checked
- 
   const handleVerify = async () => {
     setLoading(true);
     setError(null);
     try {
       // 1. First verify the OTP
       const verifyResponse = await verifyOtpApi({ mobileNumber, otp });
-      
+
       if (verifyResponse?.code === 200) {
+        // Store mobile number in AsyncStorage
+        try {
+          await AsyncStorage.setItem('userMobileNumber', mobileNumber);
+          console.log('Mobile number stored in AsyncStorage:', mobileNumber);
+
+          // Update onboarding context with mobile number
+          setData(prev => ({ ...prev, mobileNumber }));
+        } catch (storageError) {
+          console.error('Error storing mobile number:', storageError);
+        }
+
         // 2. Try to register, but don't let registration failure block navigation
         try {
           await registerUser({
@@ -125,30 +135,53 @@ const CreateAccountScreen: React.FC = () => {
             gstNumber,
           });
         } catch (registerError) {
-          console.warn('Registration API returned error but user may have been created:', registerError);
+          console.warn(
+            'Registration API returned error but user may have been created:',
+            registerError,
+          );
         }
-        
+
         // 3. Navigate to SetupWizard regardless of registration API response
         navigation.navigate('SetupWizard');
       } else {
         setError(verifyResponse?.message || 'Invalid OTP');
       }
     } catch (err: any) {
-      setError(typeof err === 'string' ? err : err.message || 'OTP verification failed');
+      setError(
+        typeof err === 'string'
+          ? err
+          : err.message || 'OTP verification failed',
+      );
     } finally {
       setLoading(false);
     }
   };
- 
-  const canSendOtp = businessName && ownerName && mobileNumber && businessType && agree && !otpSent;
-  const canVerify = businessName && ownerName && mobileNumber && businessType && agree && otpSent && otp.length === 6;
+
+  const canSendOtp =
+    businessName &&
+    ownerName &&
+    mobileNumber &&
+    businessType &&
+    agree &&
+    !otpSent;
+  const canVerify =
+    businessName &&
+    ownerName &&
+    mobileNumber &&
+    businessType &&
+    agree &&
+    otpSent &&
+    otp.length === 6;
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={{ flexGrow: 1 }}>
         {/* Top Bar */}
         <View style={styles.topBar}>
-          <TouchableOpacity style={{flexDirection:'row',alignItems:'center'}} onPress={() => navigation.goBack()}>
+          <TouchableOpacity
+            style={{ flexDirection: 'row', alignItems: 'center' }}
+            onPress={() => navigation.goBack()}
+          >
             <Text style={styles.backArrow}>{'\u2190'}</Text>
             <Text style={styles.backText}>Back to Home</Text>
           </TouchableOpacity>
@@ -160,15 +193,22 @@ const CreateAccountScreen: React.FC = () => {
         </View>
         {/* Title and Subtitle */}
         <Text style={styles.title}>Create Your Account</Text>
-        <Text style={styles.subtitle}>Start your journey to smarter accounting</Text>
+        <Text style={styles.subtitle}>
+          Start your journey to smarter accounting
+        </Text>
         {/* Card Container */}
         <View style={styles.card}>
           <Text style={styles.cardHeading}>Business Registration</Text>
-          <Text style={styles.cardSubtext}>Tell us about your business to get started</Text>
+          <Text style={styles.cardSubtext}>
+            Tell us about your business to get started
+          </Text>
           {/* Business Name */}
           <Text style={styles.label}>Business Name *</Text>
           <TextInput
-            style={[styles.input, activeField === 'businessName' && styles.inputActive]}
+            style={[
+              styles.input,
+              activeField === 'businessName' && styles.inputActive,
+            ]}
             placeholder="Enter your business name"
             value={businessName}
             onChangeText={setBusinessName}
@@ -179,7 +219,10 @@ const CreateAccountScreen: React.FC = () => {
           {/* Owner Name */}
           <Text style={styles.label}>Owner Name *</Text>
           <TextInput
-            style={[styles.input, activeField === 'ownerName' && styles.inputActive]}
+            style={[
+              styles.input,
+              activeField === 'ownerName' && styles.inputActive,
+            ]}
             placeholder="Enter owner's full name"
             value={ownerName}
             onChangeText={setOwnerName}
@@ -190,7 +233,10 @@ const CreateAccountScreen: React.FC = () => {
           {/* Mobile Number */}
           <Text style={styles.label}>Mobile Number *</Text>
           <TextInput
-            style={[styles.input, activeField === 'mobileNumber' && styles.inputActive]}
+            style={[
+              styles.input,
+              activeField === 'mobileNumber' && styles.inputActive,
+            ]}
             placeholder="Enter your mobile number"
             value={mobileNumber}
             onChangeText={setMobileNumber}
@@ -204,7 +250,10 @@ const CreateAccountScreen: React.FC = () => {
             <>
               <Text style={styles.label}>Enter OTP *</Text>
               <TextInput
-                style={[styles.input, activeField === 'otp' && styles.inputActive]}
+                style={[
+                  styles.input,
+                  activeField === 'otp' && styles.inputActive,
+                ]}
                 placeholder="Enter 6-digit OTP"
                 value={otp}
                 onChangeText={setOtp}
@@ -215,14 +264,25 @@ const CreateAccountScreen: React.FC = () => {
                 onBlur={() => setActiveField('')}
               />
               <Text style={styles.otpInfo}>
-                OTP sent to {mobileNumber}  {timer > 0 ? `Resend in ${timer}s` : ''}
+                OTP sent to {mobileNumber}{' '}
+                {timer > 0 ? `Resend in ${timer}s` : ''}
                 {timer === 0 && (
-                  <Text style={styles.resendOtp} onPress={handleResendOtp}>  Resend</Text>
+                  <Text style={styles.resendOtp} onPress={handleResendOtp}>
+                    {' '}
+                    Resend
+                  </Text>
                 )}
               </Text>
               {/* Show register API OTP below Resend button for testing */}
               {registerOtp && (
-                <Text style={{ color: 'red', fontWeight: 'bold', marginTop: 4, textAlign: 'center' }}>
+                <Text
+                  style={{
+                    color: 'red',
+                    fontWeight: 'bold',
+                    marginTop: 4,
+                    textAlign: 'center',
+                  }}
+                >
                   [Register API OTP: {registerOtp}]
                 </Text>
               )}
@@ -230,7 +290,12 @@ const CreateAccountScreen: React.FC = () => {
           )}
           {/* Business Type */}
           <Text style={styles.label}>Business Type *</Text>
-          <View style={[styles.pickerWrapper, activeField === 'businessType' && styles.inputActive]}>
+          <View
+            style={[
+              styles.pickerWrapper,
+              activeField === 'businessType' && styles.inputActive,
+            ]}
+          >
             <Picker
               selectedValue={businessType}
               onValueChange={setBusinessType}
@@ -240,8 +305,12 @@ const CreateAccountScreen: React.FC = () => {
               onFocus={() => setActiveField('businessType')}
               onBlur={() => setActiveField('')}
             >
-              <Picker.Item label="Select business type" value="" color="#8a94a6" />
-              {businessTypes.map((type) => (
+              <Picker.Item
+                label="Select business type"
+                value=""
+                color="#8a94a6"
+              />
+              {businessTypes.map(type => (
                 <Picker.Item key={type} label={type} value={type} />
               ))}
             </Picker>
@@ -249,7 +318,10 @@ const CreateAccountScreen: React.FC = () => {
           {/* GST Number */}
           <Text style={styles.label}>GST Number (Optional)</Text>
           <TextInput
-            style={[styles.input, activeField === 'gstNumber' && styles.inputActive]}
+            style={[
+              styles.input,
+              activeField === 'gstNumber' && styles.inputActive,
+            ]}
             placeholder="Enter GST number if applicable"
             value={gstNumber}
             onChangeText={setGstNumber}
@@ -267,27 +339,55 @@ const CreateAccountScreen: React.FC = () => {
               style={styles.checkbox}
             />
             <Text style={styles.termsText}>
-              I agree to the{' '}
-              <Text style={styles.link}>Terms of Service</Text> and{' '}
-              <Text style={styles.link}>Privacy Policy</Text>
+              I agree to the <Text style={styles.link}>Terms of Service</Text>{' '}
+              and <Text style={styles.link}>Privacy Policy</Text>
             </Text>
           </View>
           {/* Show error message if any */}
-          {error && <Text style={{ color: 'red', marginBottom: 8 }}>{error}</Text>}
+          {error && (
+            <Text style={{ color: 'red', marginBottom: 8 }}>{error}</Text>
+          )}
           {/* Send OTP / Verify Button */}
           <LinearGradient
-            colors={otpSent ? (canVerify ? ['#4f8cff', '#1ecb81'] : ['#dbeafe', '#e0f7ef']) : (canSendOtp ? ['#4f8cff', '#1ecb81'] : ['#dbeafe', '#e0f7ef'])}
+            colors={
+              otpSent
+                ? canVerify
+                  ? ['#4f8cff', '#1ecb81']
+                  : ['#dbeafe', '#e0f7ef']
+                : canSendOtp
+                ? ['#4f8cff', '#1ecb81']
+                : ['#dbeafe', '#e0f7ef']
+            }
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 0 }}
             style={styles.gradientButton}
           >
             <TouchableOpacity
               style={styles.button}
-              disabled={otpSent ? !canVerify || loading : !canSendOtp || loading}
+              disabled={
+                otpSent ? !canVerify || loading : !canSendOtp || loading
+              }
               onPress={otpSent ? handleVerify : handleSendOtp}
             >
-              <Text style={[styles.buttonText, {opacity: otpSent ? (canVerify ? 1 : 0.5) : (canSendOtp ? 1 : 0.5)}]}>
-                {loading ? 'Registering...' : (otpSent ? 'Verify & Create Account' : 'Send OTP')}
+              <Text
+                style={[
+                  styles.buttonText,
+                  {
+                    opacity: otpSent
+                      ? canVerify
+                        ? 1
+                        : 0.5
+                      : canSendOtp
+                      ? 1
+                      : 0.5,
+                  },
+                ]}
+              >
+                {loading
+                  ? 'Registering...'
+                  : otpSent
+                  ? 'Verify & Create Account'
+                  : 'Send OTP'}
               </Text>
             </TouchableOpacity>
           </LinearGradient>

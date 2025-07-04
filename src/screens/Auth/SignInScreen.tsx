@@ -1,8 +1,21 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, Image, Keyboard, TouchableWithoutFeedback, SafeAreaView } from 'react-native';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  Image,
+  Keyboard,
+  TouchableWithoutFeedback,
+  SafeAreaView,
+  Alert,
+} from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
+import { BASE_URL } from '../../api';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
 
@@ -11,6 +24,7 @@ type RootStackParamList = {
   SignIn: undefined;
   SetupWizard: undefined;
   CreateAccount: undefined;
+  Dashboard: undefined;
 };
 
 const SignInScreen: React.FC = () => {
@@ -20,6 +34,9 @@ const SignInScreen: React.FC = () => {
   const [otp, setOtp] = useState('');
   const [timer, setTimer] = useState(30);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [backendOtp, setBackendOtp] = useState<string | null>(null);
 
   useEffect(() => {
     if (step === 'OTP' && timer > 0) {
@@ -30,27 +47,123 @@ const SignInScreen: React.FC = () => {
     };
   }, [step, timer]);
 
-  const handleSendOtp = () => {
+  const handleSendOtp = async () => {
     if (mobile.length === 10) {
-      setStep('OTP');
-      setTimer(30);
+      setLoading(true);
+      setError(null);
+
+      try {
+        const response = await fetch(`${BASE_URL}/user/login/request-otp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ mobileNumber: mobile }),
+        });
+
+        const result = await response.json();
+
+        if (response.ok && result.otp) {
+          setBackendOtp(result.otp);
+          setStep('OTP');
+          setTimer(30);
+        } else {
+          throw new Error(result.message || 'Failed to send OTP');
+        }
+      } catch (err: any) {
+        setError(err.message || 'Failed to send OTP');
+        Alert.alert('Error', err.message || 'Failed to send OTP');
+      } finally {
+        setLoading(false);
+      }
     }
   };
 
-  const handleResend = () => {
-    setTimer(30);
-    setOtp('');
+  const handleResend = async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch(`${BASE_URL}/user/login/request-otp`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ mobileNumber: mobile }),
+      });
+
+      const result = await response.json();
+
+      if (response.ok && result.otp) {
+        setBackendOtp(result.otp);
+        setTimer(30);
+        setOtp('');
+      } else {
+        throw new Error(result.message || 'Failed to resend OTP');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to resend OTP');
+      Alert.alert('Error', err.message || 'Failed to resend OTP');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleVerify = () => {
-    // Add your verify logic here
+  const handleVerify = async () => {
+    if (otp.length === 6) {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const response = await fetch(`${BASE_URL}/user/login/verify-otp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            mobileNumber: mobile,
+            otp: otp,
+          }),
+        });
+
+        const result = await response.json();
+
+        if (response.ok && result.success) {
+          // Save tokens to AsyncStorage
+          await AsyncStorage.setItem('accessToken', result.accessToken);
+          await AsyncStorage.setItem('refreshToken', result.refreshToken);
+          await AsyncStorage.setItem('userMobileNumber', mobile);
+
+          // Check if profile is complete
+          if (result.profileComplete) {
+            Alert.alert('Success', 'Login successful!', [
+              { text: 'OK', onPress: () => navigation.navigate('Dashboard') },
+            ]);
+          }
+          // } else {
+          //   // If profile is not complete, navigate to setup wizard
+          //   navigation.navigate('Dashboard');
+          // }
+        } else {
+          throw new Error(result.message || 'Invalid OTP');
+        }
+      } catch (err: any) {
+        setError(err.message || 'Failed to verify OTP');
+        Alert.alert('Error', err.message || 'Failed to verify OTP');
+      } finally {
+        setLoading(false);
+      }
+    }
   };
 
   return (
     <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.container}>
-          <TouchableOpacity style={styles.backRow} onPress={() => navigation.goBack()}>
+          <TouchableOpacity
+            style={styles.backRow}
+            onPress={() => navigation.goBack()}
+          >
             <Text style={styles.backText}>{'\u2190'} Back to Home</Text>
           </TouchableOpacity>
           <View style={styles.logoRow}>
@@ -61,7 +174,9 @@ const SignInScreen: React.FC = () => {
           <Text style={styles.subtitle}>Sign in to your account</Text>
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Sign In</Text>
-            <Text style={styles.cardSubtitle}>Enter your credentials to access your account</Text>
+            <Text style={styles.cardSubtitle}>
+              Enter your credentials to access your account
+            </Text>
             {step === 'MOBILE' ? (
               <>
                 <Text style={styles.label}>Mobile Number</Text>
@@ -83,9 +198,11 @@ const SignInScreen: React.FC = () => {
                   <TouchableOpacity
                     style={styles.button}
                     onPress={handleSendOtp}
-                    disabled={mobile.length !== 10}
+                    disabled={mobile.length !== 10 || loading}
                   >
-                    <Text style={styles.buttonText}>Send OTP</Text>
+                    <Text style={styles.buttonText}>
+                      {loading ? 'Sending...' : 'Send OTP'}
+                    </Text>
                   </TouchableOpacity>
                 </LinearGradient>
               </>
@@ -102,11 +219,27 @@ const SignInScreen: React.FC = () => {
                   maxLength={6}
                 />
                 <Text style={styles.otpInfo}>
-                  OTP sent to {mobile}  {timer > 0 ? `Resend in ${timer}s` : ''}
+                  OTP sent to {mobile} {timer > 0 ? `Resend in ${timer}s` : ''}
                   {timer === 0 && (
-                    <Text style={styles.resend} onPress={handleResend}>  Resend</Text>
+                    <Text style={styles.resend} onPress={handleResend}>
+                      {' '}
+                      Resend
+                    </Text>
                   )}
                 </Text>
+                {/* Show OTP for testing purposes */}
+                {backendOtp && (
+                  <Text
+                    style={{
+                      color: 'red',
+                      fontWeight: 'bold',
+                      marginTop: 4,
+                      textAlign: 'center',
+                    }}
+                  >
+                    [API OTP: {backendOtp}]
+                  </Text>
+                )}
                 <LinearGradient
                   colors={['#4f8cff', '#1ecb81']}
                   start={{ x: 0, y: 0 }}
@@ -116,16 +249,24 @@ const SignInScreen: React.FC = () => {
                   <TouchableOpacity
                     style={styles.button}
                     onPress={handleVerify}
-                    disabled={otp.length !== 6}
+                    disabled={otp.length !== 6 || loading}
                   >
-                    <Text style={styles.buttonText}>Verify & Sign In</Text>
+                    <Text style={styles.buttonText}>
+                      {loading ? 'Verifying...' : 'Verify & Sign In'}
+                    </Text>
                   </TouchableOpacity>
                 </LinearGradient>
               </>
             )}
+            {error && <Text style={styles.errorText}>{error}</Text>}
             <Text style={styles.bottomText}>
               Don't have an account?{' '}
-              <Text style={styles.link} onPress={() => navigation.navigate('CreateAccount')}>Create one here</Text>
+              <Text
+                style={styles.link}
+                onPress={() => navigation.navigate('CreateAccount')}
+              >
+                Create one here
+              </Text>
             </Text>
           </View>
         </View>
@@ -283,6 +424,13 @@ const styles = StyleSheet.create({
     color: '#4f8cff',
     fontWeight: 'bold',
   },
+  errorText: {
+    color: '#e53e3e',
+    fontSize: 14,
+    marginTop: 8,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
 });
 
-export default SignInScreen; 
+export default SignInScreen;

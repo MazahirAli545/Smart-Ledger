@@ -105,6 +105,19 @@ android {
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
         }
     }
+
+    // Add this block for react-native-vector-icons
+    packagingOptions {
+        pickFirst 'lib/x86/libjsc.so'
+        pickFirst 'lib/x86_64/libjsc.so'
+        pickFirst 'lib/arm64-v8a/libjsc.so'
+        pickFirst 'lib/arm64-v8a/libjsc.so'
+        pickFirst 'lib/x86/libhermes.so'
+        pickFirst 'lib/x86_64/libhermes.so'
+        pickFirst 'lib/arm64-v8a/libhermes.so'
+        pickFirst 'lib/armeabi-v7a/libhermes.so'
+        exclude 'META-INF/DEPENDENCIES'
+    }
 }
 
 dependencies {
@@ -116,4 +129,7 @@ dependencies {
     } else {
         implementation jscFlavor
     }
+    
+    // Add this line for react-native-vector-icons
+    implementation project(':react-native-vector-icons')
 }

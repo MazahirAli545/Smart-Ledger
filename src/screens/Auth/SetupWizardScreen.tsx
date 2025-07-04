@@ -1,9 +1,21 @@
-import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Image, Platform, SafeAreaView } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  Image,
+  Platform,
+  SafeAreaView,
+} from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
+import { useOnboarding } from '../../context/OnboardingContext';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Define the navigation param list
 type RootStackParamList = {
@@ -41,10 +53,78 @@ const transactionVolumes = [
 
 const SetupWizardScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
-  const [businessSize, setBusinessSize] = useState('');
-  const [industry, setIndustry] = useState('');
-  const [transactionVolume, setTransactionVolume] = useState('');
-  const [accountingSoftware, setAccountingSoftware] = useState('');
+  const { data, setData } = useOnboarding();
+  const [businessSize, setBusinessSize] = useState(data.businessSize || '');
+  const [industry, setIndustry] = useState(data.industry || '');
+  const [transactionVolume, setTransactionVolume] = useState(
+    data.monthlyTransactionVolume || '',
+  );
+  const [accountingSoftware, setAccountingSoftware] = useState(
+    data.currentAccountingSoftware || '',
+  );
+  const [mobileNumber, setMobileNumber] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Check for mobile number in context or AsyncStorage
+    const checkMobileNumber = async () => {
+      if (data.mobileNumber) {
+        setMobileNumber(data.mobileNumber);
+      } else {
+        try {
+          const storedMobileNumber = await AsyncStorage.getItem(
+            'userMobileNumber',
+          );
+          if (storedMobileNumber) {
+            setMobileNumber(storedMobileNumber);
+            setData(prev => ({ ...prev, mobileNumber: storedMobileNumber }));
+            console.log(
+              'Mobile number retrieved from AsyncStorage:',
+              storedMobileNumber,
+            );
+          } else {
+            console.log('No mobile number found in AsyncStorage');
+          }
+        } catch (error) {
+          console.error('Error retrieving mobile number:', error);
+        }
+      }
+    };
+
+    checkMobileNumber();
+  }, [data.mobileNumber, setData]);
+
+  const handleBusinessSizeChange = (value: string) => {
+    setBusinessSize(value);
+    setData(prev => ({ ...prev, businessSize: value }));
+  };
+
+  const handleIndustryChange = (value: string) => {
+    setIndustry(value);
+    setData(prev => ({ ...prev, industry: value }));
+  };
+
+  const handleTransactionVolumeChange = (value: string) => {
+    setTransactionVolume(value);
+    setData(prev => ({ ...prev, monthlyTransactionVolume: value }));
+  };
+
+  const handleAccountingSoftwareChange = (value: string) => {
+    setAccountingSoftware(value);
+    setData(prev => ({ ...prev, currentAccountingSoftware: value }));
+  };
+
+  const handleNext = () => {
+    // Save all data to context before navigating
+    setData(prev => ({
+      ...prev,
+      businessSize,
+      industry,
+      monthlyTransactionVolume: transactionVolume,
+      currentAccountingSoftware: accountingSoftware,
+    }));
+
+    navigation.navigate('TeamSetup');
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -77,19 +157,36 @@ const SetupWizardScreen: React.FC = () => {
         <View style={styles.card}>
           <Image source={{ uri: BUSINESS_ICON }} style={styles.businessIcon} />
           <Text style={styles.cardHeading}>Tell us about your business</Text>
-          <Text style={styles.cardSubtext}>Help us customize Smart Ledger for your needs</Text>
+          <Text style={styles.cardSubtext}>
+            Help us customize Smart Ledger for your needs
+          </Text>
+
+          {/* Mobile Number Status */}
+          {mobileNumber && (
+            <View style={styles.mobileStatusContainer}>
+              <Text style={styles.mobileStatusLabel}>
+                Mobile Number:{' '}
+                <Text style={styles.mobileStatusValue}>{mobileNumber}</Text>
+              </Text>
+            </View>
+          )}
+
           {/* Business Size */}
           <Text style={styles.label}>Business Size</Text>
           <View style={styles.pickerWrapper}>
             <Picker
               selectedValue={businessSize}
-              onValueChange={setBusinessSize}
+              onValueChange={handleBusinessSizeChange}
               style={styles.picker}
               itemStyle={styles.pickerItem}
               dropdownIconColor="#8a94a6"
             >
-              <Picker.Item label="Select business size" value="" color="#8a94a6" />
-              {businessSizes.map((size) => (
+              <Picker.Item
+                label="Select business size"
+                value=""
+                color="#8a94a6"
+              />
+              {businessSizes.map(size => (
                 <Picker.Item key={size} label={size} value={size} />
               ))}
             </Picker>
@@ -99,13 +196,17 @@ const SetupWizardScreen: React.FC = () => {
           <View style={styles.pickerWrapper}>
             <Picker
               selectedValue={industry}
-              onValueChange={setIndustry}
+              onValueChange={handleIndustryChange}
               style={styles.picker}
               itemStyle={styles.pickerItem}
               dropdownIconColor="#8a94a6"
             >
-              <Picker.Item label="Select your industry" value="" color="#8a94a6" />
-              {industries.map((ind) => (
+              <Picker.Item
+                label="Select your industry"
+                value=""
+                color="#8a94a6"
+              />
+              {industries.map(ind => (
                 <Picker.Item key={ind} label={ind} value={ind} />
               ))}
             </Picker>
@@ -115,13 +216,17 @@ const SetupWizardScreen: React.FC = () => {
           <View style={styles.pickerWrapper}>
             <Picker
               selectedValue={transactionVolume}
-              onValueChange={setTransactionVolume}
+              onValueChange={handleTransactionVolumeChange}
               style={styles.picker}
               itemStyle={styles.pickerItem}
               dropdownIconColor="#8a94a6"
             >
-              <Picker.Item label="Select transaction volume" value="" color="#8a94a6" />
-              {transactionVolumes.map((vol) => (
+              <Picker.Item
+                label="Select transaction volume"
+                value=""
+                color="#8a94a6"
+              />
+              {transactionVolumes.map(vol => (
                 <Picker.Item key={vol} label={vol} value={vol} />
               ))}
             </Picker>
@@ -132,12 +237,15 @@ const SetupWizardScreen: React.FC = () => {
             style={styles.input}
             placeholder="e.g., Tally, QuickBooks, Excel, None"
             value={accountingSoftware}
-            onChangeText={setAccountingSoftware}
+            onChangeText={handleAccountingSoftwareChange}
             placeholderTextColor="#8a94a6"
           />
           {/* Navigation Buttons */}
           <View style={styles.buttonRow}>
-            <TouchableOpacity style={[styles.prevButton, { opacity: 0.5 }]} disabled={true}>
+            <TouchableOpacity
+              style={[styles.prevButton, { opacity: 0.5 }]}
+              disabled={true}
+            >
               <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
             </TouchableOpacity>
             <LinearGradient
@@ -146,7 +254,7 @@ const SetupWizardScreen: React.FC = () => {
               end={{ x: 1, y: 0 }}
               style={styles.gradientButton}
             >
-              <TouchableOpacity style={styles.nextButton} onPress={() => navigation.navigate('TeamSetup')}>
+              <TouchableOpacity style={styles.nextButton} onPress={handleNext}>
                 <Text style={styles.nextButtonText}>Next {'\u2192'}</Text>
               </TouchableOpacity>
             </LinearGradient>
@@ -207,6 +315,23 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     letterSpacing: 0.2,
   },
+  mobileStatusContainer: {
+    backgroundColor: '#f0f9ff',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 16,
+    width: '100%',
+    borderWidth: 1,
+    borderColor: '#bfdbfe',
+  },
+  mobileStatusLabel: {
+    fontSize: 14,
+    color: '#222',
+    fontWeight: '500',
+  },
+  mobileStatusValue: {
+    fontWeight: 'bold',
+  },
   card: {
     backgroundColor: '#fff',
     borderRadius: 16,
@@ -251,44 +376,71 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-start',
   },
   pickerWrapper: {
+    width: '100%',
     borderColor: '#e3e7ee',
     borderWidth: 1,
-    borderRadius: 10,
+    borderRadius: 8,
+    marginBottom: 2,
     backgroundColor: '#fff',
-    marginBottom: 12,
     height: 52,
     justifyContent: 'center',
     overflow: 'hidden',
-    width: '100%',
   },
   picker: {
     width: '100%',
     height: 52,
     color: '#222',
-    fontSize: 14,
-    paddingVertical: 6,
-    backgroundColor: '#fff',
+    fontSize: 15,
+    paddingVertical: 0,
+    marginTop: Platform.OS === 'android' ? -2 : 0,
   },
   pickerItem: {
     height: 52,
-    fontSize: 14,
+    fontSize: 15,
     color: '#222',
     textAlignVertical: 'center',
-    backgroundColor: '#fff',
   },
   input: {
     width: '100%',
-    height: 52,
+    height: 48,
     borderColor: '#e3e7ee',
     borderWidth: 1,
-    borderRadius: 10,
+    borderRadius: 8,
     paddingHorizontal: 16,
-    paddingVertical: 6,
-    marginBottom: 12,
+    marginBottom: 2,
     backgroundColor: '#fff',
-    fontSize: 14,
+    fontSize: 15,
     color: '#222',
-    textAlignVertical: 'center',
+  },
+  progressRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginHorizontal: 24,
+    marginBottom: 2,
+  },
+  progressText: {
+    color: '#222',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  progressTextRight: {
+    color: '#888',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  progressBarBg: {
+    height: 6,
+    backgroundColor: '#e3e7ee',
+    borderRadius: 4,
+    marginHorizontal: 24,
+    marginBottom: 18,
+  },
+  progressBarFill: {
+    height: 6,
+    width: '20%',
+    backgroundColor: '#222',
+    borderRadius: 4,
   },
   buttonRow: {
     flexDirection: 'row',
@@ -329,36 +481,6 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     textAlign: 'center',
   },
-  progressRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginHorizontal: 24,
-    marginBottom: 2,
-  },
-  progressText: {
-    color: '#222',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  progressTextRight: {
-    color: '#888',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  progressBarBg: {
-    height: 6,
-    backgroundColor: '#e3e7ee',
-    borderRadius: 4,
-    marginHorizontal: 24,
-    marginBottom: 18,
-  },
-  progressBarFill: {
-    height: 6,
-    width: '20%',
-    backgroundColor: '#222',
-    borderRadius: 4,
-  },
 });
 
-export default SetupWizardScreen; 
+export default SetupWizardScreen;
