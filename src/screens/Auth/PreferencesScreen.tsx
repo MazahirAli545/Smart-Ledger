@@ -1,9 +1,19 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Image, Platform, SafeAreaView } from 'react-native';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  Image,
+  Platform,
+  SafeAreaView,
+} from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
+import { useOnboarding } from '../../context/OnboardingContext';
 
 // Define the navigation param list
 type RootStackParamList = {
@@ -17,7 +27,8 @@ const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launche
 const MIC_ICON = 'https://img.icons8.com/ios-filled/100/9b5de5/microphone.png'; // Placeholder purple mic icon
 const VOICE_ICON = 'https://img.icons8.com/ios-filled/24/9b5de5/microphone.png';
 const OCR_ICON = 'https://img.icons8.com/ios-filled/24/9b5de5/camera--v1.png';
-const WHATSAPP_ICON = 'https://img.icons8.com/ios-filled/24/9b5de5/whatsapp.png';
+const WHATSAPP_ICON =
+  'https://img.icons8.com/ios-filled/24/9b5de5/whatsapp.png';
 const CHECK_ICON = 'https://img.icons8.com/ios-filled/24/4f8cff/checkmark.png';
 
 const languages = [
@@ -32,20 +43,46 @@ const languages = [
 ];
 
 const features = [
-  { key: 'voice', label: 'Voice Input', icon: VOICE_ICON },
-  { key: 'ocr', label: 'OCR Scanning', icon: OCR_ICON },
-  { key: 'whatsapp', label: 'WhatsApp Integration', icon: WHATSAPP_ICON },
+  { key: 'Voice Input', label: 'Voice Input', icon: VOICE_ICON },
+  { key: 'OCR Scanning', label: 'OCR Scanning', icon: OCR_ICON },
+  {
+    key: 'WhatsApp Integration',
+    label: 'WhatsApp Integration',
+    icon: WHATSAPP_ICON,
+  },
 ];
 
 const PreferencesScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
-  const [language, setLanguage] = useState('');
-  const [selectedFeatures, setSelectedFeatures] = useState<string[]>([]);
+  const { data, setData } = useOnboarding();
+  const [language, setLanguage] = useState(data.preferredLanguage || '');
+  const [selectedFeatures, setSelectedFeatures] = useState<string[]>(
+    data.features || [],
+  );
 
   const toggleFeature = (key: string) => {
-    setSelectedFeatures((prev) =>
-      prev.includes(key) ? prev.filter((f) => f !== key) : [...prev, key]
-    );
+    const newFeatures = selectedFeatures.includes(key)
+      ? selectedFeatures.filter(f => f !== key)
+      : [...selectedFeatures, key];
+
+    setSelectedFeatures(newFeatures);
+    setData(prev => ({ ...prev, features: newFeatures }));
+  };
+
+  const handleLanguageChange = (value: string) => {
+    setLanguage(value);
+    setData(prev => ({ ...prev, preferredLanguage: value }));
+  };
+
+  const handleNext = () => {
+    // Save preferences to context before navigating
+    setData(prev => ({
+      ...prev,
+      preferredLanguage: language || 'English',
+      features: selectedFeatures,
+    }));
+
+    navigation.navigate('BankDetailsScreen');
   };
 
   return (
@@ -56,8 +93,8 @@ const PreferencesScreen: React.FC = () => {
           <Image source={LOGO} style={styles.logo} />
           <Text style={styles.appName}>Smart Ledger</Text>
         </View>
-         {/* Setup Wizard Badge */}
-         <View style={styles.badgeRow}>
+        {/* Setup Wizard Badge */}
+        <View style={styles.badgeRow}>
           <LinearGradient
             colors={['#4f8cff', '#1ecb81']}
             start={{ x: 0, y: 0 }}
@@ -79,45 +116,65 @@ const PreferencesScreen: React.FC = () => {
         <View style={styles.card}>
           <Image source={{ uri: MIC_ICON }} style={styles.micIcon} />
           <Text style={styles.cardHeading}>Preferences</Text>
-          <Text style={styles.cardSubtext}>Customize your Smart Ledger experience</Text>
+          <Text style={styles.cardSubtext}>
+            Customize your Smart Ledger experience
+          </Text>
           {/* Preferred Language */}
           <Text style={styles.label}>Preferred Language</Text>
           <View style={styles.pickerWrapper}>
             <Picker
               selectedValue={language}
-              onValueChange={setLanguage}
+              onValueChange={handleLanguageChange}
               style={styles.picker}
               itemStyle={styles.pickerItem}
               dropdownIconColor="#8a94a6"
             >
-              <Picker.Item label="Select your preferred language" value="" color="#8a94a6" />
-              {languages.map((lang) => (
+              <Picker.Item
+                label="Select your preferred language"
+                value=""
+                color="#8a94a6"
+              />
+              {languages.map(lang => (
                 <Picker.Item key={lang} label={lang} value={lang} />
               ))}
             </Picker>
           </View>
           {/* Features */}
           <Text style={styles.label}>Features you're most interested in:</Text>
-          {features.map((feature) => {
+          {features.map(feature => {
             const selected = selectedFeatures.includes(feature.key);
             return (
               <TouchableOpacity
                 key={feature.key}
-                style={[styles.featureBox, selected && styles.featureBoxSelected]}
+                style={[
+                  styles.featureBox,
+                  selected && styles.featureBoxSelected,
+                ]}
                 onPress={() => toggleFeature(feature.key)}
                 activeOpacity={0.8}
               >
                 <View style={styles.featureRow}>
-                  <Image source={{ uri: feature.icon }} style={styles.featureIcon} />
+                  <Image
+                    source={{ uri: feature.icon }}
+                    style={styles.featureIcon}
+                  />
                   <Text style={styles.featureLabel}>{feature.label}</Text>
-                  {selected && <Image source={{ uri: CHECK_ICON }} style={styles.checkIcon} />}
+                  {selected && (
+                    <Image
+                      source={{ uri: CHECK_ICON }}
+                      style={styles.checkIcon}
+                    />
+                  )}
                 </View>
               </TouchableOpacity>
             );
           })}
           {/* Navigation Buttons */}
           <View style={styles.buttonRow}>
-            <TouchableOpacity style={styles.prevButton} onPress={() => navigation.navigate('TeamSetup')}>
+            <TouchableOpacity
+              style={styles.prevButton}
+              onPress={() => navigation.navigate('TeamSetup')}
+            >
               <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
             </TouchableOpacity>
             <LinearGradient
@@ -126,7 +183,7 @@ const PreferencesScreen: React.FC = () => {
               end={{ x: 1, y: 0 }}
               style={styles.gradientButton}
             >
-              <TouchableOpacity style={styles.nextButton} onPress={() => navigation.navigate('BankDetailsScreen')}>
+              <TouchableOpacity style={styles.nextButton} onPress={handleNext}>
                 <Text style={styles.nextButtonText}>Next {'\u2192'}</Text>
               </TouchableOpacity>
             </LinearGradient>
@@ -363,4 +420,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default PreferencesScreen; 
+export default PreferencesScreen;

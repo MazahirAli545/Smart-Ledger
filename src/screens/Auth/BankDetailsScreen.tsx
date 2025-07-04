@@ -1,8 +1,18 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, Image, SafeAreaView } from 'react-native';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  Image,
+  SafeAreaView,
+} from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
+import { useOnboarding } from '../../context/OnboardingContext';
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
 const BANK_ICON = 'https://img.icons8.com/ios-filled/100/fa7d09/bank-cards.png'; // Placeholder orange bank icon
@@ -17,9 +27,37 @@ type RootStackParamList = {
 
 const BankDetailsScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
-  const [bankName, setBankName] = useState('');
-  const [accountNumber, setAccountNumber] = useState('');
-  const [ifsc, setIfsc] = useState('');
+  const { data, setData } = useOnboarding();
+  const [bankName, setBankName] = useState(data.bankName || '');
+  const [accountNumber, setAccountNumber] = useState(data.accountNumber || '');
+  const [ifsc, setIfsc] = useState(data.ifscCode || '');
+
+  const handleBankNameChange = (value: string) => {
+    setBankName(value);
+    setData(prev => ({ ...prev, bankName: value }));
+  };
+
+  const handleAccountNumberChange = (value: string) => {
+    setAccountNumber(value);
+    setData(prev => ({ ...prev, accountNumber: value }));
+  };
+
+  const handleIfscChange = (value: string) => {
+    setIfsc(value);
+    setData(prev => ({ ...prev, ifscCode: value }));
+  };
+
+  const handleNext = () => {
+    // Save bank details to context before navigating
+    setData(prev => ({
+      ...prev,
+      bankName: bankName || '',
+      accountNumber: accountNumber || '',
+      ifscCode: ifsc || '',
+    }));
+
+    navigation.navigate('FinalStepScreen');
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -51,14 +89,16 @@ const BankDetailsScreen: React.FC = () => {
         <View style={styles.card}>
           <Image source={{ uri: BANK_ICON }} style={styles.bankIcon} />
           <Text style={styles.cardHeading}>Bank Details</Text>
-          <Text style={styles.cardSubtext}>Connect your bank account for seamless reconciliation</Text>
+          <Text style={styles.cardSubtext}>
+            Connect your bank account for seamless reconciliation
+          </Text>
           {/* Bank Name */}
           <Text style={styles.label}>Bank Name</Text>
           <TextInput
             style={styles.input}
             placeholder="e.g., State Bank of India"
             value={bankName}
-            onChangeText={setBankName}
+            onChangeText={handleBankNameChange}
             placeholderTextColor="#8a94a6"
           />
           {/* Account Number */}
@@ -67,7 +107,7 @@ const BankDetailsScreen: React.FC = () => {
             style={styles.input}
             placeholder="Enter account number"
             value={accountNumber}
-            onChangeText={setAccountNumber}
+            onChangeText={handleAccountNumberChange}
             placeholderTextColor="#8a94a6"
             keyboardType="number-pad"
           />
@@ -77,17 +117,24 @@ const BankDetailsScreen: React.FC = () => {
             style={styles.input}
             placeholder="e.g., SBIN0001234"
             value={ifsc}
-            onChangeText={setIfsc}
+            onChangeText={handleIfscChange}
             placeholderTextColor="#8a94a6"
             autoCapitalize="characters"
           />
           {/* Info Box */}
           <View style={styles.infoBox}>
-            <Text style={styles.infoNote}><Text style={styles.bold}>Note:</Text> Bank details are encrypted and stored securely. This information is used only for transaction reconciliation and is never shared.</Text>
+            <Text style={styles.infoNote}>
+              <Text style={styles.bold}>Note:</Text> Bank details are encrypted
+              and stored securely. This information is used only for transaction
+              reconciliation and is never shared.
+            </Text>
           </View>
           {/* Navigation Buttons */}
           <View style={styles.buttonRow}>
-            <TouchableOpacity style={styles.prevButton} onPress={() => navigation.navigate('Preferences')}>
+            <TouchableOpacity
+              style={styles.prevButton}
+              onPress={() => navigation.navigate('Preferences')}
+            >
               <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
             </TouchableOpacity>
             <LinearGradient
@@ -96,7 +143,7 @@ const BankDetailsScreen: React.FC = () => {
               end={{ x: 1, y: 0 }}
               style={styles.gradientButton}
             >
-              <TouchableOpacity style={styles.nextButton} onPress={() => navigation.navigate('FinalStepScreen')}>
+              <TouchableOpacity style={styles.nextButton} onPress={handleNext}>
                 <Text style={styles.nextButtonText}>Next {'\u2192'}</Text>
               </TouchableOpacity>
             </LinearGradient>
@@ -304,4 +351,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default BankDetailsScreen; 
+export default BankDetailsScreen;
