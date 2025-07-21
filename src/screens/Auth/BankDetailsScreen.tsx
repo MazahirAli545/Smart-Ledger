@@ -7,23 +7,19 @@ import {
   StyleSheet,
   ScrollView,
   Image,
-  SafeAreaView,
+  Platform,
 } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import { useOnboarding } from '../../context/OnboardingContext';
+import { RootStackParamList } from '../../types/navigation';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import Ionicons from 'react-native-vector-icons/Ionicons';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
 const BANK_ICON = 'https://img.icons8.com/ios-filled/100/fa7d09/bank-cards.png'; // Placeholder orange bank icon
-
-type RootStackParamList = {
-  SetupWizard: undefined;
-  TeamSetup: undefined;
-  BankDetails: undefined;
-  Preferences: undefined;
-  FinalStepScreen: undefined;
-};
 
 const BankDetailsScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
@@ -31,6 +27,8 @@ const BankDetailsScreen: React.FC = () => {
   const [bankName, setBankName] = useState(data.bankName || '');
   const [accountNumber, setAccountNumber] = useState(data.accountNumber || '');
   const [ifsc, setIfsc] = useState(data.ifscCode || '');
+  const [activeField, setActiveField] = useState('');
+  const [caAccountId, setCaAccountId] = useState('');
 
   const handleBankNameChange = (value: string) => {
     setBankName(value);
@@ -47,6 +45,11 @@ const BankDetailsScreen: React.FC = () => {
     setData(prev => ({ ...prev, ifscCode: value }));
   };
 
+  const handleCaAccountIdChange = (value: string) => {
+    setCaAccountId(value);
+    setData(prev => ({ ...prev, caAccountId: value }));
+  };
+
   const handleNext = () => {
     // Save bank details to context before navigating
     setData(prev => ({
@@ -54,20 +57,27 @@ const BankDetailsScreen: React.FC = () => {
       bankName: bankName || '',
       accountNumber: accountNumber || '',
       ifscCode: ifsc || '',
+      caAccountId: caAccountId || '',
     }));
 
-    navigation.navigate('FinalStepScreen');
+    navigation.navigate('FinalStep');
   };
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={{ flexGrow: 1 }}>
-        <View style={styles.logoContainer}>
+      <KeyboardAwareScrollView
+        contentContainerStyle={{ flexGrow: 1 }}
+        keyboardShouldPersistTaps="handled"
+        enableOnAndroid={true}
+        extraScrollHeight={60}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* <View style={styles.logoContainer}>
           <Image source={LOGO} style={styles.logo} />
           <Text style={styles.appName}>Smart Ledger</Text>
-        </View>
+        </View> */}
         {/* Setup Wizard Badge */}
-        <View style={styles.badgeRow}>
+        {/* <View style={styles.badgeRow}>
           <LinearGradient
             colors={['#4f8cff', '#1ecb81']}
             start={{ x: 0, y: 0 }}
@@ -76,7 +86,7 @@ const BankDetailsScreen: React.FC = () => {
           >
             <Text style={styles.setupBadgeText}>Setup Wizard</Text>
           </LinearGradient>
-        </View>
+        </View> */}
         {/* Progress Bar */}
         <View style={styles.progressRow}>
           <Text style={styles.progressText}>Step 4 of 5</Text>
@@ -95,31 +105,73 @@ const BankDetailsScreen: React.FC = () => {
           {/* Bank Name */}
           <Text style={styles.label}>Bank Name</Text>
           <TextInput
-            style={styles.input}
+            style={[
+              styles.input,
+              activeField === 'bankName' && styles.inputActive,
+              activeField === 'bankName' && styles.inputFocusShadow,
+            ]}
             placeholder="e.g., State Bank of India"
             value={bankName}
             onChangeText={handleBankNameChange}
             placeholderTextColor="#8a94a6"
+            onFocus={() => setActiveField('bankName')}
+            onBlur={() => setActiveField('')}
           />
           {/* Account Number */}
           <Text style={styles.label}>Account Number</Text>
           <TextInput
-            style={styles.input}
+            style={[
+              styles.input,
+              activeField === 'accountNumber' && styles.inputActive,
+              activeField === 'accountNumber' && styles.inputFocusShadow,
+            ]}
             placeholder="Enter account number"
             value={accountNumber}
             onChangeText={handleAccountNumberChange}
             placeholderTextColor="#8a94a6"
             keyboardType="number-pad"
+            onFocus={() => setActiveField('accountNumber')}
+            onBlur={() => setActiveField('')}
           />
           {/* IFSC Code */}
           <Text style={styles.label}>IFSC Code</Text>
           <TextInput
-            style={styles.input}
+            style={[
+              styles.input,
+              activeField === 'ifsc' && styles.inputActive,
+              activeField === 'ifsc' && styles.inputFocusShadow,
+            ]}
             placeholder="e.g., SBIN0001234"
             value={ifsc}
             onChangeText={handleIfscChange}
             placeholderTextColor="#8a94a6"
             autoCapitalize="characters"
+            onFocus={() => setActiveField('ifsc')}
+            onBlur={() => setActiveField('')}
+          />
+          {/* CA Account Id */}
+          <Text style={styles.label}>CA Account Id</Text>
+          <TextInput
+            style={[
+              styles.input,
+              activeField === 'caAccountId' && styles.inputActive,
+              activeField === 'caAccountId' && styles.inputFocusShadow,
+            ]}
+            placeholder="Enter CA Account Id"
+            value={caAccountId}
+            onChangeText={text =>
+              handleCaAccountIdChange(
+                text.replace(/[^a-zA-Z0-9]/g, '').slice(0, 12),
+              )
+            }
+            placeholderTextColor="#8a94a6"
+            keyboardType={
+              Platform.OS === 'ios' ? 'default' : 'visible-password'
+            }
+            autoCapitalize="characters"
+            onFocus={() => setActiveField('caAccountId')}
+            onBlur={() => setActiveField('')}
+            maxLength={12}
           />
           {/* Info Box */}
           <View style={styles.infoBox}>
@@ -149,7 +201,7 @@ const BankDetailsScreen: React.FC = () => {
             </LinearGradient>
           </View>
         </View>
-      </ScrollView>
+      </KeyboardAwareScrollView>
     </SafeAreaView>
   );
 };
@@ -210,6 +262,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginHorizontal: 24,
     marginBottom: 2,
+    marginTop: 30,
   },
   progressText: {
     color: '#222',
@@ -279,17 +332,27 @@ const styles = StyleSheet.create({
   },
   input: {
     width: '100%',
-    height: 52,
+    height: 50,
     borderColor: '#e3e7ee',
-    borderWidth: 1,
-    borderRadius: 10,
+    borderWidth: 1.5,
+    borderRadius: 12,
     paddingHorizontal: 16,
-    paddingVertical: 6,
-    marginBottom: 12,
+    marginBottom: 2,
     backgroundColor: '#fff',
-    fontSize: 14,
+    fontSize: 15,
     color: '#222',
-    textAlignVertical: 'center',
+  },
+  inputActive: {
+    borderColor: '#4f8cff',
+    borderWidth: 2,
+  },
+  inputFocusShadow: {
+    shadowColor: '#4f8cff',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
+    elevation: 2,
+    backgroundColor: '#f0f6ff',
   },
   infoBox: {
     backgroundColor: '#fffbe6',

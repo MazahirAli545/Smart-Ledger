@@ -7,16 +7,21 @@ import {
   StyleSheet,
   ScrollView,
   Image,
-  SafeAreaView,
-  Alert,
+  Modal,
 } from 'react-native';
-import { Picker } from '@react-native-picker/picker';
+import { Dropdown } from 'react-native-element-dropdown';
+import Ionicons from 'react-native-vector-icons/Ionicons';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import { useOnboarding } from '../../context/OnboardingContext';
 import { BASE_URL, onboardingUser } from '../../api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { RootStackParamList } from '../../types/navigation';
+import { navigationRef, ROOT_STACK_AUTH } from '../../../Navigation';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useAuth } from '../../context/AuthContext';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
 const CHECK_ICON = 'https://img.icons8.com/color/96/26e07f/ok--v1.png';
@@ -29,12 +34,89 @@ const goals = [
   'Other',
 ];
 
-type RootStackParamList = {
-  BankDetailsScreen: undefined;
-  Dashboard: undefined;
-  SignIn: undefined;
-  // ... other screens if needed
-};
+// Custom Popup Modal
+const CustomPopup = ({
+  visible,
+  title,
+  message,
+  onClose,
+  onConfirm,
+  confirmText = 'OK',
+}: {
+  visible: boolean;
+  title?: string;
+  message: string;
+  onClose?: () => void;
+  onConfirm?: () => void;
+  confirmText?: string;
+}) => (
+  <Modal
+    visible={visible}
+    transparent
+    animationType="fade"
+    onRequestClose={onClose}
+  >
+    <View style={popupStyles.overlay}>
+      <View style={popupStyles.container}>
+        {title && <Text style={popupStyles.title}>{title}</Text>}
+        <Text style={popupStyles.message}>{message}</Text>
+        <TouchableOpacity
+          style={popupStyles.button}
+          onPress={onConfirm || onClose}
+        >
+          <Text style={popupStyles.buttonText}>{confirmText}</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  </Modal>
+);
+
+const popupStyles = StyleSheet.create({
+  overlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  container: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 28,
+    minWidth: 260,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 6,
+  },
+  title: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#222',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  message: {
+    fontSize: 15,
+    color: '#444',
+    marginBottom: 18,
+    textAlign: 'center',
+  },
+  button: {
+    backgroundColor: '#4f8cff',
+    borderRadius: 8,
+    paddingHorizontal: 28,
+    paddingVertical: 10,
+    alignSelf: 'center',
+  },
+  buttonText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 15,
+    textAlign: 'center',
+  },
+});
 
 const FinalStepScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
@@ -43,7 +125,14 @@ const FinalStepScreen: React.FC = () => {
   const [challenges, setChallenges] = useState(data.currentChallenges || '');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [popup, setPopup] = useState<{
+    visible: boolean;
+    title?: string;
+    message: string;
+    onConfirm?: () => void;
+  }>({ visible: false, message: '' });
   const [mobileNumber, setMobileNumber] = useState<string | null>(null);
+  const { login } = useAuth();
 
   useEffect(() => {
     // Set initial values from context
@@ -91,43 +180,36 @@ const FinalStepScreen: React.FC = () => {
 
   const handleCompleteSetup = async () => {
     if (!goal) {
-      Alert.alert('Required', 'Please select your primary goal');
+      setPopup({
+        visible: true,
+        title: 'Required',
+        message: 'Please select your primary goal',
+      });
       return;
     }
 
     setLoading(true);
     setError(null);
 
-    // Check if we have a mobile number
-    if (!mobileNumber && !data.mobileNumber) {
-      try {
-        const storedMobileNumber = await AsyncStorage.getItem(
-          'userMobileNumber',
-        );
-        if (storedMobileNumber) {
-          setMobileNumber(storedMobileNumber);
-          setData(prev => ({ ...prev, mobileNumber: storedMobileNumber }));
-        } else {
-          setLoading(false);
-          Alert.alert(
-            'Error',
-            'Mobile number is not verified. Please restart the registration process.',
-          );
-          return;
-        }
-      } catch (error) {
-        console.error('Error retrieving mobile number:', error);
-        setLoading(false);
-        Alert.alert(
-          'Error',
-          'Could not verify mobile number. Please restart the registration process.',
-        );
-        return;
-      }
+    // Always get the verified mobile number from AsyncStorage
+    let finalMobileNumber = '';
+    try {
+      const storedMobileNumber = await AsyncStorage.getItem('userMobileNumber');
+      finalMobileNumber =
+        storedMobileNumber || data.mobileNumber || mobileNumber || '';
+    } catch (error) {
+      finalMobileNumber = data.mobileNumber || mobileNumber || '';
     }
-
-    // Use the mobile number we have
-    const finalMobileNumber = mobileNumber || data.mobileNumber; // Fallback to example number if all else fails
+    if (!finalMobileNumber) {
+      setLoading(false);
+      setPopup({
+        visible: true,
+        title: 'Error',
+        message:
+          'Mobile number is not verified. Please restart the registration process.',
+      });
+      return;
+    }
 
     // Create a base payload with the required mobile number
     const basePayload: Record<string, any> = {
@@ -154,6 +236,7 @@ const FinalStepScreen: React.FC = () => {
     if (data.bankName) basePayload.bankName = data.bankName;
     if (data.accountNumber) basePayload.accountNumber = data.accountNumber;
     if (data.ifscCode) basePayload.ifscCode = data.ifscCode;
+    if (data.caAccountId) basePayload.CAAccountID = data.caAccountId;
 
     // Add data from this screen
     if (goal) basePayload.primaryGoal = goal;
@@ -161,12 +244,18 @@ const FinalStepScreen: React.FC = () => {
 
     console.log('Onboarding payload:', basePayload);
 
+    // Get accessToken for Authorization header
+    const accessToken = await AsyncStorage.getItem('accessToken');
+    console.log('Submitting onboarding for mobile:', finalMobileNumber);
+    console.log('Using accessToken:', accessToken);
+
     try {
       // Use direct fetch for more control over the request
       const response = await fetch(`${BASE_URL}/user/onboarding`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
         },
         body: JSON.stringify(basePayload),
       });
@@ -175,25 +264,33 @@ const FinalStepScreen: React.FC = () => {
       console.log('API response:', result);
 
       if (response.ok && result.code === 200) {
-        // Save tokens to AsyncStorage
-        if (result.accessToken) {
-          await AsyncStorage.setItem('accessToken', result.accessToken);
-        }
-        if (result.refreshToken) {
-          await AsyncStorage.setItem('refreshToken', result.refreshToken);
-        }
-
-        // Handle successful onboarding
-        Alert.alert('Success', 'Onboarding completed successfully!', [
-          { text: 'OK', onPress: () => navigation.navigate('SignIn') },
-        ]);
+        // Show success modal, store token and navigate on OK
+        setPopup({
+          visible: true,
+          title: 'Success',
+          message: 'Successfully registered',
+          onConfirm: async () => {
+            setPopup(p => ({ ...p, visible: false }));
+            if (result.accessToken) {
+              await AsyncStorage.setItem('accessToken', result.accessToken);
+              await login(result.accessToken, null, true);
+            }
+            if (navigation) {
+              navigation.navigate('App', { screen: 'Dashboard' });
+            }
+          },
+        });
       } else {
         throw new Error(result?.message || 'Onboarding failed');
       }
     } catch (err: any) {
       console.error('Onboarding error:', err);
       setError(err.message || 'Failed to complete onboarding');
-      Alert.alert('Error', err.message || 'Failed to complete onboarding');
+      setPopup({
+        visible: true,
+        title: 'Error',
+        message: err.message || 'Failed to complete onboarding',
+      });
     } finally {
       setLoading(false);
     }
@@ -201,14 +298,27 @@ const FinalStepScreen: React.FC = () => {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={{ flexGrow: 1 }}>
+      <CustomPopup
+        visible={popup.visible}
+        title={popup.title}
+        message={popup.message}
+        onClose={() => setPopup(p => ({ ...p, visible: false }))}
+        onConfirm={popup.onConfirm}
+      />
+      <KeyboardAwareScrollView
+        contentContainerStyle={{ flexGrow: 1 }}
+        keyboardShouldPersistTaps="handled"
+        enableOnAndroid={true}
+        extraScrollHeight={60}
+        showsVerticalScrollIndicator={false}
+      >
         {/* Logo and App Name */}
-        <View style={styles.logoContainer}>
+        {/* <View style={styles.logoContainer}>
           <Image source={LOGO} style={styles.logo} />
           <Text style={styles.appName}>Smart Ledger</Text>
-        </View>
+        </View> */}
         {/* Setup Wizard Badge */}
-        <View style={styles.badgeRow}>
+        {/* <View style={styles.badgeRow}>
           <LinearGradient
             colors={['#4f8cff', '#1ecb81']}
             start={{ x: 0, y: 0 }}
@@ -217,7 +327,7 @@ const FinalStepScreen: React.FC = () => {
           >
             <Text style={styles.setupBadgeText}>Setup Wizard</Text>
           </LinearGradient>
-        </View>
+        </View> */}
         {/* Progress Bar */}
         <View style={styles.progressRow}>
           <Text style={styles.progressText}>Step 5 of 5</Text>
@@ -244,24 +354,45 @@ const FinalStepScreen: React.FC = () => {
           </View>
           {/* Primary Goal Dropdown */}
           <Text style={styles.label}>Primary Goal with Smart Ledger</Text>
-          <View style={styles.pickerWrapper}>
-            <Picker
-              selectedValue={goal}
-              onValueChange={handleGoalChange}
-              style={styles.picker}
-              itemStyle={styles.pickerItem}
-              dropdownIconColor="#8a94a6"
-            >
-              <Picker.Item
-                label="What's your main goal?"
-                value=""
-                color="#8a94a6"
+          <Dropdown
+            style={[
+              styles.dropdown1,
+              goal && styles.inputActive,
+              goal && styles.inputFocusShadow,
+            ]}
+            placeholderStyle={styles.placeholderStyle1}
+            selectedTextStyle={styles.selectedTextStyle1}
+            inputSearchStyle={styles.inputSearchStyle1}
+            iconStyle={styles.iconStyle1}
+            data={goals.map(g => ({ label: g, value: g }))}
+            search
+            searchPlaceholder="Search goal..."
+            maxHeight={300}
+            labelField="label"
+            valueField="value"
+            placeholder="What's your main goal?"
+            value={goal}
+            onChange={item => handleGoalChange(item.value)}
+            renderLeftIcon={() => (
+              <Ionicons
+                name="flag"
+                size={20}
+                color="#4f8cff"
+                style={{ marginRight: 10 }}
               />
-              {goals.map(g => (
-                <Picker.Item key={g} label={g} value={g} />
-              ))}
-            </Picker>
-          </View>
+            )}
+            renderItem={(item, selected) => (
+              <View style={styles.dropdownItem}>
+                <Text style={styles.dropdownItemText}>{item.label}</Text>
+                {selected && (
+                  <Ionicons name="checkmark" size={18} color="#4f8cff" />
+                )}
+              </View>
+            )}
+            flatListProps={{ keyboardShouldPersistTaps: 'always' }}
+            containerStyle={styles.dropdownContainer}
+            itemContainerStyle={styles.dropdownItemContainer}
+          />
           {/* Current Challenges */}
           <Text style={styles.label}>Current Challenges (Optional)</Text>
           <TextInput
@@ -297,7 +428,9 @@ const FinalStepScreen: React.FC = () => {
           <View style={styles.buttonRow}>
             <TouchableOpacity
               style={styles.prevButton}
-              onPress={() => navigation.navigate('BankDetailsScreen')}
+              onPress={() =>
+                (navigation as any).navigate('Auth', { screen: 'BankDetails' })
+              }
             >
               <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
             </TouchableOpacity>
@@ -319,7 +452,7 @@ const FinalStepScreen: React.FC = () => {
             </LinearGradient>
           </View>
         </View>
-      </ScrollView>
+      </KeyboardAwareScrollView>
     </SafeAreaView>
   );
 };
@@ -380,6 +513,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginHorizontal: 24,
     marginBottom: 2,
+    marginTop: 30,
   },
   progressText: {
     color: '#222',
@@ -462,25 +596,6 @@ const styles = StyleSheet.create({
     marginTop: 16,
     fontWeight: 'bold',
     alignSelf: 'flex-start',
-  },
-  pickerWrapper: {
-    width: '100%',
-    borderColor: '#e3e7ee',
-    borderWidth: 1,
-    borderRadius: 10,
-    marginBottom: 12,
-    backgroundColor: '#fff',
-    height: 56,
-    justifyContent: 'center',
-  },
-  picker: {
-    width: '100%',
-    height: 56,
-    color: '#222',
-  },
-  pickerItem: {
-    fontSize: 14,
-    color: '#222',
   },
   textArea: {
     width: '100%',
@@ -568,6 +683,82 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: 'bold',
     textAlign: 'center',
+  },
+  dropdown1: {
+    marginTop: 12,
+    height: 50,
+    width: '100%',
+    backgroundColor: '#fff',
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    borderColor: '#e3e7ee',
+    borderWidth: 1.5,
+    fontSize: 16,
+  },
+  placeholderStyle1: {
+    fontSize: 15,
+    color: '#8a94a6',
+  },
+  selectedTextStyle1: {
+    fontSize: 15,
+    color: '#222',
+  },
+  inputSearchStyle1: {
+    height: 40,
+    fontSize: 15,
+    color: '#222',
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    paddingLeft: 8,
+    borderBottomColor: '#e3e7ee',
+    borderBottomWidth: 1,
+  },
+  iconStyle1: {
+    width: 24,
+    height: 24,
+  },
+  dropdownContainer: {
+    marginTop: 10,
+    borderRadius: 12,
+    borderColor: '#e3e7ee',
+    borderWidth: 1,
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 5,
+    zIndex: 1000,
+  },
+  dropdownItemContainer: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
+  },
+  dropdownItem: {
+    padding: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  dropdownItemText: {
+    fontSize: 15,
+    color: '#222',
+  },
+  inputActive: {
+    borderColor: '#4f8cff',
+    borderWidth: 2,
+  },
+  inputFocusShadow: {
+    shadowColor: '#4f8cff',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
+    elevation: 2,
+    backgroundColor: '#f0f6ff',
   },
 });
 

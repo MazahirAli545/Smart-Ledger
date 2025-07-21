@@ -6,18 +6,23 @@ import {
   ScrollView,
   TouchableOpacity,
   Image,
-  SafeAreaView,
+  // SafeAreaView,
   Alert,
   StatusBar,
   Dimensions,
 } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { DrawerActions, useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BASE_URL } from '../../api';
 import LinearGradient from 'react-native-linear-gradient';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { PieChart, BarChart } from 'react-native-chart-kit';
+import { RootStackParamList } from '../../types/navigation';
+import { navigationRef, ROOT_STACK_AUTH } from '../../../Navigation'; // adjust path if needed
+import { useAuth } from '../../context/AuthContext';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import axios from 'axios';
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
 const PROFILE_ICON =
@@ -28,12 +33,6 @@ const REPORT_ICON =
   'https://img.icons8.com/ios-filled/100/fa7d09/combo-chart.png';
 const SETTINGS_ICON =
   'https://img.icons8.com/ios-filled/100/9b5de5/settings.png';
-
-type RootStackParamList = {
-  Onboarding: undefined;
-  Dashboard: undefined;
-  // Add other screens as needed
-};
 
 interface UserData {
   id: number;
@@ -55,11 +54,23 @@ interface Transaction {
   status: 'Paid' | 'Pending' | 'Received';
 }
 
+const DEFAULT_TYPES = ['invoice', 'receipt', 'payment', 'purchase'];
+
+// Map API icon field to MaterialCommunityIcons name
+const FOLDER_TYPE_ICONS: Record<string, string> = {
+  invoice: 'file-document-outline',
+  receipt: 'receipt',
+  payment: 'currency-inr',
+  purchase: 'cart-outline',
+};
+
 const Dashboard: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
+  const { isAuthenticated, logout } = useAuth();
   const [userData, setUserData] = useState<UserData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [folders, setFolders] = useState<any[]>([]);
   const screenWidth = Dimensions.get('window').width;
 
   // Mock data for GST Summary
@@ -143,6 +154,7 @@ const Dashboard: React.FC = () => {
 
   useEffect(() => {
     fetchUserData();
+    fetchFolders();
   }, []);
 
   const fetchUserData = async () => {
@@ -183,6 +195,26 @@ const Dashboard: React.FC = () => {
     }
   };
 
+  const fetchFolders = async () => {
+    try {
+      const accessToken = await AsyncStorage.getItem('accessToken');
+      const response = await axios.get(`${BASE_URL}/menus`, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
+      const userFolders = response.data.filter(
+        (item: any) =>
+          item.parentId === 28 &&
+          !DEFAULT_TYPES.includes(item.title.toLowerCase()) &&
+          item.title.toLowerCase() !== 'add folder',
+      );
+      setFolders(userFolders);
+    } catch (err) {
+      // Optionally handle error
+    }
+  };
+
   const handleLogout = async () => {
     Alert.alert('Logout', 'Are you sure you want to logout?', [
       {
@@ -193,21 +225,9 @@ const Dashboard: React.FC = () => {
         text: 'Logout',
         onPress: async () => {
           try {
-            // Clear all stored tokens and data
-            await AsyncStorage.multiRemove([
-              'accessToken',
-              'refreshToken',
-              'userMobileNumber',
-            ]);
-
-            // Navigate back to onboarding screen
-            navigation.reset({
-              index: 0,
-              routes: [{ name: 'Onboarding' }],
-            });
-          } catch (err) {
-            console.error('Error during logout:', err);
-            Alert.alert('Error', 'Failed to logout. Please try again.');
+            await logout(); // Only use context logout
+          } catch (error) {
+            console.error('Logout error:', error);
           }
         },
       },
@@ -226,6 +246,15 @@ const Dashboard: React.FC = () => {
     return `₹${amount.toLocaleString('en-IN')}`;
   };
 
+  // Helper to check for valid MaterialCommunityIcons icon name
+  const isValidIcon = (icon: string | undefined) =>
+    typeof icon === 'string' &&
+    icon.length > 1 &&
+    !icon.startsWith('http') &&
+    !icon.startsWith('blob:');
+
+  if (!isAuthenticated) return null;
+
   if (loading) {
     return (
       <SafeAreaView style={styles.loadingContainer}>
@@ -243,7 +272,10 @@ const Dashboard: React.FC = () => {
         {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
-            <TouchableOpacity style={styles.menuButton}>
+            <TouchableOpacity
+              style={styles.menuButton}
+              onPress={() => navigation.dispatch(DrawerActions.openDrawer())}
+            >
               <MaterialCommunityIcons name="menu" size={24} color="#222" />
             </TouchableOpacity>
             <Text style={styles.headerTitle}>Smart Ledger</Text>
@@ -291,7 +323,7 @@ const Dashboard: React.FC = () => {
         {/* Today's Sales and Pending */}
         <View style={styles.statsContainer}>
           <View style={styles.statCard}>
-            <Text style={styles.statLabel}>Today's Sales</Text>
+            <Text style={styles.statLabel}>Today's Sync</Text>
             <View style={styles.statValueContainer}>
               <Text style={styles.statValue}>₹45,230</Text>
               <MaterialCommunityIcons
@@ -321,7 +353,11 @@ const Dashboard: React.FC = () => {
         <View style={styles.quickActionsCard}>
           <Text style={styles.sectionTitle}>Quick Actions</Text>
           <View style={styles.quickActionsGrid}>
-            <TouchableOpacity style={styles.actionButton}>
+            {/* Default Quick Actions */}
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => navigation.navigate('Invoice')}
+            >
               <MaterialCommunityIcons
                 name="file-document-outline"
                 size={24}
@@ -329,11 +365,17 @@ const Dashboard: React.FC = () => {
               />
               <Text style={styles.actionText}>Invoice</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.actionButton}>
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => navigation.navigate('Receipt')}
+            >
               <MaterialCommunityIcons name="receipt" size={24} color="#222" />
               <Text style={styles.actionText}>Receipt</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.actionButton}>
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => navigation.navigate('Payment')}
+            >
               <MaterialCommunityIcons
                 name="currency-inr"
                 size={24}
@@ -341,7 +383,10 @@ const Dashboard: React.FC = () => {
               />
               <Text style={styles.actionText}>Payment</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.actionButton}>
+            <TouchableOpacity
+              style={styles.actionButton}
+              onPress={() => navigation.navigate('Purchase')}
+            >
               <MaterialCommunityIcons
                 name="cart-outline"
                 size={24}
@@ -349,6 +394,24 @@ const Dashboard: React.FC = () => {
               />
               <Text style={styles.actionText}>Purchase</Text>
             </TouchableOpacity>
+            {/* User-created folders as Quick Actions */}
+            {folders.map(folder => (
+              <TouchableOpacity
+                key={folder.id}
+                style={styles.actionButton}
+                onPress={() => navigation.navigate('FolderScreen', { folder })}
+              >
+                <MaterialCommunityIcons
+                  name={
+                    FOLDER_TYPE_ICONS[folder.icon?.toLowerCase()] ||
+                    'folder-outline'
+                  }
+                  size={24}
+                  color="#222"
+                />
+                <Text style={styles.actionText}>{folder.title}</Text>
+              </TouchableOpacity>
+            ))}
           </View>
         </View>
 
@@ -485,7 +548,7 @@ const Dashboard: React.FC = () => {
         </View>
 
         {/* Customer & Suppliers Tabs */}
-        <View style={styles.tabsContainer}>
+        {/* <View style={styles.tabsContainer}>
           <TouchableOpacity style={styles.tab}>
             <MaterialCommunityIcons
               name="account-group-outline"
@@ -502,7 +565,7 @@ const Dashboard: React.FC = () => {
             />
             <Text style={styles.tabText}>Suppliers</Text>
           </TouchableOpacity>
-        </View>
+        </View> */}
 
         {/* Logout Button */}
         <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
@@ -840,6 +903,41 @@ const styles = StyleSheet.create({
     shadowRadius: 5,
     shadowOffset: { width: 0, height: 2 },
     elevation: 2,
+  },
+  userFoldersSection: {
+    marginTop: 24,
+    marginBottom: 8,
+    paddingHorizontal: 8,
+  },
+  folderList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    paddingHorizontal: 8,
+  },
+  folderCard: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+    margin: 8,
+    alignItems: 'center',
+    width: 120,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  folderName: {
+    marginTop: 8,
+    fontSize: 15,
+    color: '#222',
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+  folderListWrapper: {
+    marginTop: 18,
+    marginBottom: 8,
+    paddingHorizontal: 8,
   },
 });
 

@@ -1,0 +1,23 @@
+import { useEffect } from 'react';
+import { useNavigation } from '@react-navigation/native';
+import type { StackNavigationProp } from '@react-navigation/stack';
+import { RootStackParamList } from '../types/navigation';
+import { getToken } from '../utils/storage';
+import { ROOT_STACK_AUTH } from '../../Navigation';
+
+export const useAuthGuard = () => {
+  const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
+
+  useEffect(() => {
+    const checkAuth = async () => {
+      const token = await getToken();
+      if (!token) {
+        navigation.reset({
+          index: 0,
+          routes: [{ name: ROOT_STACK_AUTH as never }],
+        });
+      }
+    };
+    checkAuth();
+  }, [navigation]);
+};

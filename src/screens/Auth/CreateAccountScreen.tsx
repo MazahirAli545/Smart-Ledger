@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, MutableRefObject } from 'react';
 import {
   View,
   Text,
@@ -8,9 +8,10 @@ import {
   ScrollView,
   Image,
   Platform,
-  SafeAreaView,
+  findNodeHandle,
+  Modal,
 } from 'react-native';
-import { Picker } from '@react-native-picker/picker';
+import { Dropdown } from 'react-native-element-dropdown';
 import CheckBox from '@react-native-community/checkbox';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
@@ -24,13 +25,10 @@ import {
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useOnboarding } from '../../context/OnboardingContext';
-
-// Define the navigation param list
-type RootStackParamList = {
-  SignIn: undefined;
-  SetupWizard: undefined;
-  CreateAccount: undefined;
-};
+import { SafeAreaView } from 'react-native-safe-area-context';
+import Ionicons from 'react-native-vector-icons/Ionicons';
+import CountryPicker from 'react-native-country-picker-modal';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
 
@@ -44,7 +42,7 @@ const businessTypes = [
 ];
 
 const CreateAccountScreen: React.FC = () => {
-  const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
+  const navigation = useNavigation<StackNavigationProp<any>>();
   const { setData } = useOnboarding();
   const [businessName, setBusinessName] = useState('');
   const [ownerName, setOwnerName] = useState('');
@@ -52,33 +50,59 @@ const CreateAccountScreen: React.FC = () => {
   const [businessType, setBusinessType] = useState('');
   const [gstNumber, setGstNumber] = useState('');
   const [agree, setAgree] = useState(false);
-  const [otpSent, setOtpSent] = useState(false);
-  const [otp, setOtp] = useState('');
-  const [timer, setTimer] = useState(30);
   const [activeField, setActiveField] = useState('');
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const scrollRef = useRef<KeyboardAwareScrollView | null>(null);
+  const dropdownRef = useRef(null);
+  const dropdownContainerRef = useRef<View>(null);
+  // Add country picker state for mobile input
+  const [countryCode, setCountryCode] = useState('IN');
+  const [callingCode, setCallingCode] = useState('91');
+  const [country, setCountry] = useState<any>({ flag: '🇮🇳' });
+  const [showCountryPicker, setShowCountryPicker] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [registerOtp, setRegisterOtp] = useState<string | null>(null);
-  const [backendOtp, setBackendOtp] = useState<string | null>(null);
+  const [showMobileExistsModal, setShowMobileExistsModal] = useState(false);
 
-  // Start timer when OTP is sent
-  React.useEffect(() => {
-    if (otpSent && timer > 0) {
-      timerRef.current = setTimeout(() => setTimer(timer - 1), 1000);
-    }
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-    };
-  }, [otpSent, timer]);
+  const onSelectCountry = (selectedCountry: any) => {
+    setCountryCode(selectedCountry.cca2);
+    setCallingCode(selectedCountry.callingCode[0]);
+    setCountry({
+      ...selectedCountry,
+      flag: getFlagEmoji(selectedCountry.cca2),
+    });
+    setShowCountryPicker(false);
+  };
+
+  const getFlagEmoji = (countryCode: string) => {
+    const codePoints = countryCode
+      .toUpperCase()
+      .split('')
+      .map(char => 127397 + char.charCodeAt(0));
+    return String.fromCodePoint(...codePoints);
+  };
+
+  // const handleDropdownFocus = () => {
+  //   setActiveField('businessType');
+  //   if (scrollRef.current && dropdownContainerRef.current) {
+  //     const node = findNodeHandle(dropdownContainerRef.current);
+  //     if (node) {
+  //       // Calculate the position to scroll to
+  //       const extraOffset = Platform.OS === 'ios' ? 100 : 150;
+  //       scrollRef.current.scrollToPosition(0, extraOffset, true);
+  //     }
+  //   }
+  // };
+
+  // measureDropdownAndScroll removed (not needed with ScrollView)
 
   const handleSendOtp = async () => {
     setLoading(true);
     setError(null);
+    const fullPhone = `${callingCode}${mobileNumber}`;
     const payload: RegisterPayload = {
       businessName,
       ownerName,
-      mobileNumber,
+      mobileNumber: fullPhone,
       businessType,
       gstNumber,
     };
@@ -88,108 +112,55 @@ const CreateAccountScreen: React.FC = () => {
         response?.data?.otp !== undefined && response?.data?.otp !== null
           ? String(response.data.otp)
           : null;
-      setRegisterOtp(otpFromBackend);
-      setBackendOtp(otpFromBackend);
-      setOtpSent(true);
-      setTimer(30);
       setLoading(false);
+      // Navigate to OTP Verification Screen
+      navigation.navigate('OtpVerification', {
+        phone: fullPhone,
+        backendOtp: otpFromBackend,
+        registrationData: payload,
+      });
     } catch (err: any) {
       setLoading(false);
-      setError(
-        typeof err === 'string' ? err : err.message || 'Failed to send OTP',
-      );
-    }
-  };
-
-  const handleResendOtp = () => {
-    setTimer(30);
-    setOtp('');
-  };
-
-  const handleVerify = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      // 1. First verify the OTP
-      const verifyResponse = await verifyOtpApi({ mobileNumber, otp });
-
-      if (verifyResponse?.code === 200) {
-        // Store mobile number in AsyncStorage
-        try {
-          await AsyncStorage.setItem('userMobileNumber', mobileNumber);
-          console.log('Mobile number stored in AsyncStorage:', mobileNumber);
-
-          // Update onboarding context with mobile number
-          setData(prev => ({ ...prev, mobileNumber }));
-        } catch (storageError) {
-          console.error('Error storing mobile number:', storageError);
-        }
-
-        // 2. Try to register, but don't let registration failure block navigation
-        try {
-          await registerUser({
-            businessName,
-            ownerName,
-            mobileNumber,
-            businessType,
-            gstNumber,
-          });
-        } catch (registerError) {
-          console.warn(
-            'Registration API returned error but user may have been created:',
-            registerError,
-          );
-        }
-
-        // 3. Navigate to SetupWizard regardless of registration API response
-        navigation.navigate('SetupWizard');
+      const errorMsg =
+        err?.response?.data?.message || err?.message || 'Failed to send OTP';
+      if (
+        errorMsg.toLowerCase().includes('mobile number already registered') ||
+        (errorMsg.toLowerCase().includes('mobile') &&
+          errorMsg.toLowerCase().includes('exist'))
+      ) {
+        setShowMobileExistsModal(true);
+        setError(null);
       } else {
-        setError(verifyResponse?.message || 'Invalid OTP');
+        setError(typeof err === 'string' ? err : errorMsg);
       }
-    } catch (err: any) {
-      setError(
-        typeof err === 'string'
-          ? err
-          : err.message || 'OTP verification failed',
-      );
-    } finally {
-      setLoading(false);
     }
   };
 
   const canSendOtp =
-    businessName &&
-    ownerName &&
-    mobileNumber &&
-    businessType &&
-    agree &&
-    !otpSent;
-  const canVerify =
-    businessName &&
-    ownerName &&
-    mobileNumber &&
-    businessType &&
-    agree &&
-    otpSent &&
-    otp.length === 6;
+    businessName && ownerName && mobileNumber && businessType && agree;
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={{ flexGrow: 1 }}>
+      <KeyboardAwareScrollView
+        contentContainerStyle={{ flexGrow: 1 }}
+        keyboardShouldPersistTaps="handled"
+        enableOnAndroid={true}
+        extraScrollHeight={60}
+        showsVerticalScrollIndicator={false}
+      >
         {/* Top Bar */}
         <View style={styles.topBar}>
           <TouchableOpacity
             style={{ flexDirection: 'row', alignItems: 'center' }}
             onPress={() => navigation.goBack()}
           >
-            <Text style={styles.backArrow}>{'\u2190'}</Text>
-            <Text style={styles.backText}>Back to Home</Text>
+            <Ionicons
+              name="arrow-back"
+              size={36}
+              color="#222"
+              style={styles.backArrow}
+            />
           </TouchableOpacity>
-        </View>
-        {/* Logo and App Name */}
-        <View style={styles.logoContainer}>
-          <Image source={LOGO} style={styles.logo} />
-          <Text style={styles.appName}>Smart Ledger</Text>
         </View>
         {/* Title and Subtitle */}
         <Text style={styles.title}>Create Your Account</Text>
@@ -208,6 +179,7 @@ const CreateAccountScreen: React.FC = () => {
             style={[
               styles.input,
               activeField === 'businessName' && styles.inputActive,
+              activeField === 'businessName' && styles.inputFocusShadow,
             ]}
             placeholder="Enter your business name"
             value={businessName}
@@ -215,6 +187,7 @@ const CreateAccountScreen: React.FC = () => {
             placeholderTextColor="#8a94a6"
             onFocus={() => setActiveField('businessName')}
             onBlur={() => setActiveField('')}
+            returnKeyType="next"
           />
           {/* Owner Name */}
           <Text style={styles.label}>Owner Name *</Text>
@@ -222,6 +195,7 @@ const CreateAccountScreen: React.FC = () => {
             style={[
               styles.input,
               activeField === 'ownerName' && styles.inputActive,
+              activeField === 'ownerName' && styles.inputFocusShadow,
             ]}
             placeholder="Enter owner's full name"
             value={ownerName}
@@ -229,98 +203,111 @@ const CreateAccountScreen: React.FC = () => {
             placeholderTextColor="#8a94a6"
             onFocus={() => setActiveField('ownerName')}
             onBlur={() => setActiveField('')}
+            returnKeyType="next"
           />
           {/* Mobile Number */}
           <Text style={styles.label}>Mobile Number *</Text>
-          <TextInput
-            style={[
-              styles.input,
-              activeField === 'mobileNumber' && styles.inputActive,
-            ]}
-            placeholder="Enter your mobile number"
-            value={mobileNumber}
-            onChangeText={setMobileNumber}
-            keyboardType="phone-pad"
-            placeholderTextColor="#8a94a6"
-            onFocus={() => setActiveField('mobileNumber')}
-            onBlur={() => setActiveField('')}
-          />
-          {/* OTP Input (after Send OTP) */}
-          {otpSent && (
-            <>
-              <Text style={styles.label}>Enter OTP *</Text>
-              <TextInput
-                style={[
-                  styles.input,
-                  activeField === 'otp' && styles.inputActive,
-                ]}
-                placeholder="Enter 6-digit OTP"
-                value={otp}
-                onChangeText={setOtp}
-                keyboardType="number-pad"
-                maxLength={6}
-                placeholderTextColor="#8a94a6"
-                onFocus={() => setActiveField('otp')}
-                onBlur={() => setActiveField('')}
+          <View style={styles.phoneInputRow}>
+            <TouchableOpacity
+              style={styles.countryTrigger}
+              onPress={() => setShowCountryPicker(true)}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.flag}>{country?.flag || '🇮🇳'}</Text>
+              <Text style={styles.code}>+{callingCode}</Text>
+              <Ionicons
+                name="chevron-down"
+                size={18}
+                color="#888"
+                style={{ marginLeft: 2 }}
               />
-              <Text style={styles.otpInfo}>
-                OTP sent to {mobileNumber}{' '}
-                {timer > 0 ? `Resend in ${timer}s` : ''}
-                {timer === 0 && (
-                  <Text style={styles.resendOtp} onPress={handleResendOtp}>
-                    {' '}
-                    Resend
-                  </Text>
-                )}
-              </Text>
-              {/* Show register API OTP below Resend button for testing */}
-              {registerOtp && (
-                <Text
-                  style={{
-                    color: 'red',
-                    fontWeight: 'bold',
-                    marginTop: 4,
-                    textAlign: 'center',
-                  }}
-                >
-                  [Register API OTP: {registerOtp}]
-                </Text>
-              )}
-            </>
+            </TouchableOpacity>
+            <TextInput
+              style={styles.phoneInput}
+              placeholder="9999999999"
+              placeholderTextColor="#8a94a6"
+              value={mobileNumber}
+              onChangeText={text =>
+                setMobileNumber(text.replace(/\D/g, '').slice(0, 10))
+              }
+              keyboardType="number-pad"
+              maxLength={10}
+              onFocus={() => setActiveField('mobileNumber')}
+              onBlur={() => setActiveField('')}
+              returnKeyType="next"
+            />
+          </View>
+          {showCountryPicker && (
+            <CountryPicker
+              countryCode={countryCode as any}
+              withFilter
+              withAlphaFilter
+              withFlag
+              withCountryNameButton={false}
+              withCallingCodeButton={false}
+              visible={showCountryPicker}
+              onSelect={onSelectCountry}
+              onClose={() => setShowCountryPicker(false)}
+              theme={{
+                backgroundColor: '#fff',
+                fontSize: 18,
+                itemHeight: 48,
+                filterPlaceholderTextColor: '#8a94a6',
+                primaryColor: '#4f8cff',
+              }}
+            />
           )}
           {/* Business Type */}
           <Text style={styles.label}>Business Type *</Text>
-          <View
+          <Dropdown
             style={[
-              styles.pickerWrapper,
+              styles.dropdown1,
               activeField === 'businessType' && styles.inputActive,
+              activeField === 'businessType' && styles.inputFocusShadow,
             ]}
-          >
-            <Picker
-              selectedValue={businessType}
-              onValueChange={setBusinessType}
-              style={styles.picker}
-              itemStyle={styles.pickerItem}
-              dropdownIconColor="#8a94a6"
-              onFocus={() => setActiveField('businessType')}
-              onBlur={() => setActiveField('')}
-            >
-              <Picker.Item
-                label="Select business type"
-                value=""
-                color="#8a94a6"
+            placeholderStyle={styles.placeholderStyle1}
+            selectedTextStyle={styles.selectedTextStyle1}
+            inputSearchStyle={styles.inputSearchStyle1}
+            iconStyle={styles.iconStyle1}
+            data={businessTypes.map(type => ({ label: type, value: type }))}
+            search
+            searchPlaceholder="Search business type..."
+            maxHeight={300}
+            labelField="label"
+            valueField="value"
+            placeholder="Select business type"
+            value={businessType}
+            onChange={item => setBusinessType(item.value)}
+            renderLeftIcon={() => (
+              <Ionicons
+                name="business"
+                size={20}
+                color="#4f8cff"
+                style={{ marginRight: 10 }}
               />
-              {businessTypes.map(type => (
-                <Picker.Item key={type} label={type} value={type} />
-              ))}
-            </Picker>
-          </View>
+            )}
+            renderItem={(item, selected) => (
+              <View style={styles.dropdownItem}>
+                <Text style={styles.dropdownItemText}>{item.label}</Text>
+                {selected && (
+                  <Ionicons name="checkmark" size={18} color="#4f8cff" />
+                )}
+              </View>
+            )}
+            onFocus={() => setActiveField('businessType')}
+            onBlur={() => setActiveField('')}
+            flatListProps={{ keyboardShouldPersistTaps: 'always' }}
+            containerStyle={styles.dropdownContainer}
+            itemContainerStyle={styles.dropdownItemContainer}
+            keyboardAvoiding={false}
+          />
           {/* GST Number */}
           <Text style={styles.label}>GST Number (Optional)</Text>
           <TextInput
             style={[
               styles.input,
               activeField === 'gstNumber' && styles.inputActive,
+              activeField === 'gstNumber' && styles.inputFocusShadow,
             ]}
             placeholder="Enter GST number if applicable"
             value={gstNumber}
@@ -328,6 +315,7 @@ const CreateAccountScreen: React.FC = () => {
             placeholderTextColor="#8a94a6"
             onFocus={() => setActiveField('gstNumber')}
             onBlur={() => setActiveField('')}
+            returnKeyType="done"
           />
           {/* Terms and Policy */}
           <View style={styles.termsRow}>
@@ -350,10 +338,8 @@ const CreateAccountScreen: React.FC = () => {
           {/* Send OTP / Verify Button */}
           <LinearGradient
             colors={
-              otpSent
-                ? canVerify
-                  ? ['#4f8cff', '#1ecb81']
-                  : ['#dbeafe', '#e0f7ef']
+              loading
+                ? ['#dbeafe', '#e0f7ef']
                 : canSendOtp
                 ? ['#4f8cff', '#1ecb81']
                 : ['#dbeafe', '#e0f7ef']
@@ -364,30 +350,19 @@ const CreateAccountScreen: React.FC = () => {
           >
             <TouchableOpacity
               style={styles.button}
-              disabled={
-                otpSent ? !canVerify || loading : !canSendOtp || loading
-              }
-              onPress={otpSent ? handleVerify : handleSendOtp}
+              disabled={!canSendOtp || loading}
+              onPress={handleSendOtp}
+              activeOpacity={0.85}
             >
               <Text
                 style={[
                   styles.buttonText,
                   {
-                    opacity: otpSent
-                      ? canVerify
-                        ? 1
-                        : 0.5
-                      : canSendOtp
-                      ? 1
-                      : 0.5,
+                    opacity: canSendOtp ? 1 : 0.5,
                   },
                 ]}
               >
-                {loading
-                  ? 'Registering...'
-                  : otpSent
-                  ? 'Verify & Create Account'
-                  : 'Send OTP'}
+                {loading ? 'Registering...' : 'Send OTP'}
               </Text>
             </TouchableOpacity>
           </LinearGradient>
@@ -399,7 +374,109 @@ const CreateAccountScreen: React.FC = () => {
             </TouchableOpacity>
           </View>
         </View>
-      </ScrollView>
+        {/* Mobile Exists Modal */}
+        <Modal
+          visible={showMobileExistsModal}
+          transparent
+          animationType="fade"
+          onRequestClose={() => {
+            setShowMobileExistsModal(false);
+            setError(null);
+          }}
+        >
+          <View
+            style={{
+              flex: 1,
+              backgroundColor: 'rgba(0,0,0,0.3)',
+              justifyContent: 'center',
+              alignItems: 'center',
+            }}
+          >
+            <View
+              style={{
+                backgroundColor: '#fff',
+                borderRadius: 16,
+                padding: 32,
+                alignItems: 'center',
+                shadowColor: '#000',
+                shadowOpacity: 0.15,
+                shadowRadius: 12,
+                shadowOffset: { width: 0, height: 4 },
+                elevation: 8,
+                minWidth: 280,
+              }}
+            >
+              <Ionicons
+                name="alert-circle"
+                size={48}
+                color="#dc3545"
+                style={{ marginBottom: 12 }}
+              />
+              <Text
+                style={{
+                  fontSize: 20,
+                  fontWeight: 'bold',
+                  color: '#dc3545',
+                  marginBottom: 8,
+                }}
+              >
+                Mobile Number Exists
+              </Text>
+              <Text
+                style={{
+                  fontSize: 16,
+                  color: '#222',
+                  marginBottom: 20,
+                  textAlign: 'center',
+                }}
+              >
+                The mobile number you entered is already registered. Please use
+                a different number or sign in.
+              </Text>
+              <View style={{ flexDirection: 'row', gap: 12 }}>
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: '#4f8cff',
+                    borderRadius: 8,
+                    paddingVertical: 10,
+                    paddingHorizontal: 24,
+                    marginRight: 8,
+                  }}
+                  onPress={() => {
+                    setShowMobileExistsModal(false);
+                    setError(null);
+                  }}
+                >
+                  <Text
+                    style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}
+                  >
+                    OK
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: '#1ecb81',
+                    borderRadius: 8,
+                    paddingVertical: 10,
+                    paddingHorizontal: 24,
+                  }}
+                  onPress={() => {
+                    setShowMobileExistsModal(false);
+                    setError(null);
+                    navigation.navigate('SignIn');
+                  }}
+                >
+                  <Text
+                    style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}
+                  >
+                    Go to Sign In
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      </KeyboardAwareScrollView>
     </SafeAreaView>
   );
 };
@@ -412,15 +489,16 @@ const styles = StyleSheet.create({
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 18,
-    marginLeft: 10,
-    marginBottom: 10,
+    marginTop: 16,
+    marginLeft: 12,
+    marginBottom: 12,
+    height: 44,
   },
   backArrow: {
-    fontSize: 22,
-    color: '#222',
-    marginRight: 4,
-    marginTop: 2,
+    marginLeft: 0,
+    textShadowColor: '#dbeafe',
+    textShadowOffset: { width: 1, height: 2 },
+    textShadowRadius: 3,
   },
   backText: {
     fontSize: 15,
@@ -450,90 +528,167 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#222',
     textAlign: 'center',
-    marginTop: 8,
+    marginTop: 0,
+    marginBottom: 6,
   },
   subtitle: {
     fontSize: 15,
     color: '#7a869a',
     textAlign: 'center',
-    marginBottom: 16,
-    marginTop: 2,
+    marginBottom: 14,
+    marginTop: 0,
   },
   card: {
     backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 20,
-    marginHorizontal: 12,
+    borderRadius: 18,
+    padding: 22,
+    marginHorizontal: 10,
     marginTop: 8,
-    marginBottom: 24,
+    marginBottom: 18,
     shadowColor: '#000',
-    shadowOpacity: 0.07,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 3,
+    shadowOpacity: 0.09,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 4,
   },
   cardHeading: {
-    fontSize: 20,
+    fontSize: 18,
     fontWeight: 'bold',
     color: '#222',
     marginBottom: 2,
   },
   cardSubtext: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#7a869a',
-    marginBottom: 16,
+    marginBottom: 14,
   },
   label: {
-    fontSize: 15,
+    fontSize: 14,
     color: '#222',
     marginBottom: 4,
-    marginTop: 12,
+    marginTop: 14,
     fontWeight: '600',
   },
   input: {
     width: '100%',
-    height: 48,
+    height: 46,
     borderColor: '#e3e7ee',
     borderWidth: 1,
-    borderRadius: 8,
+    borderRadius: 10,
     paddingHorizontal: 16,
     marginBottom: 2,
     backgroundColor: '#f8fafc',
     fontSize: 15,
     color: '#222',
+    marginTop: 2,
+    shadowColor: 'transparent',
   },
   inputActive: {
-    borderColor: '#222',
+    borderColor: '#4f8cff',
+    borderWidth: 2,
+  },
+  inputFocusShadow: {
+    shadowColor: '#4f8cff',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
+    elevation: 2,
+    backgroundColor: '#f0f6ff',
+  },
+  dropdown1: {
+    marginTop: 12,
+    height: 50,
+    width: '100%',
+    backgroundColor: '#fff',
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    borderColor: '#e3e7ee',
     borderWidth: 1.5,
+    fontSize: 16,
+  },
+  placeholderStyle1: {
+    fontSize: 15,
+    color: '#8a94a6',
+  },
+  selectedTextStyle1: {
+    fontSize: 15,
+    color: '#222',
+  },
+  inputSearchStyle1: {
+    height: 40,
+    fontSize: 15,
+    color: '#222',
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    paddingLeft: 8,
+    borderBottomColor: '#e3e7ee',
+    borderBottomWidth: 1,
+  },
+  iconStyle1: {
+    width: 24,
+    height: 24,
+  },
+  dropdownContainer: {
+    marginTop: 10,
+    borderRadius: 12,
+    borderColor: '#e3e7ee',
+    borderWidth: 1,
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 5,
+    zIndex: 1000,
+  },
+  dropdownItemContainer: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
+  },
+  dropdownItem: {
+    padding: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  dropdownItemText: {
+    fontSize: 15,
+    color: '#222',
   },
   pickerWrapper: {
     borderColor: '#e3e7ee',
     borderWidth: 1,
-    borderRadius: 8,
+    borderRadius: 10,
     backgroundColor: '#f8fafc',
     marginBottom: 2,
-    height: 52,
+    height: 46,
     justifyContent: 'center',
-    overflow: 'hidden',
+    marginTop: 2,
+    paddingHorizontal: 0,
+    shadowColor: 'transparent',
   },
   picker: {
     width: '100%',
     height: 52,
     color: '#222',
-    fontSize: 15,
+    fontSize: 16,
     paddingVertical: 0,
     marginTop: Platform.OS === 'android' ? -2 : 0,
   },
   pickerItem: {
     height: 52,
-    fontSize: 15,
+    fontSize: 16,
     color: '#222',
     textAlignVertical: 'center',
   },
   termsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 16,
+    marginTop: 14,
     marginBottom: 8,
   },
   checkbox: {
@@ -542,7 +697,7 @@ const styles = StyleSheet.create({
     height: 20,
   },
   termsText: {
-    fontSize: 13,
+    fontSize: 12,
     color: '#222',
     flex: 1,
     flexWrap: 'wrap',
@@ -552,14 +707,19 @@ const styles = StyleSheet.create({
     textDecorationLine: 'underline',
   },
   gradientButton: {
-    borderRadius: 8,
-    marginTop: 8,
-    marginBottom: 8,
+    borderRadius: 14,
+    marginTop: 16,
+    marginBottom: 12,
+    shadowColor: '#4f8cff',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.13,
+    shadowRadius: 8,
+    elevation: 3,
   },
   button: {
     width: '100%',
-    height: 48,
-    borderRadius: 8,
+    height: 52,
+    borderRadius: 14,
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: 'transparent',
@@ -568,32 +728,78 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 17,
     fontWeight: 'bold',
+    letterSpacing: 0.2,
+    textShadowColor: '#1ecb81',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   otpInfo: {
-    fontSize: 13,
+    fontSize: 12,
     color: '#7a869a',
     marginBottom: 2,
     marginTop: 2,
+    textAlign: 'center',
   },
   resendOtp: {
     color: '#4f8cff',
     fontWeight: 'bold',
     textDecorationLine: 'underline',
+    fontSize: 13,
   },
   footerRow: {
     flexDirection: 'row',
     justifyContent: 'center',
-    marginTop: 10,
+    marginTop: 14,
+    marginBottom: 2,
   },
   footerText: {
     color: '#7a869a',
-    fontSize: 14,
+    fontSize: 13,
   },
   footerLink: {
     color: '#4f8cff',
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: 'bold',
     marginLeft: 2,
+  },
+  phoneInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f8fafc',
+    borderRadius: 10,
+    borderColor: '#e3e7ee',
+    borderWidth: 1,
+    marginTop: 2,
+    marginBottom: 2,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  countryTrigger: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginRight: 10,
+    paddingVertical: 5,
+    paddingHorizontal: 5,
+    borderRadius: 8,
+    backgroundColor: '#e3e7ee',
+  },
+  flag: {
+    fontSize: 20,
+    marginRight: 5,
+  },
+  code: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#222',
+    marginRight: 5,
+  },
+  phoneInput: {
+    flex: 1,
+    height: 46,
+    fontSize: 16,
+    color: '#222',
+    paddingVertical: 0,
+    marginTop: Platform.OS === 'android' ? -2 : 0,
   },
 });
 

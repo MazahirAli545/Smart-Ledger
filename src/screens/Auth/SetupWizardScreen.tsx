@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,24 +8,20 @@ import {
   ScrollView,
   Image,
   Platform,
-  SafeAreaView,
 } from 'react-native';
-import { Picker } from '@react-native-picker/picker';
+import { Dropdown } from 'react-native-element-dropdown';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import { useOnboarding } from '../../context/OnboardingContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-
-// Define the navigation param list
-type RootStackParamList = {
-  SetupWizard: undefined;
-  TeamSetup: undefined;
-  Onboarding: undefined;
-};
+import { RootStackParamList } from '../../types/navigation';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import Ionicons from 'react-native-vector-icons/Ionicons';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
-const BUSINESS_ICON = 'https://img.icons8.com/ios-filled/100/256/building.png'; // Placeholder blue business icon
+const BUSINESS_ICON = 'https://img.icons8.com/ios-filled/100/256/building.png';
 
 const businessSizes = [
   '1-10 employees',
@@ -52,7 +48,7 @@ const transactionVolumes = [
 ];
 
 const SetupWizardScreen: React.FC = () => {
-  const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
+  const navigation = useNavigation<StackNavigationProp<any>>();
   const { data, setData } = useOnboarding();
   const [businessSize, setBusinessSize] = useState(data.businessSize || '');
   const [industry, setIndustry] = useState(data.industry || '');
@@ -63,9 +59,9 @@ const SetupWizardScreen: React.FC = () => {
     data.currentAccountingSoftware || '',
   );
   const [mobileNumber, setMobileNumber] = useState<string | null>(null);
+  const [activeField, setActiveField] = useState('');
 
   useEffect(() => {
-    // Check for mobile number in context or AsyncStorage
     const checkMobileNumber = async () => {
       if (data.mobileNumber) {
         setMobileNumber(data.mobileNumber);
@@ -77,44 +73,32 @@ const SetupWizardScreen: React.FC = () => {
           if (storedMobileNumber) {
             setMobileNumber(storedMobileNumber);
             setData(prev => ({ ...prev, mobileNumber: storedMobileNumber }));
-            console.log(
-              'Mobile number retrieved from AsyncStorage:',
-              storedMobileNumber,
-            );
-          } else {
-            console.log('No mobile number found in AsyncStorage');
           }
         } catch (error) {
           console.error('Error retrieving mobile number:', error);
         }
       }
     };
-
     checkMobileNumber();
   }, [data.mobileNumber, setData]);
 
-  const handleBusinessSizeChange = (value: string) => {
-    setBusinessSize(value);
-    setData(prev => ({ ...prev, businessSize: value }));
+  const handleBusinessSizeChange = (item: { value: string }) => {
+    setBusinessSize(item.value);
+    setData(prev => ({ ...prev, businessSize: item.value }));
   };
-
-  const handleIndustryChange = (value: string) => {
-    setIndustry(value);
-    setData(prev => ({ ...prev, industry: value }));
+  const handleIndustryChange = (item: { value: string }) => {
+    setIndustry(item.value);
+    setData(prev => ({ ...prev, industry: item.value }));
   };
-
-  const handleTransactionVolumeChange = (value: string) => {
-    setTransactionVolume(value);
-    setData(prev => ({ ...prev, monthlyTransactionVolume: value }));
+  const handleTransactionVolumeChange = (item: { value: string }) => {
+    setTransactionVolume(item.value);
+    setData(prev => ({ ...prev, monthlyTransactionVolume: item.value }));
   };
-
   const handleAccountingSoftwareChange = (value: string) => {
     setAccountingSoftware(value);
     setData(prev => ({ ...prev, currentAccountingSoftware: value }));
   };
-
   const handleNext = () => {
-    // Save all data to context before navigating
     setData(prev => ({
       ...prev,
       businessSize,
@@ -122,20 +106,21 @@ const SetupWizardScreen: React.FC = () => {
       monthlyTransactionVolume: transactionVolume,
       currentAccountingSoftware: accountingSoftware,
     }));
-
     navigation.navigate('TeamSetup');
   };
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={{ flexGrow: 1 }}>
+      <KeyboardAwareScrollView
+        contentContainerStyle={{ flexGrow: 1 }}
+        keyboardShouldPersistTaps="handled"
+        enableOnAndroid={true}
+        extraScrollHeight={60}
+        showsVerticalScrollIndicator={false}
+      >
         {/* Logo and App Name */}
-        <View style={styles.logoContainer}>
-          <Image source={LOGO} style={styles.logo} />
-          <Text style={styles.appName}>Smart Ledger</Text>
-        </View>
         {/* Setup Wizard Badge */}
-        <View style={styles.badgeRow}>
+        {/* <View style={styles.badgeRow}>
           <LinearGradient
             colors={['#4f8cff', '#1ecb81']}
             start={{ x: 0, y: 0 }}
@@ -144,7 +129,7 @@ const SetupWizardScreen: React.FC = () => {
           >
             <Text style={styles.setupBadgeText}>Setup Wizard</Text>
           </LinearGradient>
-        </View>
+        </View> */}
         {/* Progress Bar */}
         <View style={styles.progressRow}>
           <Text style={styles.progressText}>Step 1 of 5</Text>
@@ -173,73 +158,149 @@ const SetupWizardScreen: React.FC = () => {
 
           {/* Business Size */}
           <Text style={styles.label}>Business Size</Text>
-          <View style={styles.pickerWrapper}>
-            <Picker
-              selectedValue={businessSize}
-              onValueChange={handleBusinessSizeChange}
-              style={styles.picker}
-              itemStyle={styles.pickerItem}
-              dropdownIconColor="#8a94a6"
-            >
-              <Picker.Item
-                label="Select business size"
-                value=""
-                color="#8a94a6"
+          <Dropdown
+            style={[
+              styles.dropdown1,
+              activeField === 'businessSize' && styles.inputActive,
+              activeField === 'businessSize' && styles.inputFocusShadow,
+            ]}
+            placeholderStyle={styles.placeholderStyle1}
+            selectedTextStyle={styles.selectedTextStyle1}
+            inputSearchStyle={styles.inputSearchStyle1}
+            iconStyle={styles.iconStyle1}
+            data={businessSizes.map(size => ({ label: size, value: size }))}
+            search
+            searchPlaceholder="Search business size..."
+            maxHeight={300}
+            labelField="label"
+            valueField="value"
+            placeholder="Select business size"
+            value={businessSize}
+            onChange={handleBusinessSizeChange}
+            renderLeftIcon={() => (
+              <Ionicons
+                name="people"
+                size={20}
+                color="#4f8cff"
+                style={{ marginRight: 10 }}
               />
-              {businessSizes.map(size => (
-                <Picker.Item key={size} label={size} value={size} />
-              ))}
-            </Picker>
-          </View>
+            )}
+            renderItem={(item, selected) => (
+              <View style={styles.dropdownItem}>
+                <Text style={styles.dropdownItemText}>{item.label}</Text>
+                {selected && (
+                  <Ionicons name="checkmark" size={18} color="#4f8cff" />
+                )}
+              </View>
+            )}
+            onFocus={() => setActiveField('businessSize')}
+            flatListProps={{ keyboardShouldPersistTaps: 'always' }}
+            containerStyle={styles.dropdownContainer}
+            itemContainerStyle={styles.dropdownItemContainer}
+          />
+
           {/* Industry */}
           <Text style={styles.label}>Industry</Text>
-          <View style={styles.pickerWrapper}>
-            <Picker
-              selectedValue={industry}
-              onValueChange={handleIndustryChange}
-              style={styles.picker}
-              itemStyle={styles.pickerItem}
-              dropdownIconColor="#8a94a6"
-            >
-              <Picker.Item
-                label="Select your industry"
-                value=""
-                color="#8a94a6"
+          <Dropdown
+            style={[
+              styles.dropdown1,
+              activeField === 'industry' && styles.inputActive,
+              activeField === 'industry' && styles.inputFocusShadow,
+            ]}
+            placeholderStyle={styles.placeholderStyle1}
+            selectedTextStyle={styles.selectedTextStyle1}
+            inputSearchStyle={styles.inputSearchStyle1}
+            iconStyle={styles.iconStyle1}
+            data={industries.map(ind => ({ label: ind, value: ind }))}
+            search
+            searchPlaceholder="Search industry..."
+            maxHeight={300}
+            labelField="label"
+            valueField="value"
+            placeholder="Select your industry"
+            value={industry}
+            onChange={handleIndustryChange}
+            renderLeftIcon={() => (
+              <Ionicons
+                name="briefcase"
+                size={20}
+                color="#4f8cff"
+                style={{ marginRight: 10 }}
               />
-              {industries.map(ind => (
-                <Picker.Item key={ind} label={ind} value={ind} />
-              ))}
-            </Picker>
-          </View>
+            )}
+            renderItem={(item, selected) => (
+              <View style={styles.dropdownItem}>
+                <Text style={styles.dropdownItemText}>{item.label}</Text>
+                {selected && (
+                  <Ionicons name="checkmark" size={18} color="#4f8cff" />
+                )}
+              </View>
+            )}
+            onFocus={() => setActiveField('industry')}
+            flatListProps={{ keyboardShouldPersistTaps: 'always' }}
+            containerStyle={styles.dropdownContainer}
+            itemContainerStyle={styles.dropdownItemContainer}
+          />
+
           {/* Monthly Transaction Volume */}
           <Text style={styles.label}>Monthly Transaction Volume</Text>
-          <View style={styles.pickerWrapper}>
-            <Picker
-              selectedValue={transactionVolume}
-              onValueChange={handleTransactionVolumeChange}
-              style={styles.picker}
-              itemStyle={styles.pickerItem}
-              dropdownIconColor="#8a94a6"
-            >
-              <Picker.Item
-                label="Select transaction volume"
-                value=""
-                color="#8a94a6"
+          <Dropdown
+            style={[
+              styles.dropdown1,
+              activeField === 'transactionVolume' && styles.inputActive,
+              activeField === 'transactionVolume' && styles.inputFocusShadow,
+            ]}
+            placeholderStyle={styles.placeholderStyle1}
+            selectedTextStyle={styles.selectedTextStyle1}
+            inputSearchStyle={styles.inputSearchStyle1}
+            iconStyle={styles.iconStyle1}
+            data={transactionVolumes.map(vol => ({ label: vol, value: vol }))}
+            search
+            searchPlaceholder="Search volume..."
+            maxHeight={300}
+            labelField="label"
+            valueField="value"
+            placeholder="Select transaction volume"
+            value={transactionVolume}
+            onChange={handleTransactionVolumeChange}
+            renderLeftIcon={() => (
+              <Ionicons
+                name="swap-vertical"
+                size={20}
+                color="#4f8cff"
+                style={{ marginRight: 10 }}
               />
-              {transactionVolumes.map(vol => (
-                <Picker.Item key={vol} label={vol} value={vol} />
-              ))}
-            </Picker>
-          </View>
+            )}
+            renderItem={(item, selected) => (
+              <View style={styles.dropdownItem}>
+                <Text style={styles.dropdownItemText}>{item.label}</Text>
+                {selected && (
+                  <Ionicons name="checkmark" size={18} color="#4f8cff" />
+                )}
+              </View>
+            )}
+            onFocus={() => setActiveField('transactionVolume')}
+            flatListProps={{ keyboardShouldPersistTaps: 'always' }}
+            containerStyle={styles.dropdownContainer}
+            itemContainerStyle={styles.dropdownItemContainer}
+          />
+
           {/* Current Accounting Software */}
           <Text style={styles.label}>Current Accounting Software (if any)</Text>
           <TextInput
-            style={styles.input}
+            style={[
+              styles.input,
+              activeField === 'accountingSoftware' && styles.inputActive,
+              activeField === 'accountingSoftware' && styles.inputFocusShadow,
+            ]}
             placeholder="e.g., Tally, QuickBooks, Excel, None"
             value={accountingSoftware}
             onChangeText={handleAccountingSoftwareChange}
             placeholderTextColor="#8a94a6"
+            onFocus={() => setActiveField('accountingSoftware')}
+            onBlur={() => setActiveField('')}
           />
+
           {/* Navigation Buttons */}
           <View style={styles.buttonRow}>
             <TouchableOpacity
@@ -260,7 +321,7 @@ const SetupWizardScreen: React.FC = () => {
             </LinearGradient>
           </View>
         </View>
-      </ScrollView>
+      </KeyboardAwareScrollView>
     </SafeAreaView>
   );
 };
@@ -269,25 +330,6 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: '#f6fafc',
-  },
-  logoContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 18,
-    marginBottom: 8,
-  },
-  logo: {
-    width: 44,
-    height: 44,
-    borderRadius: 10,
-    marginRight: 10,
-  },
-  appName: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#222',
-    letterSpacing: 0.5,
   },
   badgeRow: {
     alignItems: 'center',
@@ -375,30 +417,69 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     alignSelf: 'flex-start',
   },
-  pickerWrapper: {
+  dropdown1: {
+    marginTop: 12,
+    height: 50,
     width: '100%',
+    backgroundColor: '#fff',
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    borderColor: '#e3e7ee',
+    borderWidth: 1.5,
+    fontSize: 16,
+  },
+  placeholderStyle1: {
+    fontSize: 15,
+    color: '#8a94a6',
+  },
+  selectedTextStyle1: {
+    fontSize: 15,
+    color: '#222',
+  },
+  inputSearchStyle1: {
+    height: 40,
+    fontSize: 15,
+    color: '#222',
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    paddingLeft: 8,
+    borderBottomColor: '#e3e7ee',
+    borderBottomWidth: 1,
+  },
+  iconStyle1: {
+    width: 24,
+    height: 24,
+  },
+  dropdownContainer: {
+    marginTop: 10,
+    borderRadius: 12,
     borderColor: '#e3e7ee',
     borderWidth: 1,
-    borderRadius: 8,
-    marginBottom: 2,
-    backgroundColor: '#fff',
-    height: 52,
-    justifyContent: 'center',
-    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 5,
+    zIndex: 1000,
   },
-  picker: {
-    width: '100%',
-    height: 52,
-    color: '#222',
-    fontSize: 15,
-    paddingVertical: 0,
-    marginTop: Platform.OS === 'android' ? -2 : 0,
+  dropdownItemContainer: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
   },
-  pickerItem: {
-    height: 52,
+  dropdownItem: {
+    padding: 12,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  dropdownItemText: {
     fontSize: 15,
     color: '#222',
-    textAlignVertical: 'center',
   },
   input: {
     width: '100%',
@@ -412,12 +493,25 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: '#222',
   },
+  inputActive: {
+    borderColor: '#4f8cff',
+    borderWidth: 2,
+  },
+  inputFocusShadow: {
+    shadowColor: '#4f8cff',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
+    elevation: 2,
+    backgroundColor: '#f0f6ff',
+  },
   progressRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginHorizontal: 24,
     marginBottom: 2,
+    marginTop: 30,
   },
   progressText: {
     color: '#222',

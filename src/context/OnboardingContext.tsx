@@ -15,6 +15,7 @@ export interface OnboardingData {
   ifscCode: string;
   primaryGoal: string;
   currentChallenges: string;
+  caAccountId: string;
 }
 
 const defaultData: OnboardingData = {
@@ -31,6 +32,7 @@ const defaultData: OnboardingData = {
   ifscCode: '',
   primaryGoal: '',
   currentChallenges: '',
+  caAccountId: '',
 };
 
 type OnboardingContextType = {
@@ -38,14 +40,18 @@ type OnboardingContextType = {
   setData: React.Dispatch<React.SetStateAction<OnboardingData>>;
 };
 
-const OnboardingContext = createContext<OnboardingContextType | undefined>(undefined);
+const OnboardingContext = createContext<OnboardingContextType | undefined>(
+  undefined,
+);
 
-export const OnboardingProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+export const OnboardingProvider: React.FC<{ children: React.ReactNode }> = ({
+  children,
+}) => {
   const [data, setData] = useState<OnboardingData>(defaultData);
 
   useEffect(() => {
     // Load mobile number from AsyncStorage on mount
-    AsyncStorage.getItem('userMobileNumber').then((mobileNumber) => {
+    AsyncStorage.getItem('userMobileNumber').then(mobileNumber => {
       if (mobileNumber) {
         setData(prev => ({ ...prev, mobileNumber }));
       }
@@ -61,6 +67,7 @@ export const OnboardingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
 export const useOnboarding = () => {
   const context = useContext(OnboardingContext);
-  if (!context) throw new Error('useOnboarding must be used within OnboardingProvider');
+  if (!context)
+    throw new Error('useOnboarding must be used within OnboardingProvider');
   return context;
-}; 
+};
