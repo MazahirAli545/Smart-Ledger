@@ -34,6 +34,7 @@ import SearchAndFilter, {
   PaymentSearchFilterState,
   RecentSearch,
 } from '../../components/SearchAndFilter';
+import StatusBadge from '../../components/StatusBadge';
 
 interface FolderProp {
   folder?: { id?: number; title?: string; icon?: string };
@@ -85,6 +86,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   const paymentDateRef = useRef<TextInput>(null);
   const amountRef = useRef<TextInput>(null);
   const notesRef = useRef<TextInput>(null);
+  const [syncYN, setSyncYN] = useState('N');
 
   // Add filter state
   const [filterVisible, setFilterVisible] = useState(false);
@@ -375,7 +377,10 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   };
 
   // API submit handler
-  const handleSubmit = async (status: 'complete' | 'draft') => {
+  const handleSubmit = async (
+    status: 'complete' | 'draft',
+    syncYNOverride?: 'Y' | 'N',
+  ) => {
     setTriedSubmit(true);
     setError(null);
     setSuccess(null);
@@ -438,6 +443,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         shippingAmount: '',
         subTotal: '',
         totalAmount: parseFloat(amount).toFixed(2),
+        syncYN: syncYNOverride || syncYN || 'N',
       };
       const token = await AsyncStorage.getItem('accessToken');
       let res;
@@ -484,7 +490,6 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           ? 'Payment updated successfully!'
           : 'Payment saved successfully!',
       );
-      setShowModal(true);
       // After success, refresh list, reset editingItem, and close form
       await fetchPayments();
       setEditingItem(null);
@@ -524,8 +529,13 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
 
   // Utility: Numeric range match
   function inRange(num: number, min?: number, max?: number) {
-    if (min !== undefined && num < min) return false;
-    if (max !== undefined && num > max) return false;
+    const n = Number(num);
+    const minN =
+      min !== undefined && min !== null && min !== '' ? Number(min) : undefined;
+    const maxN =
+      max !== undefined && max !== null && max !== '' ? Number(max) : undefined;
+    if (minN !== undefined && n < minN) return false;
+    if (maxN !== undefined && n > maxN) return false;
     return true;
   }
 
@@ -656,9 +666,23 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   };
 
   // Add handleSync function
-  const handleSync = (item: any) => {
-    console.log('Sync pressed for', item);
-    // Placeholder for sync logic
+  const handleSync = async (item: any) => {
+    try {
+      const token = await AsyncStorage.getItem('accessToken');
+      const patchBody = { syncYN: 'Y' };
+      const res = await fetch(`${BASE_URL}/vouchers/${item.id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(patchBody),
+      });
+      if (!res.ok) throw new Error('Failed to sync');
+      await fetchPayments();
+    } catch (e) {
+      // Optionally show error
+    }
   };
 
   // Ensure renderPaymentItem is defined before FlatList usage
@@ -682,14 +706,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           <Text style={styles.invoiceNumber}>
             {item.billNumber || `PAY-${item.id}`}
           </Text>
-          <View
-            style={[
-              styles.statusBadge,
-              { backgroundColor: getStatusColor(item.status) },
-            ]}
-          >
-            <Text style={styles.statusText}>{getStatusLabel(item.status)}</Text>
-          </View>
+          <StatusBadge status={item.status} />
         </View>
         <Text style={styles.customerName}>{item.partyName}</Text>
         <View style={styles.invoiceDetails}>
@@ -700,9 +717,16 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         </View>
       </TouchableOpacity>
       <TouchableOpacity
-        style={styles.syncButton}
+        style={[
+          styles.syncButton,
+          item.syncYN === 'Y' && {
+            backgroundColor: '#bdbdbd',
+            borderColor: '#bdbdbd',
+          },
+        ]}
         onPress={() => handleSync(item)}
         activeOpacity={0.85}
+        disabled={item.syncYN === 'Y'}
       >
         <Text style={styles.syncButtonText}>Sync</Text>
       </TouchableOpacity>
@@ -1063,9 +1087,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                   justifyContent: 'center',
                 }}
               >
-                {loadingSave || loadingDraft ? (
-                  <ActivityIndicator size="large" color="#4f8cff" />
-                ) : error ? (
+                {error ? (
                   <>
                     <MaterialCommunityIcons
                       name="alert-circle"
@@ -1105,45 +1127,6 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                       onPress={() => setShowModal(false)}
                     >
                       <Text style={styles.primaryButtonText}>Close</Text>
-                    </TouchableOpacity>
-                  </>
-                ) : success ? (
-                  <>
-                    <MaterialCommunityIcons
-                      name="check-circle"
-                      size={48}
-                      color="#28a745"
-                      style={{ marginBottom: 12 }}
-                    />
-                    <Text
-                      style={{
-                        color: '#28a745',
-                        fontWeight: 'bold',
-                        fontSize: 18,
-                        marginBottom: 8,
-                      }}
-                    >
-                      Success
-                    </Text>
-                    <Text
-                      style={{
-                        color: '#222',
-                        fontSize: 16,
-                        marginBottom: 20,
-                        textAlign: 'center',
-                      }}
-                    >
-                      {success}
-                    </Text>
-                    <TouchableOpacity
-                      style={[styles.primaryButton, { width: 120 }]}
-                      onPress={() => {
-                        setShowModal(false);
-                        setShowCreateForm(false);
-                        resetForm();
-                      }}
-                    >
-                      <Text style={styles.primaryButtonText}>OK</Text>
                     </TouchableOpacity>
                   </>
                 ) : null}
@@ -1187,15 +1170,31 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         onBackdropPress={() => setFilterVisible(false)}
         style={{ justifyContent: 'flex-end', margin: 0 }}
       >
-        <View
+        <KeyboardAwareScrollView
           style={{
             backgroundColor: '#fff',
             borderTopLeftRadius: 18,
             borderTopRightRadius: 18,
-            padding: 20,
           }}
+          contentContainerStyle={{ padding: 20 }}
+          enableOnAndroid
+          extraScrollHeight={120}
+          keyboardShouldPersistTaps="handled"
         >
-          <Text style={{ fontWeight: 'bold', fontSize: 18, marginBottom: 16 }}>
+          <TouchableOpacity
+            onPress={() => setFilterVisible(false)}
+            style={{ position: 'absolute', left: 16, top: 16, zIndex: 10 }}
+          >
+            <MaterialCommunityIcons name="arrow-left" size={24} color="#222" />
+          </TouchableOpacity>
+          <Text
+            style={{
+              fontWeight: 'bold',
+              fontSize: 18,
+              marginBottom: 16,
+              marginLeft: 40,
+            }}
+          >
             Filter Payments
           </Text>
           {/* Amount Range */}
@@ -1325,9 +1324,16 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
               }}
             />
           )}
-          {/* Payment Method Dropdown */}
+          {/* Payment Method filter */}
           <Text style={{ fontSize: 15, marginBottom: 6 }}>Payment Method</Text>
-          <View style={{ flexDirection: 'row', marginBottom: 16 }}>
+          <View
+            style={{
+              flexDirection: 'row',
+              flexWrap: 'wrap',
+              marginBottom: 16,
+              justifyContent: 'space-between',
+            }}
+          >
             {[
               '',
               'Cash',
@@ -1336,11 +1342,11 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
               'Credit Card',
               'Debit Card',
               'Cheque',
-            ].map(method => (
+            ].map((method, idx) => (
               <TouchableOpacity
                 key={method}
                 style={{
-                  flex: 1,
+                  width: '48%',
                   backgroundColor:
                     searchFilter.paymentMethod === method
                       ? '#e6f0ff'
@@ -1352,8 +1358,9 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                   borderWidth: 1,
                   borderRadius: 8,
                   padding: 10,
-                  marginRight: method !== 'Cheque' ? 8 : 0,
+                  marginBottom: 10,
                   alignItems: 'center',
+                  justifyContent: 'center',
                 }}
                 onPress={() =>
                   setSearchFilter(f => ({
@@ -1362,14 +1369,23 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                   }))
                 }
               >
-                <Text style={{ color: '#222' }}>{method || 'All'}</Text>
+                <Text
+                  style={{
+                    color: '#222',
+                    fontSize: searchFilter.paymentMethod === method ? 16 : 15,
+                    fontWeight:
+                      searchFilter.paymentMethod === method ? 'bold' : '500',
+                  }}
+                >
+                  {method || 'All'}
+                </Text>
               </TouchableOpacity>
             ))}
           </View>
-          {/* Status Filter */}
+          {/* Status filter */}
           <Text style={{ fontSize: 15, marginBottom: 6 }}>Status</Text>
           <View style={{ flexDirection: 'row', marginBottom: 16 }}>
-            {['', 'complete', 'draft', 'overdue'].map(status => (
+            {['', 'Paid', 'Pending'].map(status => (
               <TouchableOpacity
                 key={status}
                 style={{
@@ -1381,14 +1397,21 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                   borderWidth: 1,
                   borderRadius: 8,
                   padding: 10,
-                  marginRight: status !== 'overdue' ? 8 : 0,
+                  marginRight: status !== 'Pending' ? 8 : 0,
                   alignItems: 'center',
+                  justifyContent: 'center',
                 }}
                 onPress={() =>
                   setSearchFilter(f => ({ ...f, status: status || undefined }))
                 }
               >
-                <Text style={{ color: '#222', textTransform: 'capitalize' }}>
+                <Text
+                  style={{
+                    color: '#222',
+                    fontSize: searchFilter.status === status ? 16 : 15,
+                    fontWeight: searchFilter.status === status ? 'bold' : '500',
+                  }}
+                >
                   {status || 'All'}
                 </Text>
               </TouchableOpacity>
@@ -1397,7 +1420,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           {/* Category Filter */}
           <Text style={{ fontSize: 15, marginBottom: 6 }}>Category</Text>
           <View style={{ flexDirection: 'row', marginBottom: 16 }}>
-            {['', 'Supplier', 'Expense', 'Salary', 'Rent', 'Other'].map(cat => (
+            {['', 'Suppliers', 'Customers'].map(cat => (
               <TouchableOpacity
                 key={cat}
                 style={{
@@ -1409,14 +1432,23 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                   borderWidth: 1,
                   borderRadius: 8,
                   padding: 10,
-                  marginRight: cat !== 'Other' ? 8 : 0,
+                  marginRight: cat !== 'Customers' ? 8 : 0,
                   alignItems: 'center',
+                  justifyContent: 'center',
                 }}
                 onPress={() =>
                   setSearchFilter(f => ({ ...f, category: cat || undefined }))
                 }
               >
-                <Text style={{ color: '#222' }}>{cat || 'All'}</Text>
+                <Text
+                  style={{
+                    color: '#222',
+                    fontSize: searchFilter.category === cat ? 16 : 15,
+                    fontWeight: searchFilter.category === cat ? 'bold' : '500',
+                  }}
+                >
+                  {cat || 'All'}
+                </Text>
               </TouchableOpacity>
             ))}
           </View>
@@ -1456,25 +1488,47 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
               setSearchFilter(f => ({ ...f, description: v || undefined }))
             }
           />
-          {/* Actions */}
-          <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
+          {/* Reset/Apply buttons */}
+          <View
+            style={{
+              flexDirection: 'row',
+              justifyContent: 'flex-end',
+              marginTop: 16,
+            }}
+          >
             <TouchableOpacity
-              onPress={() => {
-                setSearchFilter({ searchText: '' });
+              onPress={() => setSearchFilter({ searchText: '' })}
+              style={{
+                paddingVertical: 10,
+                paddingHorizontal: 24,
+                borderRadius: 8,
+                backgroundColor: '#fff',
+                borderWidth: 1,
+                borderColor: '#dc3545',
+                marginRight: 12,
               }}
-              style={{ marginRight: 16 }}
             >
-              <Text style={{ color: '#dc3545', fontWeight: 'bold' }}>
+              <Text
+                style={{ color: '#dc3545', fontWeight: 'bold', fontSize: 16 }}
+              >
                 Reset
               </Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => setFilterVisible(false)}>
-              <Text style={{ color: '#4f8cff', fontWeight: 'bold' }}>
+            <TouchableOpacity
+              onPress={() => setFilterVisible(false)}
+              style={{
+                paddingVertical: 10,
+                paddingHorizontal: 24,
+                borderRadius: 8,
+                backgroundColor: '#4f8cff',
+              }}
+            >
+              <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}>
                 Apply
               </Text>
             </TouchableOpacity>
           </View>
-        </View>
+        </KeyboardAwareScrollView>
       </Modal>
       {/* Payment List */}
       <View style={styles.listContainer}>
@@ -1494,7 +1548,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           </Text>
         ) : (
           <FlatList
-            data={filteredPayments}
+            data={[...filteredPayments].reverse()}
             renderItem={renderPaymentItem}
             keyExtractor={item => String(item.id)}
             showsVerticalScrollIndicator={false}
@@ -1700,20 +1754,20 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
     fontWeight: '500',
   },
   syncButton: {
-    backgroundColor: '#e0e0e0',
-    borderRadius: 8,
+    backgroundColor: '#4f8cff',
     paddingVertical: 30, // further increased height
     paddingHorizontal: 32,
     marginLeft: 10,
+    borderRadius: 8,
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
-    borderColor: '#e0e0e0',
+    borderColor: '#4f8cff',
   },
   syncButtonText: {
-    fontSize: 14,
-    color: '#222',
+    color: '#fff',
     fontWeight: 'bold',
+    fontSize: 14,
   },
 };
 

@@ -33,6 +33,7 @@ import SearchAndFilter, {
 } from '../../components/SearchAndFilter';
 import Modal from 'react-native-modal';
 import { RouteProp, useRoute } from '@react-navigation/native';
+import StatusBadge from '../../components/StatusBadge';
 
 interface FolderParam {
   folder?: {
@@ -199,6 +200,7 @@ const InvoiceScreen: React.FC = () => {
   const [description, setDescription] = useState('');
   // Add a loading state for entering the edit form
   // const [editFormLoading, setEditFormLoading] = useState(false); // Removed
+  const [syncYN, setSyncYN] = useState('N');
 
   const addItem = () => {
     const newItem: InvoiceItem = {
@@ -403,7 +405,10 @@ const InvoiceScreen: React.FC = () => {
   const { customers, add, fetchAll } = useCustomerContext();
 
   // API submit handler
-  const handleSubmit = async (status: 'complete' | 'draft') => {
+  const handleSubmit = async (
+    status: 'complete' | 'draft',
+    syncYNOverride?: 'Y' | 'N',
+  ) => {
     setTriedSubmit(true);
     setError(null);
     setSuccess(null);
@@ -467,6 +472,7 @@ const InvoiceScreen: React.FC = () => {
         shippingAmount: '',
         subTotal: subTotal.toFixed(2),
         totalAmount: totalAmount.toFixed(2),
+        syncYN: syncYNOverride || syncYN || 'N',
         // supplier removed
         ...(folder?.id ? { folderId: folder.id } : {}),
       };
@@ -522,7 +528,6 @@ const InvoiceScreen: React.FC = () => {
           ? 'Invoice updated successfully!'
           : 'Invoice saved successfully!',
       );
-      setShowModal(true);
       // After success, refresh list, reset editingItem, and close form
       await fetchInvoices();
       setEditingItem(null);
@@ -595,9 +600,23 @@ const InvoiceScreen: React.FC = () => {
   };
 
   // Add handleSync function
-  const handleSync = (item: any) => {
-    console.log('Sync pressed for', item);
-    // Placeholder for sync logic
+  const handleSync = async (item: any) => {
+    try {
+      const token = await AsyncStorage.getItem('accessToken');
+      const patchBody = { syncYN: 'Y' };
+      const res = await fetch(`${BASE_URL}/vouchers/${item.id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(patchBody),
+      });
+      if (!res.ok) throw new Error('Failed to sync');
+      await fetchInvoices();
+    } catch (e) {
+      // Optionally show error
+    }
   };
 
   const scrollRef = useRef<KeyboardAwareScrollView>(null);
@@ -638,9 +657,15 @@ const InvoiceScreen: React.FC = () => {
     if (!value || !search) return false;
     return value.toLowerCase().includes(search.toLowerCase());
   }
+  // Update inRange and inDateRange logic to allow only min or only from date
   function inRange(num: number, min?: number, max?: number) {
-    if (min !== undefined && num < min) return false;
-    if (max !== undefined && num > max) return false;
+    const n = Number(num);
+    const minN =
+      min !== undefined && min !== null && min !== '' ? Number(min) : undefined;
+    const maxN =
+      max !== undefined && max !== null && max !== '' ? Number(max) : undefined;
+    if (minN !== undefined && n < minN) return false;
+    if (maxN !== undefined && n > maxN) return false;
     return true;
   }
   function inDateRange(dateStr: string, from?: string, to?: string) {
@@ -1197,9 +1222,7 @@ const InvoiceScreen: React.FC = () => {
                   justifyContent: 'center',
                 }}
               >
-                {loadingSave || loadingDraft ? (
-                  <ActivityIndicator size="large" color="#4f8cff" />
-                ) : error ? (
+                {error ? (
                   <>
                     <MaterialCommunityIcons
                       name="alert-circle"
@@ -1310,14 +1333,7 @@ const InvoiceScreen: React.FC = () => {
           <Text style={styles.invoiceNumber}>
             {item.invoiceNumber || `INV-${item.id}`}
           </Text>
-          <View
-            style={[
-              styles.statusBadge,
-              { backgroundColor: getStatusColor(item.status) },
-            ]}
-          >
-            <Text style={styles.statusText}>{getStatusLabel(item.status)}</Text>
-          </View>
+          <StatusBadge status={item.status} />
         </View>
         <Text style={styles.customerName}>{item.partyName}</Text>
         <View style={styles.invoiceDetails}>
@@ -1328,9 +1344,16 @@ const InvoiceScreen: React.FC = () => {
         </View>
       </TouchableOpacity>
       <TouchableOpacity
-        style={styles.syncButton}
+        style={[
+          styles.syncButton,
+          item.syncYN === 'Y' && {
+            backgroundColor: '#bdbdbd',
+            borderColor: '#bdbdbd',
+          },
+        ]}
         onPress={() => handleSync(item)}
         activeOpacity={0.85}
+        disabled={item.syncYN === 'Y'}
       >
         <Text style={styles.syncButtonText}>Sync</Text>
       </TouchableOpacity>
@@ -1378,7 +1401,7 @@ const InvoiceScreen: React.FC = () => {
           </Text>
         ) : (
           <FlatList
-            data={filteredInvoices}
+            data={[...filteredInvoices].reverse()}
             renderItem={renderInvoiceItem}
             keyExtractor={item => String(item.id)}
             showsVerticalScrollIndicator={false}
@@ -1405,16 +1428,32 @@ const InvoiceScreen: React.FC = () => {
         onBackdropPress={() => setFilterVisible(false)}
         style={{ justifyContent: 'flex-end', margin: 0 }}
       >
-        <View
+        <KeyboardAwareScrollView
           style={{
             backgroundColor: '#fff',
             borderTopLeftRadius: 18,
             borderTopRightRadius: 18,
-            padding: 20,
           }}
+          contentContainerStyle={{ padding: 20 }}
+          enableOnAndroid
+          extraScrollHeight={120}
+          keyboardShouldPersistTaps="handled"
         >
-          <Text style={{ fontWeight: 'bold', fontSize: 18, marginBottom: 16 }}>
-            {`Filter ${pluralize(folderName)}`}
+          <TouchableOpacity
+            onPress={() => setFilterVisible(false)}
+            style={{ position: 'absolute', left: 16, top: 16, zIndex: 10 }}
+          >
+            <MaterialCommunityIcons name="arrow-left" size={24} color="#222" />
+          </TouchableOpacity>
+          <Text
+            style={{
+              fontWeight: 'bold',
+              fontSize: 18,
+              marginBottom: 16,
+              marginLeft: 40,
+            }}
+          >
+            Filter Invoices
           </Text>
           {/* Amount Range */}
           <Text style={{ fontSize: 15, marginBottom: 6 }}>Amount Range</Text>
@@ -1542,9 +1581,16 @@ const InvoiceScreen: React.FC = () => {
               }}
             />
           )}
-          {/* Payment Method Dropdown */}
+          {/* Payment Method filter */}
           <Text style={{ fontSize: 15, marginBottom: 6 }}>Payment Method</Text>
-          <View style={{ flexDirection: 'row', marginBottom: 16 }}>
+          <View
+            style={{
+              flexDirection: 'row',
+              flexWrap: 'wrap',
+              marginBottom: 16,
+              justifyContent: 'space-between',
+            }}
+          >
             {[
               '',
               'Cash',
@@ -1553,11 +1599,11 @@ const InvoiceScreen: React.FC = () => {
               'Credit Card',
               'Debit Card',
               'Cheque',
-            ].map(method => (
+            ].map((method, idx) => (
               <TouchableOpacity
                 key={method}
                 style={{
-                  flex: 1,
+                  width: '48%',
                   backgroundColor:
                     searchFilter.paymentMethod === method
                       ? '#e6f0ff'
@@ -1569,8 +1615,9 @@ const InvoiceScreen: React.FC = () => {
                   borderWidth: 1,
                   borderRadius: 8,
                   padding: 10,
-                  marginRight: method !== 'Cheque' ? 8 : 0,
+                  marginBottom: 10,
                   alignItems: 'center',
+                  justifyContent: 'center',
                 }}
                 onPress={() =>
                   setSearchFilter(f => ({
@@ -1579,14 +1626,23 @@ const InvoiceScreen: React.FC = () => {
                   }))
                 }
               >
-                <Text style={{ color: '#222' }}>{method || 'All'}</Text>
+                <Text
+                  style={{
+                    color: '#222',
+                    fontSize: searchFilter.paymentMethod === method ? 16 : 15,
+                    fontWeight:
+                      searchFilter.paymentMethod === method ? 'bold' : '500',
+                  }}
+                >
+                  {method || 'All'}
+                </Text>
               </TouchableOpacity>
             ))}
           </View>
           {/* Status Filter */}
           <Text style={{ fontSize: 15, marginBottom: 6 }}>Status</Text>
           <View style={{ flexDirection: 'row', marginBottom: 16 }}>
-            {['', 'complete', 'draft', 'overdue'].map(status => (
+            {['', 'Paid', 'Pending'].map(status => (
               <TouchableOpacity
                 key={status}
                 style={{
@@ -1598,14 +1654,22 @@ const InvoiceScreen: React.FC = () => {
                   borderWidth: 1,
                   borderRadius: 8,
                   padding: 10,
-                  marginRight: status !== 'overdue' ? 8 : 0,
+                  marginRight: status !== 'Pending' ? 8 : 0,
                   alignItems: 'center',
+                  justifyContent: 'center',
                 }}
                 onPress={() =>
                   setSearchFilter(f => ({ ...f, status: status || undefined }))
                 }
               >
-                <Text style={{ color: '#222', textTransform: 'capitalize' }}>
+                <Text
+                  style={{
+                    color: '#222',
+                    textTransform: 'capitalize',
+                    fontSize: searchFilter.status === status ? 16 : 15,
+                    fontWeight: searchFilter.status === status ? 'bold' : '500',
+                  }}
+                >
                   {status || 'All'}
                 </Text>
               </TouchableOpacity>
@@ -1614,7 +1678,7 @@ const InvoiceScreen: React.FC = () => {
           {/* Category Filter */}
           <Text style={{ fontSize: 15, marginBottom: 6 }}>Category</Text>
           <View style={{ flexDirection: 'row', marginBottom: 16 }}>
-            {['', 'Supplier', 'Expense', 'Salary', 'Rent', 'Other'].map(cat => (
+            {['', 'Suppliers', 'Customers'].map(cat => (
               <TouchableOpacity
                 key={cat}
                 style={{
@@ -1626,14 +1690,23 @@ const InvoiceScreen: React.FC = () => {
                   borderWidth: 1,
                   borderRadius: 8,
                   padding: 10,
-                  marginRight: cat !== 'Other' ? 8 : 0,
+                  marginRight: cat !== 'Customers' ? 8 : 0,
                   alignItems: 'center',
+                  justifyContent: 'center',
                 }}
                 onPress={() =>
                   setSearchFilter(f => ({ ...f, category: cat || undefined }))
                 }
               >
-                <Text style={{ color: '#222' }}>{cat || 'All'}</Text>
+                <Text
+                  style={{
+                    color: '#222',
+                    fontSize: searchFilter.category === cat ? 16 : 15,
+                    fontWeight: searchFilter.category === cat ? 'bold' : '500',
+                  }}
+                >
+                  {cat || 'All'}
+                </Text>
               </TouchableOpacity>
             ))}
           </View>
@@ -1691,7 +1764,7 @@ const InvoiceScreen: React.FC = () => {
               </Text>
             </TouchableOpacity>
           </View>
-        </View>
+        </KeyboardAwareScrollView>
       </Modal>
     </SafeAreaView>
   );

@@ -18,6 +18,7 @@ import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityI
 import axios from 'axios';
 import { BASE_URL } from '../../api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getUserIdFromToken } from '../../utils/storage';
 
 const FOLDER_TYPES = [
   { label: 'Invoice', value: 'invoice', icon: 'file-document-outline' },
@@ -66,6 +67,7 @@ const AddFolderScreen: React.FC = () => {
     setSaving(true);
     try {
       const accessToken = await AsyncStorage.getItem('accessToken');
+      const userId = await getUserIdFromToken();
       const body = {
         title: folderName.trim(),
         route: `/transaction/${folderName.trim().replace(/\s+/g, '')}`,
@@ -76,9 +78,7 @@ const AddFolderScreen: React.FC = () => {
         isVisible: true,
         menuType: 'default',
         planType: { type: 'free' },
-        createdBy: 1,
-        updatedBy: 1,
-        isCustom: false,
+        isCustom: true,
       };
       await axios.post(`${BASE_URL}/menus`, body, {
         headers: {

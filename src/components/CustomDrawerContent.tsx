@@ -94,13 +94,21 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
 
   // Sort menus by id ascending
   const sortMenus = (menuList: MenuItem[]): MenuItem[] => {
-    return menuList
+    // Sort so 'Add Folder' is always last among siblings
+    const sorted = menuList
       .filter(menu => menu.isVisible)
-      .sort((a, b) => a.id - b.id)
+      .sort((a, b) => {
+        const aIsAddFolder = a.title?.toLowerCase() === 'add folder';
+        const bIsAddFolder = b.title?.toLowerCase() === 'add folder';
+        if (aIsAddFolder && !bIsAddFolder) return 1;
+        if (!aIsAddFolder && bIsAddFolder) return -1;
+        return a.id - b.id;
+      })
       .map(menu => ({
         ...menu,
         children: menu.children ? sortMenus(menu.children) : [],
       }));
+    return sorted;
   };
 
   // menus is now a tree, just sort it
@@ -115,32 +123,41 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
     iconName?: string,
     color: string = '#222',
     size: number = 22,
+    isParent: boolean = true,
+    title?: string,
   ) => {
-    // Fallback for URLs, blobs, or invalid icon names
-    if (
-      !iconName ||
-      iconName.startsWith('http') ||
-      iconName.startsWith('blob:') ||
-      typeof iconName !== 'string' ||
-      iconName.length < 2
-    ) {
+    if (isParent) {
       return (
         <MaterialCommunityIcons
-          name="folder-outline"
-          size={size}
-          color={color}
-          style={{ marginRight: 16 }}
+          name="folder"
+          size={24}
+          color={BRAND_COLOR}
+          style={{ marginRight: 18 }}
+        />
+      );
+    } else {
+      let childIcon = 'file-document-outline';
+      if (title) {
+        if (title.toLowerCase().includes('invoice'))
+          childIcon = 'file-document-outline';
+        else if (title.toLowerCase().includes('receipt'))
+          childIcon = 'file-document-outline';
+        else if (title.toLowerCase().includes('payment'))
+          childIcon = 'credit-card-outline';
+        else if (title.toLowerCase().includes('purchase'))
+          childIcon = 'cart-outline';
+        else if (title.toLowerCase().includes('add folder'))
+          childIcon = 'folder-outline';
+      }
+      return (
+        <MaterialCommunityIcons
+          name={childIcon}
+          size={20}
+          color="#7a8ca3"
+          style={{ marginRight: 14 }}
         />
       );
     }
-    return (
-      <MaterialCommunityIcons
-        name={iconName}
-        size={size}
-        color={color}
-        style={{ marginRight: 16 }}
-      />
-    );
   };
 
   // Render menu tree recursively
@@ -161,21 +178,67 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
             ]}
             activeOpacity={0.8}
             onPress={() => {
-              if (hasChildren) handleToggle(menu.id);
-              // Add navigation for Add Folder
-              if (menu.title === 'Add Folder') {
-                props.navigation.closeDrawer();
-                setTimeout(() => {
-                  props.navigation.navigate('AppStack', {
-                    screen: 'AddFolder',
-                  });
-                }, 250);
+              if (hasChildren) {
+                handleToggle(menu.id);
+              } else {
+                // Navigation for leaf menu items
+                const title = menu.title?.toLowerCase();
+                if (title === 'dashboard') {
+                  props.navigation.closeDrawer();
+                  setTimeout(() => {
+                    props.navigation.navigate('AppStack', {
+                      screen: 'Dashboard',
+                    });
+                  }, 250);
+                } else if (title === 'invoice') {
+                  props.navigation.closeDrawer();
+                  setTimeout(() => {
+                    props.navigation.navigate('AppStack', {
+                      screen: 'Invoice',
+                    });
+                  }, 250);
+                } else if (title === 'receipt') {
+                  props.navigation.closeDrawer();
+                  setTimeout(() => {
+                    props.navigation.navigate('AppStack', {
+                      screen: 'Receipt',
+                    });
+                  }, 250);
+                } else if (title === 'payment') {
+                  props.navigation.closeDrawer();
+                  setTimeout(() => {
+                    props.navigation.navigate('AppStack', {
+                      screen: 'Payment',
+                    });
+                  }, 250);
+                } else if (title === 'purchase') {
+                  props.navigation.closeDrawer();
+                  setTimeout(() => {
+                    props.navigation.navigate('AppStack', {
+                      screen: 'Purchase',
+                    });
+                  }, 250);
+                } else if (title === 'add folder') {
+                  props.navigation.closeDrawer();
+                  setTimeout(() => {
+                    props.navigation.navigate('AppStack', {
+                      screen: 'AddFolder',
+                    });
+                  }, 250);
+                } else {
+                  // Dynamic folder: pass the menu object as folder param
+                  props.navigation.closeDrawer();
+                  setTimeout(() => {
+                    props.navigation.navigate('AppStack', {
+                      screen: 'FolderScreen',
+                      params: { folder: menu },
+                    });
+                  }, 250);
+                }
               }
             }}
           >
             <View style={styles.menuLeft}>
-              {/* Only render icon for parent menus */}
-              {isParent && renderIcon(menu.icon, BRAND_COLOR, 24)}
               <Text
                 style={[
                   styles.menuItem,
@@ -186,12 +249,20 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
                 {menu.title}
               </Text>
             </View>
-            {hasChildren && (
+            {/* Right-side icon for every menu */}
+            {hasChildren && isParent ? (
               <MaterialCommunityIcons
                 name={isExpanded ? 'chevron-down' : 'chevron-right'}
-                size={22}
+                size={24}
                 color={BRAND_COLOR}
-                style={styles.expandIcon}
+                style={{ marginLeft: 12, alignSelf: 'center' }}
+              />
+            ) : (
+              <MaterialCommunityIcons
+                name="chevron-right"
+                size={18}
+                color="#b0b8c1"
+                style={{ marginLeft: 10, alignSelf: 'center' }}
               />
             )}
           </TouchableOpacity>
@@ -208,47 +279,23 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: BG_COLOR }}>
-      <View style={styles.bgWrapper}>
-        <View style={styles.cardContainer}>
-          <Text style={styles.title}>Smart Ledger</Text>
-          <View style={styles.divider} />
-          <ScrollView
-            contentContainerStyle={styles.scrollContent}
-            showsVerticalScrollIndicator={false}
-          >
-            {loading ? (
-              <ActivityIndicator size="small" color={BRAND_COLOR} />
-            ) : (
-              renderMenuTree(topLevelMenus)
-            )}
-          </ScrollView>
-        </View>
-      </View>
+      <Text style={styles.title}>Smart Ledger</Text>
+      <View style={styles.divider} />
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        {loading ? (
+          <ActivityIndicator size="small" color={BRAND_COLOR} />
+        ) : (
+          renderMenuTree(topLevelMenus)
+        )}
+      </ScrollView>
     </SafeAreaView>
   );
 };
 
 const styles = StyleSheet.create({
-  bgWrapper: {
-    flex: 1,
-    backgroundColor: BG_COLOR,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  cardContainer: {
-    backgroundColor: CARD_BG,
-    borderRadius: 24,
-    marginBottom: 32,
-    marginHorizontal: 8,
-    flex: 1,
-    width: '96%',
-    // Removed shadow and elevation for a cleaner look
-    // Add a subtle border for separation
-    borderWidth: 1,
-    borderColor: '#e6eaf0',
-    paddingVertical: 22,
-    paddingHorizontal: 0,
-  },
   title: {
     fontSize: 26,
     fontWeight: '700',
@@ -290,15 +337,17 @@ const styles = StyleSheet.create({
   },
   parentMenuRowExpanded: {
     backgroundColor: '#e6f0ff',
+    borderRadius: 14,
+    // Remove border and shadow
   },
   childMenuRow: {
-    backgroundColor: '#fafdff', // lighter, more minimal
+    backgroundColor: '#fafdff', // very light, almost white
     marginLeft: 16,
-    // Removed borderLeft for a cleaner look
     paddingVertical: 18,
     paddingHorizontal: 10,
     borderRadius: 12,
-    marginBottom: 6, // more spacing between child items
+    marginBottom: 6,
+    // Remove borderLeft and shadow
   },
   menuLeft: {
     flexDirection: 'row',
@@ -330,12 +379,12 @@ const styles = StyleSheet.create({
   },
   childrenContainer: {
     marginLeft: 10,
-    borderLeftWidth: 2,
-    borderLeftColor: '#e6eaf0',
+    // Remove borderLeftWidth and borderLeftColor
     paddingLeft: 10,
     backgroundColor: '#fafdff',
     borderBottomLeftRadius: 14,
     borderBottomRightRadius: 14,
+    // Remove border and shadow
   },
 });
 

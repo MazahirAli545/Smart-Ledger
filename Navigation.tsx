@@ -28,6 +28,7 @@ import PaymentScreen from './src/screens/HomeScreen/PaymentScreen';
 import PurchaseScreen from './src/screens/HomeScreen/PurchaseScreen';
 import AddFolderScreen from './src/screens/HomeScreen/AddFolderScreen';
 import FolderScreen from './src/screens/HomeScreen/FolderScreen';
+import ProfileScreen from './src/screens/HomeScreen/ProfileScreen';
 import { OnboardingProvider } from './src/context/OnboardingContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from './src/context/AuthContext';
@@ -108,12 +109,6 @@ const AuthStack = () => {
   );
 };
 
-// Placeholder screens for the drawer
-const ProfileScreen = () => (
-  <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-    <Text>Profile Screen</Text>
-  </View>
-);
 const SettingsScreen = () => (
   <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
     <Text>Settings Screen</Text>
@@ -137,6 +132,7 @@ const AppStack = () => (
     <Stack.Screen name="Purchase" component={PurchaseScreen} />
     <Stack.Screen name="AddFolder" component={AddFolderScreen} />
     <Stack.Screen name="FolderScreen" component={FolderScreen} />
+    <Stack.Screen name="ProfileScreen" component={ProfileScreen} />
   </Stack.Navigator>
 );
 

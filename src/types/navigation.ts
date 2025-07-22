@@ -7,6 +7,8 @@ export type AppStackParamList = {
   Payment: undefined;
   Purchase: undefined;
   AddFolder: undefined; // Added for Add Folder screen
+  FolderScreen: { folder: any };
+  ProfileScreen: { user: any };
 };
 
 export type RootStackParamList = {

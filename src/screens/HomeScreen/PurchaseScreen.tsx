@@ -32,6 +32,7 @@ import SearchAndFilter, {
   PaymentSearchFilterState,
   RecentSearch,
 } from '../../components/SearchAndFilter';
+import StatusBadge from '../../components/StatusBadge';
 
 interface PurchaseItem {
   id: string;
@@ -142,6 +143,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
     height: 0,
   });
   const gstFieldRef = useRef<View>(null);
+  const [syncYN, setSyncYN] = useState('N');
 
   const [apiPurchases, setApiPurchases] = useState<any[]>([]);
   const [loadingApi, setLoadingApi] = useState(false);
@@ -319,14 +321,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
           <Text style={styles.invoiceNumber}>
             {item.billNumber || `PUR-${item.id}`}
           </Text>
-          <View
-            style={[
-              styles.statusBadge,
-              { backgroundColor: getStatusColor(item.status) },
-            ]}
-          >
-            <Text style={styles.statusText}>{getStatusLabel(item.status)}</Text>
-          </View>
+          <StatusBadge status={item.status} />
         </View>
         <Text style={styles.customerName}>{item.partyName}</Text>
         <View style={styles.invoiceDetails}>
@@ -337,9 +332,16 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
         </View>
       </TouchableOpacity>
       <TouchableOpacity
-        style={styles.syncButton}
+        style={[
+          styles.syncButton,
+          item.syncYN === 'Y' && {
+            backgroundColor: '#bdbdbd',
+            borderColor: '#bdbdbd',
+          },
+        ]}
         onPress={() => handleSync(item)}
         activeOpacity={0.85}
+        disabled={item.syncYN === 'Y'}
       >
         <Text style={styles.syncButtonText}>Sync</Text>
       </TouchableOpacity>
@@ -360,9 +362,23 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
   };
 
   // Add handleSync function
-  const handleSync = (item: any) => {
-    console.log('Sync pressed for', item);
-    // Placeholder for sync logic
+  const handleSync = async (item: any) => {
+    try {
+      const token = await AsyncStorage.getItem('accessToken');
+      const patchBody = { syncYN: 'Y' };
+      const res = await fetch(`${BASE_URL}/vouchers/${item.id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(patchBody),
+      });
+      if (!res.ok) throw new Error('Failed to sync');
+      await fetchPurchases();
+    } catch (e) {
+      // Optionally show error
+    }
   };
 
   // 4. When closing the form, reset editingItem
@@ -392,7 +408,10 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
   const isFieldInvalid = (field: string) => triedSubmit && !field;
 
   // API submit handler
-  const handleSubmit = async (status: 'complete' | 'draft') => {
+  const handleSubmit = async (
+    status: 'complete' | 'draft',
+    syncYNOverride?: 'Y' | 'N',
+  ) => {
     setTriedSubmit(true);
     setError(null);
     setSuccess(null);
@@ -456,6 +475,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
         shippingAmount: '',
         subTotal: subTotal.toFixed(2),
         totalAmount: totalAmount.toFixed(2),
+        syncYN: syncYNOverride || syncYN || 'N',
       };
       const token = await AsyncStorage.getItem('accessToken');
       let res;
@@ -631,9 +651,15 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
     if (!value || !search) return false;
     return value.toLowerCase().includes(search.toLowerCase());
   }
+  // Update inRange and inDateRange logic to allow only min or only from date
   function inRange(num: number, min?: number, max?: number) {
-    if (min !== undefined && num < min) return false;
-    if (max !== undefined && num > max) return false;
+    const n = Number(num);
+    const minN =
+      min !== undefined && min !== null && min !== '' ? Number(min) : undefined;
+    const maxN =
+      max !== undefined && max !== null && max !== '' ? Number(max) : undefined;
+    if (minN !== undefined && n < minN) return false;
+    if (maxN !== undefined && n > maxN) return false;
     return true;
   }
   function inDateRange(dateStr: string, from?: string, to?: string) {
@@ -1179,9 +1205,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                   justifyContent: 'center',
                 }}
               >
-                {loadingSave || loadingDraft ? (
-                  <ActivityIndicator size="large" color="#4f8cff" />
-                ) : error ? (
+                {error ? (
                   <>
                     <MaterialCommunityIcons
                       name="alert-circle"
@@ -1313,7 +1337,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
           </Text>
         ) : (
           <FlatList
-            data={filteredPurchases}
+            data={[...filteredPurchases].reverse()}
             renderItem={renderPurchaseItem}
             keyExtractor={item => String(item.id)}
             showsVerticalScrollIndicator={false}
@@ -1340,16 +1364,32 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
         onBackdropPress={() => setFilterVisible(false)}
         style={{ justifyContent: 'flex-end', margin: 0 }}
       >
-        <View
+        <KeyboardAwareScrollView
           style={{
             backgroundColor: '#fff',
             borderTopLeftRadius: 18,
             borderTopRightRadius: 18,
-            padding: 20,
           }}
+          contentContainerStyle={{ padding: 20 }}
+          enableOnAndroid
+          extraScrollHeight={120}
+          keyboardShouldPersistTaps="handled"
         >
-          <Text style={{ fontWeight: 'bold', fontSize: 18, marginBottom: 16 }}>
-            Filter {pluralize(folderName)}
+          <TouchableOpacity
+            onPress={() => setFilterVisible(false)}
+            style={{ position: 'absolute', left: 16, top: 16, zIndex: 10 }}
+          >
+            <MaterialCommunityIcons name="arrow-left" size={24} color="#222" />
+          </TouchableOpacity>
+          <Text
+            style={{
+              fontWeight: 'bold',
+              fontSize: 18,
+              marginBottom: 16,
+              marginLeft: 40,
+            }}
+          >
+            Filter Purchases
           </Text>
           {/* Amount Range */}
           <Text style={{ fontSize: 15, marginBottom: 6 }}>Amount Range</Text>
@@ -1477,9 +1517,16 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
               }}
             />
           )}
-          {/* Payment Method Dropdown */}
+          {/* Payment Method filter */}
           <Text style={{ fontSize: 15, marginBottom: 6 }}>Payment Method</Text>
-          <View style={{ flexDirection: 'row', marginBottom: 16 }}>
+          <View
+            style={{
+              flexDirection: 'row',
+              flexWrap: 'wrap',
+              marginBottom: 16,
+              justifyContent: 'space-between',
+            }}
+          >
             {[
               '',
               'Cash',
@@ -1488,11 +1535,11 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
               'Credit Card',
               'Debit Card',
               'Cheque',
-            ].map(method => (
+            ].map((method, idx) => (
               <TouchableOpacity
                 key={method}
                 style={{
-                  flex: 1,
+                  width: '48%',
                   backgroundColor:
                     searchFilter.paymentMethod === method
                       ? '#e6f0ff'
@@ -1504,8 +1551,9 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                   borderWidth: 1,
                   borderRadius: 8,
                   padding: 10,
-                  marginRight: method !== 'Cheque' ? 8 : 0,
+                  marginBottom: 10,
                   alignItems: 'center',
+                  justifyContent: 'center',
                 }}
                 onPress={() =>
                   setSearchFilter(f => ({
@@ -1514,14 +1562,23 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                   }))
                 }
               >
-                <Text style={{ color: '#222' }}>{method || 'All'}</Text>
+                <Text
+                  style={{
+                    color: '#222',
+                    fontSize: searchFilter.paymentMethod === method ? 16 : 15,
+                    fontWeight:
+                      searchFilter.paymentMethod === method ? 'bold' : '500',
+                  }}
+                >
+                  {method || 'All'}
+                </Text>
               </TouchableOpacity>
             ))}
           </View>
           {/* Status Filter */}
           <Text style={{ fontSize: 15, marginBottom: 6 }}>Status</Text>
           <View style={{ flexDirection: 'row', marginBottom: 16 }}>
-            {['', 'complete', 'draft', 'overdue'].map(status => (
+            {['', 'Paid', 'Pending'].map(status => (
               <TouchableOpacity
                 key={status}
                 style={{
@@ -1533,14 +1590,21 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                   borderWidth: 1,
                   borderRadius: 8,
                   padding: 10,
-                  marginRight: status !== 'overdue' ? 8 : 0,
+                  marginRight: status !== 'Pending' ? 8 : 0,
                   alignItems: 'center',
+                  justifyContent: 'center',
                 }}
                 onPress={() =>
                   setSearchFilter(f => ({ ...f, status: status || undefined }))
                 }
               >
-                <Text style={{ color: '#222', textTransform: 'capitalize' }}>
+                <Text
+                  style={{
+                    color: '#222',
+                    fontSize: searchFilter.status === status ? 16 : 15,
+                    fontWeight: searchFilter.status === status ? 'bold' : '500',
+                  }}
+                >
                   {status || 'All'}
                 </Text>
               </TouchableOpacity>
@@ -1549,7 +1613,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
           {/* Category Filter */}
           <Text style={{ fontSize: 15, marginBottom: 6 }}>Category</Text>
           <View style={{ flexDirection: 'row', marginBottom: 16 }}>
-            {['', 'Supplier', 'Expense', 'Salary', 'Rent', 'Other'].map(cat => (
+            {['', 'Suppliers', 'Customers'].map(cat => (
               <TouchableOpacity
                 key={cat}
                 style={{
@@ -1561,14 +1625,23 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                   borderWidth: 1,
                   borderRadius: 8,
                   padding: 10,
-                  marginRight: cat !== 'Other' ? 8 : 0,
+                  marginRight: cat !== 'Customers' ? 8 : 0,
                   alignItems: 'center',
+                  justifyContent: 'center',
                 }}
                 onPress={() =>
                   setSearchFilter(f => ({ ...f, category: cat || undefined }))
                 }
               >
-                <Text style={{ color: '#222' }}>{cat || 'All'}</Text>
+                <Text
+                  style={{
+                    color: '#222',
+                    fontSize: searchFilter.category === cat ? 16 : 15,
+                    fontWeight: searchFilter.category === cat ? 'bold' : '500',
+                  }}
+                >
+                  {cat || 'All'}
+                </Text>
               </TouchableOpacity>
             ))}
           </View>
@@ -1626,7 +1699,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
               </Text>
             </TouchableOpacity>
           </View>
-        </View>
+        </KeyboardAwareScrollView>
       </Modal>
     </SafeAreaView>
   );
@@ -2014,11 +2087,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 32,
     marginLeft: 10,
     borderRadius: 8,
-    shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#4f8cff',
   },
   syncButtonText: {
     color: '#fff',
