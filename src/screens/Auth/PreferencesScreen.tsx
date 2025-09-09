@@ -83,7 +83,7 @@ const PreferencesScreen: React.FC = () => {
   return (
     <SafeAreaView style={styles.safeArea}>
       <KeyboardAwareScrollView
-        contentContainerStyle={{ flexGrow: 1 }}
+        contentContainerStyle={{ flexGrow: 1, justifyContent: 'center' }}
         keyboardShouldPersistTaps="handled"
         enableOnAndroid={true}
         extraScrollHeight={60}
@@ -105,14 +105,7 @@ const PreferencesScreen: React.FC = () => {
             <Text style={styles.setupBadgeText}>Setup Wizard</Text>
           </LinearGradient>
         </View> */}
-        {/* Progress Bar */}
-        <View style={styles.progressRow}>
-          <Text style={styles.progressText}>Step 3 of 5</Text>
-          <Text style={styles.progressTextRight}>60% Complete</Text>
-        </View>
-        <View style={styles.progressBarBg}>
-          <View style={styles.progressBarFill} />
-        </View>
+
         {/* Card Container */}
         <View style={styles.card}>
           <Image source={{ uri: MIC_ICON }} style={styles.micIcon} />
@@ -266,37 +259,7 @@ const styles = StyleSheet.create({
     color: '#222',
     letterSpacing: 0.5,
   },
-  progressRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginHorizontal: 24,
-    marginBottom: 2,
-    marginTop: 30,
-  },
-  progressText: {
-    color: '#222',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  progressTextRight: {
-    color: '#888',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  progressBarBg: {
-    height: 6,
-    backgroundColor: '#e3e7ee',
-    borderRadius: 4,
-    marginHorizontal: 24,
-    marginBottom: 18,
-  },
-  progressBarFill: {
-    height: 6,
-    width: '60%',
-    backgroundColor: '#222',
-    borderRadius: 4,
-  },
+
   card: {
     backgroundColor: '#fff',
     borderRadius: 16,

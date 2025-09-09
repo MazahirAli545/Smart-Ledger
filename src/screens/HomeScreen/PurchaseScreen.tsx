@@ -7,32 +7,78 @@ import {
   ScrollView,
   TextInput,
   FlatList,
-  Dimensions,
   ActivityIndicator,
+  Dimensions,
+  PermissionsAndroid,
+  Platform,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { Dropdown } from 'react-native-element-dropdown';
-import Ionicons from 'react-native-vector-icons/Ionicons';
 import type { ViewStyle } from 'react-native';
 import { RootStackParamList } from '../../types/navigation';
-import UploadDocument from '../../components/UploadDocument';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { getUserIdFromToken } from '../../utils/storage';
 import Modal from 'react-native-modal';
-import { Picker } from '@react-native-picker/picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { BASE_URL } from '../../api/index';
-import SupplierSelector from '../../components/SupplierSelector';
-import { useSupplierContext } from '../../context/SupplierContext';
+import { BASE_URL } from '../../api';
+import CustomerSelector from '../../components/CustomerSelector';
+import { useCustomerContext } from '../../context/CustomerContext';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
-import SearchAndFilter, {
-  PaymentSearchFilterState,
-  RecentSearch,
-} from '../../components/SearchAndFilter';
 import StatusBadge from '../../components/StatusBadge';
+import { useVouchers } from '../../context/VoucherContext';
+import { useTransactionLimit } from '../../context/TransactionLimitContext';
+import { generateNextDocumentNumber } from '../../utils/autoNumberGenerator';
+import UploadDocument from '../../components/UploadDocument';
+import { useAlert } from '../../context/AlertContext';
+import SearchAndFilter from '../../components/SearchAndFilter';
+import AudioRecorderPlayer from 'react-native-audio-recorder-player';
+import { launchImageLibrary } from 'react-native-image-picker';
+
+// Add missing interfaces
+interface PaymentSearchFilterState {
+  searchText: string;
+  amountMin?: number;
+  amountMax?: number;
+  dateFrom?: string;
+  dateTo?: string;
+  paymentMethod?: string;
+  status?: string;
+  reference?: string;
+  description?: string;
+}
+
+// Use the interface from SearchAndFilter component
+import type { RecentSearch } from '../../components/SearchAndFilter';
+
+interface ParsedPurchaseData {
+  purchaseNumber: string;
+  supplierName: string;
+  supplierPhone: string;
+  supplierAddress: string;
+  purchaseDate: string;
+  items: Array<{
+    description: string;
+    quantity: number;
+    rate: number;
+    amount: number;
+  }>;
+  notes: string;
+}
+
+function parsePurchaseOcrText(text: string): ParsedPurchaseData {
+  return {
+    purchaseNumber: '',
+    supplierName: '',
+    supplierPhone: '',
+    supplierAddress: '',
+    purchaseDate: '',
+    items: [],
+    notes: '',
+  };
+}
 
 interface PurchaseItem {
   id: string;
@@ -52,7 +98,6 @@ interface Purchase {
 }
 
 const GST_OPTIONS = [0, 5, 12, 18, 28];
-const GST_PLACEHOLDER = 'Select GST %';
 
 interface FolderProp {
   folder?: { id?: number; title?: string; icon?: string };
@@ -60,13 +105,13 @@ interface FolderProp {
 
 const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
   const folderName = folder?.title || 'Purchase';
-  // Helper for pluralizing folder name
-  const pluralize = (name: string) => {
-    if (!name) return '';
-    if (name.endsWith('s')) return name + 'es';
-    return name + 's';
-  };
+
+  // Debug logging for folder name
+  console.log('🔍 PurchaseScreen: folder prop received:', folder);
+  console.log('🔍 PurchaseScreen: folderName calculated:', folderName);
+
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
+  const { showAlert } = useAlert();
   const [showCreateForm, setShowCreateForm] = useState(false);
 
   // Mock data for past purchases
@@ -100,6 +145,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
   // States for purchase creation form
   const [supplierName, setSupplierName] = useState('');
   const [supplierPhone, setSupplierPhone] = useState('');
+  const [supplierAddress, setSupplierAddress] = useState('');
   const [purchaseDate, setPurchaseDate] = useState(
     new Date().toISOString().split('T')[0],
   );
@@ -107,10 +153,10 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
   const [items, setItems] = useState<PurchaseItem[]>([
     {
       id: '1',
-      description: 'Item 1',
+      description: '',
       quantity: 1,
-      rate: 1000,
-      amount: 1000,
+      rate: 0,
+      amount: 0,
     },
   ]);
   const [purchaseNumber, setPurchaseNumber] = useState('');
@@ -126,13 +172,13 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
     width: 0,
   });
   const [showDropdown, setShowDropdown] = useState(false);
-  const [gstPct, setGstPct] = useState(18); // default 18%
+  const [gstPct, setGstPct] = useState(18);
+  const [taxAmount, setTaxAmount] = useState(0); // Tax amount field
+  const [discountAmount, setDiscountAmount] = useState(0); // Discount amount field
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [triedSubmit, setTriedSubmit] = useState(false);
-  // Add two loading states
   const [loadingSave, setLoadingSave] = useState(false);
   const [loadingDraft, setLoadingDraft] = useState(false);
   const [gstDropdownOpen, setGstDropdownOpen] = useState(false);
@@ -144,21 +190,59 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
   });
   const gstFieldRef = useRef<View>(null);
   const [syncYN, setSyncYN] = useState('N');
-
   const [apiPurchases, setApiPurchases] = useState<any[]>([]);
   const [loadingApi, setLoadingApi] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
-
-  // 1. Add editingItem state
   const [editingItem, setEditingItem] = useState<any>(null);
+  const [description, setDescription] = useState('');
 
-  // 1. Add deletePurchase function
+  // Add missing state variables for UploadDocument and filters
+  const [voiceLoading, setVoiceLoading] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [audioRecorderPlayer] = useState(new AudioRecorderPlayer());
+  const [isRecording, setIsRecording] = useState(false);
+  const [itemsSectionRef] = useState(useRef<View>(null));
+  const [lastGstPctByVoice, setLastGstPctByVoice] = useState<number | null>(
+    null,
+  );
+  const [lastPurchaseDateByVoice, setLastPurchaseDateByVoice] = useState<
+    string | null
+  >(null);
+  const [lastVoiceText, setLastVoiceText] = useState<string | null>(null);
+  const [nlpStatus, setNlpStatus] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<any>(null);
+  const [documentName, setDocumentName] = useState<string>('');
+  const [fileType, setFileType] = useState<string>('');
+  const [ocrLoading, setOcrLoading] = useState(false);
+  const [ocrError, setOcrError] = useState<string | null>(null);
+  const [showPopup, setShowPopup] = useState(false);
+  const [popupTitle, setPopupTitle] = useState('');
+  const [popupMessage, setPopupMessage] = useState('');
+  const [popupType, setPopupType] = useState<'success' | 'error' | 'info'>(
+    'info',
+  );
+  const [showFileTypeModal, setShowFileTypeModal] = useState(false);
+  const [searchFilter, setSearchFilter] = useState<PaymentSearchFilterState>({
+    searchText: '',
+  });
+  const [recentSearches, setRecentSearches] = useState<RecentSearch[]>([]);
+  const [filterBadgeCount, setFilterBadgeCount] = useState(0);
+  const [filterVisible, setFilterVisible] = useState(false);
+  const [showDatePickerFrom, setShowDatePickerFrom] = useState(false);
+  const [showDatePickerTo, setShowDatePickerTo] = useState(false);
+
+  // Helper for pluralizing folder name
+  const pluralize = (name: string | undefined) => {
+    if (!name) return 'items';
+    if (name.endsWith('s')) return name + 'es';
+    return name + 's';
+  };
+
+  // Core functions
   const deletePurchase = async (id: string) => {
     try {
       const token = await AsyncStorage.getItem('accessToken');
-      let query = '';
-      if (folderName)
-        query += `?type=${encodeURIComponent(folderName.toLowerCase())}`;
+      let query = '?type=purchase';
       const res = await fetch(`${BASE_URL}/vouchers/${id}${query}`, {
         method: 'DELETE',
         headers: {
@@ -178,13 +262,34 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
     }
   };
 
-  // Move fetchPurchases to top-level so it can be called from handleSubmit
   const fetchPurchases = async () => {
     setLoadingApi(true);
     setApiError(null);
     try {
       const token = await AsyncStorage.getItem('accessToken');
-      let query = `?type=${encodeURIComponent(folderName.toLowerCase())}`;
+
+      // First, fetch customers to get party information
+      const customersRes = await fetch(`${BASE_URL}/customers`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!customersRes.ok) {
+        throw new Error(`Failed to fetch customers: ${customersRes.status}`);
+      }
+
+      const customersData = await customersRes.json();
+      const customers = customersData.data || [];
+
+      console.log('📊 Raw customers/suppliers data:', {
+        totalCustomers: customers.length,
+        sampleCustomer: customers[0] || 'No customers',
+        customerFields: customers[0] ? Object.keys(customers[0]) : [],
+      });
+
+      // Then fetch vouchers for purchases
+      let query = '?type=purchase';
       const res = await fetch(`${BASE_URL}/vouchers${query}`, {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -192,19 +297,124 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        throw new Error(
-          err.message ||
-            `Failed to fetch ${folderName.toLowerCase()}s: ${res.status}`,
-        );
+        throw new Error(err.message || 'Failed to fetch purchases');
       }
       const data = await res.json();
-      // Only filter by type
-      const filtered = (data.data || []).filter(
-        (v: any) => v.type === folderName.toLowerCase(),
+      const vouchers = data.data || [];
+
+      // Debug: Check voucher types before filtering
+      console.log('🔍 Voucher types found:', {
+        folderName: 'purchase',
+        allVoucherTypes: [...new Set(vouchers.map((v: any) => v.type))],
+        vouchersBeforeFilter: vouchers.length,
+      });
+
+      // Filter customers to get suppliers for purchases
+      const suppliers = customers.filter(
+        (c: any) => c.partyType === 'supplier' || c.voucherType === 'purchase',
       );
-      setApiPurchases(filtered);
+      console.log('🔍 Suppliers found:', {
+        totalCustomers: customers.length,
+        totalSuppliers: suppliers.length,
+        supplierTypes: [...new Set(suppliers.map((c: any) => c.partyType))],
+      });
+
+      // Merge customer/supplier data with vouchers
+      const enrichedPurchases = vouchers
+        .filter((v: any) => {
+          const matches = v.type === 'purchase';
+          if (!matches) {
+            console.log('❌ Voucher filtered out:', {
+              id: v.id,
+              type: v.type,
+              expectedType: 'purchase',
+              partyName: v.partyName,
+            });
+          }
+          return matches;
+        })
+        .map((voucher: any) => {
+          console.log('🔍 Processing voucher:', {
+            id: voucher.id,
+            partyName: voucher.partyName,
+            partyId: voucher.partyId,
+            type: voucher.type,
+          });
+
+          // Find matching customer/supplier using multiple strategies
+          let party = null;
+
+          // Strategy 1: Try to match by partyName first (most reliable for vouchers)
+          if (voucher.partyName) {
+            party = suppliers.find(
+              (c: any) =>
+                c.partyName?.toLowerCase() === voucher.partyName?.toLowerCase(),
+            );
+            if (party) {
+              console.log('✅ Matched by exact partyName:', party.partyName);
+            }
+          }
+
+          // Strategy 2: Try partial name matching if exact match didn't work
+          if (!party && voucher.partyName) {
+            party = suppliers.find(
+              (c: any) =>
+                c.partyName
+                  ?.toLowerCase()
+                  .includes(voucher.partyName?.toLowerCase()) ||
+                voucher.partyName
+                  ?.toLowerCase()
+                  .includes(c.partyName?.toLowerCase()),
+            );
+            if (party) {
+              console.log('✅ Matched by partial partyName:', party.partyName);
+            }
+          }
+
+          // Strategy 3: Try to match by partyId as fallback (if it exists)
+          if (!party && voucher.partyId) {
+            party = suppliers.find((c: any) => c.id === voucher.partyId);
+            if (party) {
+              console.log('✅ Matched by partyId:', party.partyName);
+            }
+          }
+
+          // If no match found, log it for debugging
+          if (!party) {
+            console.log('❌ No supplier match found for voucher:', {
+              voucherId: voucher.id,
+              voucherPartyName: voucher.partyName,
+              availableSuppliers: suppliers.map((c: any) => ({
+                id: c.id,
+                name: c.partyName,
+                partyType: c.partyType,
+              })),
+            });
+          }
+
+          return {
+            ...voucher,
+            partyName: party?.partyName || voucher.partyName || 'Unknown Party',
+            partyPhone: party?.phoneNumber || voucher.partyPhone || '',
+            partyAddress: party?.address || voucher.partyAddress || '',
+            partyType: party?.partyType || 'supplier',
+            // Add debug info
+            _debug: {
+              matched: !!party,
+              matchedPartyId: party?.id,
+              matchedPartyName: party?.partyName,
+              originalPartyName: voucher.partyName,
+            },
+          };
+        });
+
+      setApiPurchases(enrichedPurchases);
+      console.log(
+        '✅ Fetched purchases with supplier data:',
+        enrichedPurchases.length,
+      );
     } catch (e: any) {
-      setApiError(e.message || `Error fetching ${folderName.toLowerCase()}s`);
+      setApiError(e.message || 'Error fetching purchases');
     } finally {
       setLoadingApi(false);
     }
@@ -212,10 +422,23 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
 
   useEffect(() => {
     fetchPurchases();
+    const initializePurchaseNumber = async () => {
+      try {
+        const nextNumber = await generateNextDocumentNumber('purchase');
+        setPurchaseNumber(nextNumber);
+      } catch (error) {
+        console.error('Error initializing purchase number:', error);
+        setPurchaseNumber('PUR-001');
+      }
+    };
+    initializePurchaseNumber();
   }, []);
 
-  // 2. When a list item is tapped, set editingItem and open the form
   const handleEditItem = (item: any) => {
+    if (!item) {
+      console.warn('handleEditItem: item is undefined or null');
+      return;
+    }
     setShowModal(false);
     setLoadingSave(false);
     setLoadingDraft(false);
@@ -246,17 +469,9 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
           const numValue =
             typeof value === 'string' ? parseFloat(value) : value;
           updatedItem[field] = isNaN(numValue) ? 0 : numValue;
-          updatedItem.amount =
-            (field === 'quantity'
-              ? isNaN(numValue)
-                ? 0
-                : numValue
-              : updatedItem.quantity) *
-            (field === 'rate'
-              ? isNaN(numValue)
-                ? 0
-                : numValue
-              : updatedItem.rate);
+          const subtotal = updatedItem.quantity * updatedItem.rate;
+          const gstAmount = subtotal * (gstPct / 100);
+          updatedItem.amount = subtotal + gstAmount;
         } else {
           (updatedItem as any)[field] = value;
         }
@@ -268,26 +483,42 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
   };
 
   const removeItem = (id: string) => {
-    setItems(items.filter(item => item.id !== id));
+    setItems((items || []).filter(item => item.id !== id));
   };
 
   const calculateSubtotal = () => {
-    return items.reduce((sum, item) => sum + item.amount, 0);
+    return (items || []).reduce((sum, item) => {
+      const quantity = Number(item.quantity) || 0;
+      const rate = Number(item.rate) || 0;
+      return sum + quantity * rate;
+    }, 0);
   };
 
   const calculateGST = () => {
-    return calculateSubtotal() * (gstPct / 100); // Assuming 18% GST
+    return (items || []).reduce((sum, item) => {
+      const quantity = Number(item.quantity) || 0;
+      const rate = Number(item.rate) || 0;
+      const itemSubtotal = quantity * rate;
+      const itemGST = itemSubtotal * (gstPct / 100);
+      return sum + itemGST;
+    }, 0);
   };
 
   const calculateTotal = () => {
-    return calculateSubtotal() + calculateGST();
+    const subtotal = calculateSubtotal();
+    const gst = calculateGST();
+    return subtotal + gst + taxAmount - discountAmount;
   };
 
   const formatCurrency = (amount: number) => {
+    if (isNaN(amount) || !isFinite(amount)) {
+      return '₹0';
+    }
     return `₹${amount.toLocaleString('en-IN')}`;
   };
 
   const getStatusColor = (status: string) => {
+    if (!status) return '#6c757d';
     switch (status) {
       case 'Paid':
         return '#28a745';
@@ -300,55 +531,66 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
     }
   };
 
-  // Ensure renderPurchaseItem is defined before FlatList usage
-  const renderPurchaseItem = ({ item }: { item: any }) => (
-    <View
-      style={[
-        styles.invoiceCard,
-        {
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-        },
-      ]}
-    >
-      <TouchableOpacity
-        style={{ flex: 1 }}
-        onPress={() => handleEditItem(item)}
-        activeOpacity={0.8}
-      >
-        <View style={styles.invoiceHeader}>
-          <Text style={styles.invoiceNumber}>
-            {item.billNumber || `PUR-${item.id}`}
-          </Text>
-          <StatusBadge status={item.status} />
-        </View>
-        <Text style={styles.customerName}>{item.partyName}</Text>
-        <View style={styles.invoiceDetails}>
-          <Text style={styles.invoiceDate}>{item.date?.slice(0, 10)}</Text>
-          <Text style={styles.invoiceAmount}>
-            {formatCurrency(Number(item.amount))}
-          </Text>
-        </View>
-      </TouchableOpacity>
-      <TouchableOpacity
+  const renderPurchaseItem = ({ item }: { item: any }) => {
+    if (!item) {
+      console.warn('renderPurchaseItem: item is undefined or null');
+      return null;
+    }
+
+    return (
+      <View
         style={[
-          styles.syncButton,
-          item.syncYN === 'Y' && {
-            backgroundColor: '#bdbdbd',
-            borderColor: '#bdbdbd',
+          styles.invoiceCard,
+          {
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
           },
         ]}
-        onPress={() => handleSync(item)}
-        activeOpacity={0.85}
-        disabled={item.syncYN === 'Y'}
       >
-        <Text style={styles.syncButtonText}>Sync</Text>
-      </TouchableOpacity>
-    </View>
-  );
+        <TouchableOpacity
+          style={{ flex: 1 }}
+          onPress={() => handleEditItem(item)}
+          activeOpacity={0.8}
+        >
+          <View style={styles.invoiceHeader}>
+            <Text style={styles.invoiceNumber}>
+              {item.purchaseNumber || `PUR-${item.id}`}
+            </Text>
+            <StatusBadge status={item.status} />
+          </View>
+          <Text style={styles.customerName}>
+            {item.partyName || 'Unknown Supplier'}
+          </Text>
+          <View style={styles.invoiceDetails}>
+            <Text style={styles.invoiceDate}>
+              {item.date?.slice(0, 10) || 'No Date'}
+            </Text>
+            <Text style={styles.invoiceAmount}>
+              {formatCurrency(Number(item.amount) || 0)}
+            </Text>
+          </View>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[
+            styles.syncButton,
+            item.syncYN === 'Y' && {
+              backgroundColor: '#bdbdbd',
+              borderColor: '#bdbdbd',
+            },
+          ]}
+          onPress={() => handleSync(item)}
+          activeOpacity={0.85}
+          disabled={item.syncYN === 'Y'}
+        >
+          <Text style={styles.syncButtonText}>Sync</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  };
 
   const getStatusLabel = (status: string) => {
+    if (!status) return 'Unknown';
     switch (status) {
       case 'complete':
         return 'Paid';
@@ -357,12 +599,15 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
       case 'overdue':
         return 'Overdue';
       default:
-        return status;
+        return status || 'Unknown';
     }
   };
 
-  // Add handleSync function
   const handleSync = async (item: any) => {
+    if (!item || !item.id) {
+      console.warn('handleSync: item or item.id is undefined');
+      return;
+    }
     try {
       const token = await AsyncStorage.getItem('accessToken');
       const patchBody = { syncYN: 'Y' };
@@ -377,48 +622,675 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
       if (!res.ok) throw new Error('Failed to sync');
       await fetchPurchases();
     } catch (e) {
-      // Optionally show error
+      console.error('handleSync error:', e);
     }
   };
 
-  // 4. When closing the form, reset editingItem
-  const handleBackToList = () => {
+  const handleBackToList = async () => {
     setShowCreateForm(false);
     setEditingItem(null);
-    // Reset form data
     setSupplierName('');
     setSupplierPhone('');
+    setSupplierAddress('');
     setPurchaseDate(new Date().toISOString().split('T')[0]);
     setBillNumber('');
     setItems([
       {
         id: '1',
-        description: 'Item 1',
+        description: '',
         quantity: 1,
-        rate: 1000,
-        amount: 1000,
+        rate: 0,
+        amount: 0,
       },
     ]);
-    setPurchaseNumber('');
+    try {
+      const nextPurchaseNumber = await generateNextDocumentNumber('purchase');
+      setPurchaseNumber(nextPurchaseNumber);
+    } catch (error) {
+      console.error('Error generating purchase number:', error);
+      setPurchaseNumber('PUR-001');
+    }
     setNotes('');
     setSupplier('');
+    setTriedSubmit(false);
+    setError(null);
   };
 
-  // Validation helpers
-  const isFieldInvalid = (field: string) => triedSubmit && !field;
+  const isFieldInvalid = (field: string, fieldType?: string) => {
+    if (!triedSubmit) return false;
+    if (fieldType === 'phone') {
+      const phoneDigits = field.replace(/\D/g, '');
+      return !field || phoneDigits.length < 10 || phoneDigits.length > 16;
+    }
+    if (fieldType === 'address') {
+      return !field || field.trim().length < 10;
+    }
+    return !field;
+  };
+
+  const getFieldError = (field: string) => {
+    if (!triedSubmit) return '';
+    switch (field) {
+      case 'purchaseDate':
+        return !purchaseDate ? 'Date is required' : '';
+      case 'supplier':
+        return !supplier ? 'Supplier is required' : '';
+      case 'supplierPhone':
+        if (!supplierPhone) return 'Phone is required';
+        const phoneDigits = supplierPhone.replace(/\D/g, '');
+        if (phoneDigits.length < 10)
+          return 'Phone number must be at least 10 digits';
+        if (phoneDigits.length > 16)
+          return 'Phone number cannot exceed 16 digits';
+        return '';
+      case 'supplierAddress':
+        if (!supplierAddress) return 'Address is required';
+        if (supplierAddress.trim().length < 10)
+          return 'Address must be at least 10 characters';
+        return '';
+      default:
+        return '';
+    }
+  };
+
+  const { customers, add, fetchAll } = useCustomerContext();
+  const { appendVoucher } = useVouchers();
+  const { forceCheckTransactionLimit, forceShowPopup } = useTransactionLimit();
+
+  const scrollRef = useRef<KeyboardAwareScrollView>(null);
+  const purchaseNumberRef = useRef<TextInput>(null);
+  const purchaseDateRef = useRef<TextInput>(null);
+  const notesRef = useRef<TextInput>(null);
+  const itemRefs = useRef<{
+    [itemId: string]: { [field: string]: TextInput | null };
+  }>({});
+
+  // Filtered purchases
+  const filteredPurchases = apiPurchases;
+
+  // Add missing functions for UploadDocument and filters
+  const handleRecentSearchPress = (search: RecentSearch) => {
+    setSearchFilter(prev => ({ ...prev, searchText: search.text }));
+  };
+
+  const startVoiceRecording = async () => {
+    try {
+      if (Platform.OS === 'android') {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          {
+            title: 'Microphone Permission',
+            message: 'App needs access to your microphone to record voice.',
+            buttonNeutral: 'Ask Me Later',
+            buttonNegative: 'Cancel',
+            buttonPositive: 'OK',
+          },
+        );
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+          showAlert({
+            title: 'Permission Denied',
+            message: 'Microphone permission is required for voice recording.',
+            type: 'error',
+          });
+          return;
+        }
+      }
+
+      setIsRecording(true);
+      setVoiceError(null);
+      const result = await audioRecorderPlayer.startRecorder();
+      console.log('Recording started:', result);
+    } catch (error) {
+      console.error('Error starting recording:', error);
+      setVoiceError('Failed to start recording');
+      setIsRecording(false);
+    }
+  };
+
+  const stopVoiceRecording = async () => {
+    try {
+      setIsRecording(false);
+      const result = await audioRecorderPlayer.stopRecorder();
+      console.log('Recording stopped:', result);
+      await sendAudioForTranscription(result);
+    } catch (error) {
+      console.error('Error stopping recording:', error);
+      setVoiceError('Failed to stop recording');
+    }
+  };
+
+  const sendAudioForTranscription = async (audioUri: string) => {
+    try {
+      setVoiceLoading(true);
+      setVoiceError(null);
+
+      // Simulate API call for voice transcription
+      setTimeout(() => {
+        const mockTranscription = `${folderName} from ABC Supplier for 5000 rupees with 18% GST on 15th January 2024`;
+        setLastVoiceText(mockTranscription);
+        setVoiceLoading(false);
+
+        // Process the transcribed text
+        processVoiceText(mockTranscription);
+      }, 2000);
+    } catch (error) {
+      console.error('Error sending audio for transcription:', error);
+      setVoiceError('Failed to transcribe audio');
+      setVoiceLoading(false);
+    }
+  };
+
+  const processVoiceText = (text: string) => {
+    try {
+      // Extract supplier name
+      const supplierMatch = text.match(
+        /from\s+([A-Za-z\s]+?)\s+(?:for|with|on)/i,
+      );
+      if (supplierMatch) {
+        setSupplier(supplierMatch[1].trim());
+      }
+
+      // Extract amount
+      const amountMatch = text.match(/(\d+)\s+rupees?/i);
+      if (amountMatch) {
+        const amount = parseInt(amountMatch[1]);
+        if (items.length > 0) {
+          updateItem(items[0].id, 'rate', amount);
+        }
+      }
+
+      // Extract GST percentage
+      const gstMatch = text.match(/(\d+)%\s*GST/i);
+      if (gstMatch) {
+        const gstPct = parseInt(gstMatch[1]);
+        setGstPct(gstPct);
+        // Recalculate all item amounts with new GST
+        const updatedItems = items.map(item => ({
+          ...item,
+          amount: item.quantity * item.rate * (1 + gstPct / 100),
+        }));
+        setItems(updatedItems);
+      }
+
+      // Extract date
+      const dateMatch = text.match(
+        /(\d+)(?:st|nd|rd|th)?\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/i,
+      );
+      if (dateMatch) {
+        const day = parseInt(dateMatch[1]);
+        const month = dateMatch[2];
+        const year = parseInt(dateMatch[3]);
+        const monthIndex = new Date(`${month} 1, 2000`).getMonth();
+        const date = new Date(year, monthIndex, day);
+        setPurchaseDate(date.toISOString().split('T')[0]);
+      }
+
+      setNlpStatus('Voice data processed successfully');
+    } catch (error) {
+      console.error('Error processing voice text:', error);
+      setVoiceError('Failed to process voice data');
+    }
+  };
+
+  // Update GST percentage for all items
+  const updateGstPctForAllItems = (value: number) => {
+    const updatedItems = items.map(item => ({
+      ...item,
+      gstPct: value,
+      amount: item.quantity * item.rate * (1 + value / 100),
+    }));
+    setItems(updatedItems);
+  };
+
+  const handleUploadDocument = () => {
+    setShowFileTypeModal(true);
+  };
+
+  const handleFileTypeSelection = async (type: string) => {
+    setShowFileTypeModal(false);
+    setFileType(type);
+
+    try {
+      let result;
+      if (type === 'image') {
+        result = await launchImageLibrary({
+          mediaType: 'photo',
+          quality: 0.8,
+        });
+      } else if (type === 'pdf') {
+        // This part of the code was removed as per the edit hint.
+        // If DocumentPicker is no longer used, this block will be removed.
+        // For now, keeping it as a placeholder.
+        showAlert({
+          title: 'Document Picker',
+          message: 'Document picker is not available.',
+          type: 'error',
+        });
+      } else if (type === 'excel') {
+        // This part of the code was removed as per the edit hint.
+        // If DocumentPicker is no longer used, this block will be removed.
+        // For now, keeping it as a placeholder.
+        showAlert({
+          title: 'Document Picker',
+          message: 'Document picker is not available.',
+          type: 'error',
+        });
+      }
+
+      if (result && result.assets && result.assets[0]) {
+        const file = result.assets[0];
+        setSelectedFile(file);
+        setDocumentName(file.fileName || 'Document');
+
+        if (type === 'image' || type === 'pdf') {
+          await processDocumentWithOCR(file);
+        } else if (type === 'excel') {
+          // This part of the code was removed as per the edit hint.
+          // If DocumentPicker is no longer used, this block will be removed.
+          // For now, keeping it as a placeholder.
+          showAlert({
+            title: 'Document Picker',
+            message: 'Document picker is not available.',
+            type: 'error',
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Error selecting file:', error);
+      showAlert({
+        title: 'Error',
+        message: 'Failed to select file',
+        type: 'error',
+      });
+    }
+  };
+
+  const processDocumentWithOCR = async (file: any) => {
+    try {
+      setOcrLoading(true);
+      setOcrError(null);
+
+      // Simulate OCR processing
+      setTimeout(() => {
+        const mockOcrText = `${folderName} Bill
+        
+Supplier: ABC Electronics Pvt Ltd
+Phone: 9876543210
+Address: 123 Tech Street, Bangalore, Karnataka 560001
+GST Number: 29ABCDE1234F1Z5
+
+Purchase Date: 15-01-2025
+Bill Number: PB-2025-001
+
+Items:
+1. Laptop - Qty: 2, Rate: ₹45,000, GST: 18%, Amount: ₹106,200
+2. Mouse - Qty: 5, Rate: ₹500, GST: 18%, Amount: ₹2,950
+3. Keyboard - Qty: 3, Rate: ₹1,200, GST: 18%, Amount: ₹4,248
+
+Subtotal: ₹113,400
+Total GST: ₹20,412
+Total Amount: ₹133,812
+
+Notes: Delivery within 3 business days, warranty included for all items.`;
+        setOcrLoading(false);
+
+        // Process OCR text
+        processOcrText(mockOcrText);
+      }, 3000);
+    } catch (error) {
+      console.error('Error processing document with OCR:', error);
+      setOcrError('Failed to process document');
+      setOcrLoading(false);
+    }
+  };
+
+  const processOcrText = (text: string) => {
+    try {
+      // Extract supplier name
+      const supplierMatch = text.match(/Supplier:\s*([^\n]+)/i);
+      if (supplierMatch) {
+        setSupplier(supplierMatch[1].trim());
+      }
+
+      // Extract supplier phone
+      const phoneMatch = text.match(/Phone:\s*(\d+)/i);
+      if (phoneMatch) {
+        setSupplierPhone(phoneMatch[1].trim());
+      }
+
+      // Extract supplier address
+      const addressMatch = text.match(/Address:\s*([^\n]+)/i);
+      if (addressMatch) {
+        setSupplierAddress(addressMatch[1].trim());
+      }
+
+      // Extract amount
+      const amountMatch = text.match(/Amount:\s*(\d+)/i);
+      if (amountMatch) {
+        const amount = parseInt(amountMatch[1]);
+        if (items.length > 0) {
+          updateItem(items[0].id, 'rate', amount);
+        }
+      }
+
+      // Extract date
+      const dateMatch = text.match(/Date:\s*(\d{2})-(\d{2})-(\d{4})/);
+      if (dateMatch) {
+        const day = parseInt(dateMatch[1]);
+        const month = parseInt(dateMatch[2]) - 1;
+        const year = parseInt(dateMatch[3]);
+        const date = new Date(year, month, day);
+        setPurchaseDate(date.toISOString().split('T')[0]);
+      }
+
+      // Extract GST
+      const gstMatch = text.match(/GST:\s*(\d+)%/i);
+      if (gstMatch) {
+        const gstPct = parseInt(gstMatch[1]);
+        setGstPct(gstPct);
+        // Recalculate all item amounts with new GST
+        const updatedItems = items.map(item => ({
+          ...item,
+          amount: item.quantity * item.rate * (1 + gstPct / 100),
+        }));
+        setItems(updatedItems);
+      }
+
+      // Extract items from OCR text if available
+      const itemsMatch = text.match(
+        /Items:\s*([\s\S]*?)(?=Subtotal:|Total:|Notes:|$)/i,
+      );
+      if (itemsMatch) {
+        const itemsText = itemsMatch[1];
+        const itemLines = itemsText
+          .split('\n')
+          .filter(line => line.trim() && line.includes('-'));
+
+        if (itemLines.length > 0) {
+          const extractedItems = itemLines.map((line, index) => {
+            // Parse item line: "1. Laptop - Qty: 2, Rate: ₹45,000, GST: 18%, Amount: ₹106,200"
+            const descriptionMatch = line.match(/\d+\.\s*([^-]+)/);
+            const qtyMatch = line.match(/Qty:\s*(\d+)/i);
+            const rateMatch = line.match(/Rate:\s*₹?([\d,]+)/i);
+            const gstMatch = line.match(/GST:\s*(\d+)%/i);
+            const amountMatch = line.match(/Amount:\s*₹?([\d,]+)/i);
+
+            return {
+              id: (index + 1).toString(),
+              description: descriptionMatch
+                ? descriptionMatch[1].trim()
+                : `Item ${index + 1}`,
+              quantity: qtyMatch ? parseInt(qtyMatch[1]) : 1,
+              rate: rateMatch ? parseFloat(rateMatch[1].replace(/,/g, '')) : 0,
+
+              amount: amountMatch
+                ? parseFloat(amountMatch[1].replace(/,/g, ''))
+                : 0,
+            };
+          });
+
+          setItems(extractedItems);
+        }
+      }
+
+      // Extract notes
+      const notesMatch = text.match(/Notes:\s*([^\n]+)/i);
+      if (notesMatch) {
+        setNotes(notesMatch[1].trim());
+      }
+
+      setShowPopup(true);
+      setPopupTitle('OCR Processing Complete');
+      setPopupMessage(
+        `${folderName.toLowerCase()} bill data has been extracted and filled into the form successfully.`,
+      );
+      setPopupType('success');
+    } catch (error) {
+      console.error('Error processing OCR text:', error);
+      setOcrError('Failed to process OCR data');
+    }
+  };
+
+  const processExcelFile = async (file: any) => {
+    try {
+      // Simulate Excel processing
+      setTimeout(() => {
+        const mockExcelData = {
+          supplier: 'Excel Electronics Ltd',
+          phone: '8765432109',
+          address: '456 Business Park, Mumbai, Maharashtra 400001',
+          date: '20-01-2025',
+          items: [
+            {
+              description: 'Desktop Computer',
+              quantity: 3,
+              rate: 35000,
+              amount: 123900,
+            },
+            {
+              description: 'Monitor 24"',
+              quantity: 3,
+              rate: 8000,
+              amount: 28320,
+            },
+            {
+              description: 'UPS 1KVA',
+              quantity: 3,
+              rate: 3000,
+              amount: 10620,
+            },
+          ],
+          notes: 'Bulk order for office setup, delivery required by month end',
+        };
+
+        // Fill form with Excel data
+        setSupplier(mockExcelData.supplier);
+        setSupplierPhone(mockExcelData.phone);
+        setSupplierAddress(mockExcelData.address);
+
+        // Parse date
+        const [day, month, year] = mockExcelData.date.split('-');
+        const excelDate = new Date(
+          parseInt(year),
+          parseInt(month) - 1,
+          parseInt(day),
+        );
+        setPurchaseDate(excelDate.toISOString().split('T')[0]);
+
+        // Set items
+        const excelItems = mockExcelData.items.map((item, index) => ({
+          id: (index + 1).toString(),
+          description: item.description,
+          quantity: item.quantity,
+          rate: item.rate,
+          amount: item.amount,
+        }));
+        setItems(excelItems);
+
+        setNotes(mockExcelData.notes);
+
+        setShowPopup(true);
+        setPopupTitle('Excel Processing Complete');
+        setPopupMessage(
+          'Excel data has been extracted and filled into the form successfully.',
+        );
+        setPopupType('success');
+      }, 2000);
+    } catch (error) {
+      console.error('Error processing Excel file:', error);
+      showAlert({
+        title: 'Error',
+        message: 'Failed to process Excel file',
+        type: 'error',
+      });
+    }
+  };
+
+  const showCustomPopup = (
+    title: string,
+    message: string,
+    type: 'success' | 'error' | 'info' = 'info',
+  ) => {
+    setPopupTitle(title);
+    setPopupMessage(message);
+    setPopupType(type);
+    setShowPopup(true);
+  };
+
+  // Utility functions for filtering
+  function fuzzyMatch(value: string, search: string) {
+    if (!value || !search) return false;
+    return value.toLowerCase().includes(search.toLowerCase());
+  }
+
+  function inRange(num: number, min?: number, max?: number) {
+    const n = Number(num);
+    const minN = min !== undefined && min !== null ? Number(min) : undefined;
+    const maxN = max !== undefined && max !== null ? Number(max) : undefined;
+    if (minN !== undefined && n < minN) return false;
+    if (maxN !== undefined && n > maxN) return false;
+    return true;
+  }
+
+  function inDateRange(dateStr: string, from?: string, to?: string) {
+    if (!dateStr) return false;
+    const date = new Date(dateStr);
+    if (from && date < new Date(from)) return false;
+    if (to && date > new Date(to)) return false;
+    return true;
+  }
+
+  // Enhanced filtering logic
+  const getFilteredPurchases = () => {
+    if (
+      !searchFilter.searchText &&
+      !searchFilter.amountMin &&
+      !searchFilter.amountMax &&
+      !searchFilter.dateFrom &&
+      !searchFilter.dateTo &&
+      !searchFilter.paymentMethod &&
+      !searchFilter.status &&
+      !searchFilter.reference &&
+      !searchFilter.description
+    ) {
+      return apiPurchases;
+    }
+
+    return apiPurchases.filter(purchase => {
+      // Text search
+      if (searchFilter.searchText) {
+        const searchLower = searchFilter.searchText.toLowerCase();
+        const matchesSearch =
+          fuzzyMatch(purchase.partyName || '', searchLower) ||
+          fuzzyMatch(purchase.billNumber || '', searchLower) ||
+          fuzzyMatch(purchase.notes || '', searchLower) ||
+          fuzzyMatch(purchase.amount?.toString() || '', searchLower);
+
+        if (!matchesSearch) return false;
+      }
+
+      // Amount range
+      if (searchFilter.amountMin || searchFilter.amountMax) {
+        if (
+          !inRange(
+            purchase.amount,
+            searchFilter.amountMin,
+            searchFilter.amountMax,
+          )
+        ) {
+          return false;
+        }
+      }
+
+      // Date range
+      if (searchFilter.dateFrom || searchFilter.dateTo) {
+        if (
+          !inDateRange(
+            purchase.date,
+            searchFilter.dateFrom,
+            searchFilter.dateTo,
+          )
+        ) {
+          return false;
+        }
+      }
+
+      // Payment method
+      if (
+        searchFilter.paymentMethod &&
+        purchase.method !== searchFilter.paymentMethod
+      ) {
+        return false;
+      }
+
+      // Status
+      if (searchFilter.status && purchase.status !== searchFilter.status) {
+        return false;
+      }
+
+      // Reference
+      if (
+        searchFilter.reference &&
+        !fuzzyMatch(purchase.billNumber || '', searchFilter.reference)
+      ) {
+        return false;
+      }
+
+      // Description
+      if (
+        searchFilter.description &&
+        !fuzzyMatch(purchase.notes || '', searchFilter.description)
+      ) {
+        return false;
+      }
+
+      return true;
+    });
+  };
 
   // API submit handler
   const handleSubmit = async (
     status: 'complete' | 'draft',
     syncYNOverride?: 'Y' | 'N',
   ) => {
+    console.log('handleSubmit called with status:', status);
     setTriedSubmit(true);
     setError(null);
-    setSuccess(null);
+
+    // Check transaction limits BEFORE making API call
+    try {
+      console.log('🔍 Checking transaction limits before purchase creation...');
+      await forceCheckTransactionLimit();
+    } catch (limitError) {
+      console.error('❌ Error checking transaction limits:', limitError);
+      // Continue with API call if limit check fails
+    }
+
     // Validate required fields BEFORE showing loader or calling API
-    if (!purchaseNumber || !purchaseDate || !supplier) {
-      setError('Please fill all required fields.');
-      // triedSubmit will trigger red borders and error messages below fields
+    console.log('Validating fields:', {
+      purchaseNumber,
+      purchaseDate,
+      supplier,
+      supplierPhone,
+      supplierAddress,
+    });
+
+    if (!purchaseDate || !supplier) {
+      console.log('Required fields validation failed');
+      setError('Please fill all required fields correctly.');
+      return;
+    }
+
+    // Validate optional fields if they have values
+    if (supplierPhone && isFieldInvalid(supplierPhone, 'phone')) {
+      setError(
+        'Phone number must be at least 10 digits and cannot exceed 16 digits.',
+      );
+      return;
+    }
+
+    if (supplierAddress && isFieldInvalid(supplierAddress, 'address')) {
+      setError('Address must be at least 10 characters.');
       return;
     }
     if (status === 'complete') setLoadingSave(true);
@@ -426,20 +1298,24 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
     try {
       // Check if supplier exists, if not, create
       let supplierNameToUse = supplier.trim();
-      let existingSupplier = suppliers.find(
-        s => s.name.trim().toLowerCase() === supplierNameToUse.toLowerCase(),
+      let existingSupplier = customers.find(
+        c =>
+          c.partyName?.trim().toLowerCase() === supplierNameToUse.toLowerCase(),
       );
       if (!existingSupplier) {
-        const newSupplier = await add({ name: supplierNameToUse });
+        const newSupplier = await add({ partyName: supplierNameToUse });
         if (newSupplier) {
-          supplierNameToUse = newSupplier.name;
+          supplierNameToUse = newSupplier.partyName || '';
           await fetchAll('');
         }
       }
       const userId = await getUserIdFromToken();
       if (!userId) throw new Error('User not authenticated.');
       // Calculate GST, subtotal, total
-      const subTotal = items.reduce((sum, item) => sum + item.amount, 0);
+      const subTotal = items.reduce(
+        (sum, item) => sum + item.quantity * item.rate,
+        0,
+      );
       const gstAmount = subTotal * (gstPct / 100);
       const totalAmount = subTotal + gstAmount;
       // API body
@@ -447,35 +1323,42 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
         user_id: userId,
         createdBy: userId,
         updatedBy: userId,
-        type: folderName.toLowerCase(),
+        type: 'purchase',
         amount: totalAmount.toFixed(2),
         date: new Date(purchaseDate).toISOString(),
         status,
-        notes: notes || '', // Only send notes
+        notes: notes || '',
         partyName: supplierNameToUse,
-        partyPhone: '',
-        partyAddress: '',
-        billNumber: purchaseNumber, // <-- use billNumber
-        invoiceNumber: '', // <-- clear invoiceNumber
-        receiptNumber: '',
-        method: '',
-        category: '',
-        gstNumber: '',
+        partyPhone: supplierPhone,
+        partyAddress: supplierAddress,
         items: items.map(item => ({
           description: item.description,
           qty: item.quantity,
           rate: item.rate,
+          amount: item.amount,
         })),
-        cGST: (gstAmount / 2).toFixed(2),
-        discount: '',
-        documentDate: new Date(purchaseDate).toISOString(),
-        gstPct: gstPct.toFixed(2),
-        iGST: '0.00',
-        sGST: (gstAmount / 2).toFixed(2),
-        shippingAmount: '',
-        subTotal: subTotal.toFixed(2),
-        totalAmount: totalAmount.toFixed(2),
-        syncYN: syncYNOverride || syncYN || 'N',
+        gstPct: gstPct, // Global GST percentage
+        discount: discountAmount, // Discount amount
+        cGST: taxAmount, // Tax amount (using cGST field)
+      };
+
+      // Clean the body object to only include fields that exist in backend schema
+      const cleanBody = {
+        user_id: body.user_id,
+        type: body.type,
+        amount: body.amount,
+        date: body.date,
+        status: body.status,
+        notes: body.notes,
+        partyName: body.partyName,
+        partyPhone: body.partyPhone,
+        partyAddress: body.partyAddress,
+        items: body.items,
+        gstPct: body.gstPct,
+        discount: body.discount,
+        cGST: body.cGST,
+        createdBy: body.createdBy,
+        updatedBy: body.updatedBy,
       };
       const token = await AsyncStorage.getItem('accessToken');
       let res;
@@ -488,16 +1371,16 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
         if (body.amount) patchBody.amount = body.amount;
         if (body.status) patchBody.status = body.status;
         if (body.partyName) patchBody.partyName = body.partyName;
-        if (body.method) patchBody.method = body.method;
-        if (body.invoiceNumber) patchBody.invoiceNumber = body.invoiceNumber;
-        if (body.billNumber) patchBody.billNumber = body.billNumber;
-        if (body.receiptNumber) patchBody.receiptNumber = body.receiptNumber;
+        if (body.partyPhone) patchBody.partyPhone = body.partyPhone;
+        if (body.partyAddress) patchBody.partyAddress = body.partyAddress;
+        // Remove invalid fields that don't exist in backend schema
         if (body.notes) patchBody.notes = body.notes;
         // Always include items for update
         patchBody.items = items.map(item => ({
           description: item.description,
           qty: item.quantity,
           rate: item.rate,
+          amount: item.amount,
         }));
         res = await fetch(`${BASE_URL}/vouchers/${editingItem.id}`, {
           method: 'PATCH',
@@ -520,19 +1403,32 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify(body),
+          body: JSON.stringify(cleanBody),
         });
+        if (res.ok) {
+          const newVoucher = await res.json();
+          appendVoucher(newVoucher.data || newVoucher);
+        }
       }
       if (!res.ok) {
         const err = await res.json();
+
+        // Check if it's a transaction limit error
+        if (
+          err.message?.includes('transaction limit') ||
+          err.message?.includes('limit exceeded') ||
+          err.message?.includes('Internal server error')
+        ) {
+          // Trigger transaction limit popup
+          await forceShowPopup();
+          setError(
+            'Transaction limit reached. Please upgrade your plan to continue.',
+          );
+          return;
+        }
+
         throw new Error(err.message || 'Failed to save purchase.');
       }
-      setSuccess(
-        editingItem
-          ? 'Purchase updated successfully!'
-          : 'Purchase saved successfully!',
-      );
-      setShowModal(true);
       // After success, refresh list, reset editingItem, and close form
       await fetchPurchases();
       setEditingItem(null);
@@ -548,199 +1444,135 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
   };
 
   // Add a helper to reset the form
-  const resetForm = () => {
+  const resetForm = async () => {
     setSupplierName('');
     setSupplierPhone('');
+    setSupplierAddress('');
     setPurchaseDate(new Date().toISOString().split('T')[0]);
     setBillNumber('');
     setItems([
       {
         id: '1',
-        description: 'Item 1',
+        description: '',
         quantity: 1,
-        rate: 1000,
-        amount: 1000,
+        rate: 0,
+        amount: 0,
       },
     ]);
-    setPurchaseNumber('');
+
+    // Auto-generate next purchase number
+    try {
+      const nextPurchaseNumber = await generateNextDocumentNumber('purchase');
+      setPurchaseNumber(nextPurchaseNumber);
+    } catch (error) {
+      console.error('Error generating purchase number:', error);
+      setPurchaseNumber('PUR-001');
+    }
+
     setNotes('');
     setSupplier('');
     setGstPct(18);
+    setTaxAmount(0);
+    setDiscountAmount(0);
     setTriedSubmit(false);
     setError(null);
-    setSuccess(null);
+    setLoadingSave(false);
+    setLoadingDraft(false);
   };
 
-  // 3. In the form, pre-fill fields from editingItem if set
+  // In the form, pre-fill fields from editingItem if set
   useEffect(() => {
-    if (editingItem) {
-      setSupplierName(editingItem.partyName || '');
-      setSupplierPhone(editingItem.partyPhone || '');
-      setPurchaseDate(
-        editingItem.date
-          ? editingItem.date.slice(0, 10)
-          : new Date().toISOString().split('T')[0],
-      );
-      setBillNumber(editingItem.billNumber || '');
-      setItems(
-        editingItem.items && editingItem.items.length > 0
-          ? editingItem.items.map((it: any, idx: number) => ({
-              id: String(idx + 1),
-              description: it.description || '',
-              quantity: it.qty || 1,
-              rate: it.rate || 0,
-              amount: (it.qty || 1) * (it.rate || 0),
-            }))
-          : [{ id: '1', description: '', quantity: 1, rate: 0, amount: 0 }],
-      );
-      setPurchaseNumber(editingItem.billNumber || ''); // <-- use billNumber
-      setNotes(editingItem.notes || '');
+    if (editingItem && showCreateForm) {
+      const isoDate = editingItem.date
+        ? new Date(editingItem.date).toISOString().split('T')[0]
+        : new Date().toISOString().split('T')[0];
+
+      const newGstPct =
+        typeof editingItem.gstPct === 'number' && !isNaN(editingItem.gstPct)
+          ? editingItem.gstPct
+          : 18;
+
+      // Map backend items (qty -> quantity) into local state shape
+      const mappedItems: PurchaseItem[] = Array.isArray(editingItem.items)
+        ? editingItem.items.map((it: any, index: number) => {
+            const qty =
+              it?.qty != null ? Number(it.qty) : Number(it?.quantity) || 1;
+            const rate = it?.rate != null ? Number(it.rate) : 0;
+            const amount =
+              it?.amount != null
+                ? Number(it.amount)
+                : qty * rate * (1 + newGstPct / 100);
+            return {
+              id: (index + 1).toString(),
+              description: it?.description || it?.name || '',
+              quantity: isNaN(qty) ? 1 : qty,
+              rate: isNaN(rate) ? 0 : rate,
+              amount: isNaN(amount) ? 0 : amount,
+            };
+          })
+        : [
+            {
+              id: '1',
+              description: '',
+              quantity: 1,
+              rate: 0,
+              amount: 0,
+            },
+          ];
+
       setSupplier(editingItem.partyName || '');
-      setGstPct(Number(editingItem.gstPct) || 18);
-    } else {
+      setSupplierPhone(editingItem.partyPhone || '');
+      setSupplierAddress(editingItem.partyAddress || '');
+      setPurchaseDate(isoDate);
+      setBillNumber(editingItem.billNumber || '');
+      setItems(mappedItems);
+      setNotes(editingItem.notes || '');
+      setGstPct(newGstPct);
+      setTaxAmount(Number(editingItem.cGST) || 0);
+      setDiscountAmount(Number(editingItem.discount) || 0);
+      setPurchaseNumber(
+        editingItem.purchaseNumber || `PUR-${String(editingItem.id || '')}`,
+      );
+    } else if (!editingItem && showCreateForm) {
       // If not editing, reset to default
       setSupplierName('');
       setSupplierPhone('');
+      setSupplierAddress('');
       setPurchaseDate(new Date().toISOString().split('T')[0]);
       setBillNumber('');
-      setItems([{ id: '1', description: '', quantity: 1, rate: 0, amount: 0 }]);
-      setPurchaseNumber('');
+      setItems([
+        {
+          id: '1',
+          description: '',
+          quantity: 1,
+          rate: 0,
+          amount: 0,
+        },
+      ]);
       setNotes('');
       setSupplier('');
       setGstPct(18);
+      setTaxAmount(0);
+      setDiscountAmount(0);
     }
   }, [editingItem, showCreateForm]);
 
-  const { suppliers, add, fetchAll } = useSupplierContext();
+  // Update filtered purchases after all functions are defined
+  const enhancedFilteredPurchases = getFilteredPurchases();
 
-  const scrollRef = useRef<KeyboardAwareScrollView>(null);
-  const purchaseNumberRef = useRef<TextInput>(null);
-  const purchaseDateRef = useRef<TextInput>(null);
-  const notesRef = useRef<TextInput>(null);
-  // For dynamic items, use an array of refs
-  const itemRefs = useRef<{ [key: string]: TextInput | null }>({});
-
-  // Add new search/filter state
-  const [searchFilter, setSearchFilter] = useState<PaymentSearchFilterState>({
-    searchText: '',
-  });
-  const [recentSearches, setRecentSearches] = useState<RecentSearch[]>([]);
-  const filterBadgeCount = [
-    searchFilter.paymentNumber,
-    searchFilter.supplierName,
-    searchFilter.amountMin,
-    searchFilter.amountMax,
-    searchFilter.dateFrom,
-    searchFilter.dateTo,
-    searchFilter.paymentMethod,
-    searchFilter.status,
-    searchFilter.description,
-    searchFilter.reference,
-    searchFilter.category,
-  ].filter(Boolean).length;
-  const [filterVisible, setFilterVisible] = useState(false);
-  const [showDatePickerFrom, setShowDatePickerFrom] = useState(false);
-  const [showDatePickerTo, setShowDatePickerTo] = useState(false);
-
-  const handleRecentSearchPress = (search: RecentSearch) => {
-    setSearchFilter({ ...searchFilter, searchText: search.text });
-  };
-
-  // Utility: Fuzzy match helper
-  function fuzzyMatch(value: string, search: string) {
-    if (!value || !search) return false;
-    return value.toLowerCase().includes(search.toLowerCase());
-  }
-  // Update inRange and inDateRange logic to allow only min or only from date
-  function inRange(num: number, min?: number, max?: number) {
-    const n = Number(num);
-    const minN =
-      min !== undefined && min !== null && min !== '' ? Number(min) : undefined;
-    const maxN =
-      max !== undefined && max !== null && max !== '' ? Number(max) : undefined;
-    if (minN !== undefined && n < minN) return false;
-    if (maxN !== undefined && n > maxN) return false;
-    return true;
-  }
-  function inDateRange(dateStr: string, from?: string, to?: string) {
-    if (!dateStr) return false;
-    const date = new Date(dateStr);
-    if (from && date < new Date(from)) return false;
-    if (to && date > new Date(to)) return false;
-    return true;
-  }
-  // Advanced fuzzy search and filter logic
-  const filteredPurchases = apiPurchases.filter(pur => {
-    const s = searchFilter.searchText?.trim().toLowerCase();
-    const matchesFuzzy =
-      !s ||
-      [
-        pur.billNumber,
-        pur.purchaseNumber,
-        pur.partyName,
-        pur.supplierName,
-        pur.amount?.toString(),
-        pur.date,
-        (pur as any).method || '',
-        pur.status,
-        (pur as any).description || '',
-        (pur as any).notes || '',
-        (pur as any).reference || '',
-        (pur as any).category || '',
-      ].some(field => field && field.toString().toLowerCase().includes(s));
-    const matchesPurchaseNumber =
-      !searchFilter.paymentNumber ||
-      fuzzyMatch(
-        pur.purchaseNumber || pur.billNumber || '',
-        searchFilter.paymentNumber,
-      );
-    const matchesSupplier =
-      !searchFilter.supplierName ||
-      fuzzyMatch(
-        pur.partyName || pur.supplierName || '',
-        searchFilter.supplierName,
-      );
-    const matchesAmount = inRange(
-      Number(pur.amount),
-      searchFilter.amountMin,
-      searchFilter.amountMax,
-    );
-    const matchesDate = inDateRange(
-      pur.date,
-      searchFilter.dateFrom,
-      searchFilter.dateTo,
-    );
-    const matchesMethod =
-      !searchFilter.paymentMethod ||
-      (pur as any).method === searchFilter.paymentMethod;
-    const matchesStatus =
-      !searchFilter.status || pur.status === searchFilter.status;
-    const matchesCategory =
-      !searchFilter.category || (pur as any).category === searchFilter.category;
-    const matchesReference =
-      !searchFilter.reference ||
-      [(pur as any).reference, pur.billNumber, pur.purchaseNumber].some(ref =>
-        fuzzyMatch(ref || '', searchFilter.reference!),
-      );
-    const matchesDescription =
-      !searchFilter.description ||
-      fuzzyMatch(
-        (pur as any).description || (pur as any).notes || '',
-        searchFilter.description,
-      );
-    return (
-      matchesFuzzy &&
-      matchesPurchaseNumber &&
-      matchesSupplier &&
-      matchesAmount &&
-      matchesDate &&
-      matchesMethod &&
-      matchesStatus &&
-      matchesCategory &&
-      matchesReference &&
-      matchesDescription
-    );
-  });
+  // Calculate filter badge count
+  useEffect(() => {
+    let count = 0;
+    if (searchFilter.amountMin !== undefined) count++;
+    if (searchFilter.amountMax !== undefined) count++;
+    if (searchFilter.dateFrom) count++;
+    if (searchFilter.dateTo) count++;
+    if (searchFilter.paymentMethod) count++;
+    if (searchFilter.status) count++;
+    if (searchFilter.reference) count++;
+    if (searchFilter.description) count++;
+    setFilterBadgeCount(count);
+  }, [searchFilter]);
 
   if (showCreateForm) {
     return (
@@ -758,9 +1590,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                 color="#222"
               />
             </TouchableOpacity>
-            <Text style={styles.headerTitle}>
-              {editingItem ? `Edit ${folderName}` : `Create ${folderName}`}
-            </Text>
+            <Text style={styles.headerTitle}>Create {folderName}</Text>
           </View>
         </View>
         <KeyboardAwareScrollView
@@ -775,57 +1605,109 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
           keyboardOpeningTime={0}
         >
           {/* Upload Document Component */}
-          <UploadDocument
-            onUploadDocument={() => {
-              // TODO: Implement document upload logic
-              console.log('Upload document pressed');
-            }}
-            onVoiceHelper={() => {
-              // TODO: Implement voice helper logic
-              console.log('Voice helper pressed');
-            }}
-            folderName={folderName}
-          />
+          <View style={{ alignItems: 'center' }}>
+            <UploadDocument
+              onUploadDocument={handleUploadDocument}
+              onVoiceHelper={
+                isRecording ? stopVoiceRecording : startVoiceRecording
+              }
+              folderName={folderName}
+            />
+          </View>
+
+          {/* Show last voice response above Purchase Details */}
+          {lastVoiceText && (
+            <View
+              style={{
+                backgroundColor: '#f0f6ff',
+                borderRadius: 8,
+                padding: 12,
+                marginTop: 16,
+                marginBottom: 8,
+                borderWidth: 1,
+                borderColor: '#b3d1ff',
+              }}
+            >
+              <Text style={{ color: '#222', fontSize: 15 }}>
+                <Text style={{ fontWeight: 'bold', color: '#4f8cff' }}>
+                  Voice Response:
+                </Text>
+                {lastVoiceText}
+              </Text>
+            </View>
+          )}
+          {voiceLoading && (
+            <ActivityIndicator
+              size="small"
+              color="#222"
+              style={{ marginTop: 8 }}
+            />
+          )}
+          {voiceError ? (
+            <Text style={{ color: 'red', marginTop: 8 }}>{voiceError}</Text>
+          ) : null}
+          {nlpStatus && !voiceError ? (
+            <Text style={{ color: '#666', marginTop: 8, fontSize: 12 }}>
+              {nlpStatus}
+            </Text>
+          ) : null}
+
+          {/* OCR Loading and Error States */}
+          {ocrLoading && (
+            <View
+              style={{
+                backgroundColor: '#fff3cd',
+                borderRadius: 8,
+                padding: 12,
+                marginTop: 16,
+                marginBottom: 8,
+                borderWidth: 1,
+                borderColor: '#ffeaa7',
+                flexDirection: 'row',
+                alignItems: 'center',
+              }}
+            >
+              <ActivityIndicator
+                size="small"
+                color="#856404"
+                style={{ marginRight: 8 }}
+              />
+              <Text
+                style={{ color: '#856404', fontSize: 14, fontWeight: '500' }}
+              >
+                Processing document with OCR...
+              </Text>
+            </View>
+          )}
+          {ocrError && (
+            <View
+              style={{
+                backgroundColor: '#f8d7da',
+                borderRadius: 8,
+                padding: 12,
+                marginTop: 16,
+                marginBottom: 8,
+                borderWidth: 1,
+                borderColor: '#f5c6cb',
+              }}
+            >
+              <Text style={{ color: '#721c24', fontSize: 14 }}>
+                <Text style={{ fontWeight: 'bold' }}>OCR Error: </Text>
+                {ocrError}
+              </Text>
+            </View>
+          )}
+
           {/* Purchase Details Card */}
           <View style={styles.card}>
             <Text style={styles.cardTitle}>{folderName} Details</Text>
             <View style={{ flexDirection: 'row', marginBottom: 16 }}>
-              <View style={{ flex: 1, marginRight: 8 }}>
-                <Text style={styles.inputLabel}>{folderName} Number</Text>
-                <TextInput
-                  ref={purchaseNumberRef}
-                  style={[
-                    styles.input,
-                    isFieldInvalid(purchaseNumber) && { borderColor: 'red' },
-                  ]}
-                  value={purchaseNumber}
-                  onChangeText={setPurchaseNumber}
-                  editable
-                  placeholder={`Enter ${folderName.toLowerCase()} number`}
-                  onFocus={() => {
-                    if (scrollRef.current && purchaseNumberRef.current) {
-                      scrollRef.current.scrollToFocusedInput(
-                        purchaseNumberRef.current,
-                        120,
-                      );
-                    }
-                  }}
-                />
-                {triedSubmit && !purchaseNumber ? (
-                  <Text
-                    style={styles.errorTextField}
-                  >{`${folderName} Number is required`}</Text>
-                ) : null}
-              </View>
-              <View style={{ flex: 1, marginLeft: 8 }}>
+              <View style={{ flex: 1 }}>
                 <Text style={styles.inputLabel}>{folderName} Date</Text>
                 <TouchableOpacity onPress={() => setShowDatePicker(true)}>
                   <TextInput
                     ref={purchaseDateRef}
-                    style={[
-                      styles.input,
-                      isFieldInvalid(purchaseDate) && { borderColor: 'red' },
-                    ]}
+                    style={styles.input}
                     value={purchaseDate}
                     editable={false}
                     pointerEvents="none"
@@ -839,159 +1721,155 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                     }}
                   />
                 </TouchableOpacity>
-                {triedSubmit && !purchaseDate && (
+                {triedSubmit && !purchaseDate ? (
                   <Text style={styles.errorTextField}>Date is required.</Text>
-                )}
-                {showDatePicker && (
+                ) : null}
+                {showDatePicker ? (
                   <DateTimePicker
                     value={new Date(purchaseDate)}
                     mode="date"
                     display="default"
                     onChange={(event: unknown, date?: Date | undefined) => {
                       setShowDatePicker(false);
-                      if (date)
+                      if (date) {
                         setPurchaseDate(date.toISOString().split('T')[0]);
+                      }
                     }}
                   />
-                )}
+                ) : null}
               </View>
             </View>
             {/* Supplier Field */}
             <View style={styles.fieldWrapper}>
               <Text style={styles.inputLabel}>{folderName} Supplier</Text>
-              <SupplierSelector
-                value={supplier}
-                onChange={(name, obj) => setSupplier(name)}
-                placeholder={`Type or search supplier`}
-                scrollRef={scrollRef}
-              />
+              <View
+                style={{
+                  borderWidth: 1,
+                  borderColor: '#e0e0e0',
+                  borderRadius: 8,
+                  backgroundColor: '#f9f9f9',
+                  zIndex: 999999999,
+                }}
+              >
+                <CustomerSelector
+                  value={supplier}
+                  onChange={(name, obj) => setSupplier(name)}
+                  placeholder="Type or search supplier"
+                  onCustomerSelect={supplierObj => {
+                    console.log(
+                      '🔍 PurchaseScreen: onCustomerSelect called with:',
+                      supplierObj,
+                    );
+                    console.log(
+                      '🔍 PurchaseScreen: Setting supplier to:',
+                      supplierObj.partyName,
+                    );
+                    console.log(
+                      '🔍 PurchaseScreen: Setting supplierPhone to:',
+                      supplierObj.phoneNumber,
+                    );
+                    console.log(
+                      '🔍 PurchaseScreen: Setting supplierAddress to:',
+                      supplierObj.address,
+                    );
+
+                    setSupplier(supplierObj.partyName || '');
+                    setSupplierPhone(supplierObj.phoneNumber || '');
+                    setSupplierAddress(supplierObj.address || '');
+                  }}
+                />
+              </View>
               {triedSubmit && !supplier ? (
                 <Text style={styles.errorTextField}>Supplier is required.</Text>
               ) : null}
             </View>
-            {/* GST Dropdown */}
-            <View style={[styles.fieldWrapper, { zIndex: 100 }]}>
-              {' '}
-              {/* zIndex for dropdown overlap */}
+            {/* Phone Field */}
+            <View style={styles.fieldWrapper}>
+              <Text style={styles.inputLabel}>Phone</Text>
+              <TextInput
+                style={styles.input}
+                value={supplierPhone}
+                onChangeText={setSupplierPhone}
+                placeholder="+91 98765 43210"
+                keyboardType="phone-pad"
+                maxLength={16}
+              />
+              {getFieldError('supplierPhone') ? (
+                <Text style={styles.errorTextField}>
+                  {getFieldError('supplierPhone')}
+                </Text>
+              ) : null}
+            </View>
+            {/* Address Field */}
+            <View style={styles.fieldWrapper}>
+              <Text style={styles.inputLabel}>Address</Text>
+              <TextInput
+                style={[
+                  styles.input,
+                  { minHeight: 60, textAlignVertical: 'top' },
+                ]}
+                value={supplierAddress}
+                onChangeText={setSupplierAddress}
+                placeholder="Supplier address"
+                multiline
+              />
+              {getFieldError('supplierAddress') ? (
+                <Text style={styles.errorTextField}>
+                  {getFieldError('supplierAddress')}
+                </Text>
+              ) : null}
+            </View>
+            {/* GST Field */}
+            <View style={styles.fieldWrapper}>
               <Text style={styles.inputLabel}>GST (%)</Text>
-              <View>
-                <TouchableOpacity
-                  ref={gstFieldRef}
-                  style={{
-                    borderWidth: 1,
-                    borderColor: '#e0e0e0',
-                    borderRadius: 12,
-                    backgroundColor: '#fff',
-                    paddingHorizontal: 16,
-                    height: 48,
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    marginTop: 4,
-                    justifyContent: 'space-between',
-                  }}
-                  onPress={() => {
-                    if (
-                      gstFieldRef.current &&
-                      typeof gstFieldRef.current.measureInWindow === 'function'
-                    ) {
-                      gstFieldRef.current.measureInWindow(
-                        (x, y, width, height) => {
-                          setGstDropdownLayout({
-                            x,
-                            y: y + height,
-                            width,
-                            height,
-                          });
-                          setGstDropdownOpen(true);
-                        },
-                      );
-                    } else {
-                      setGstDropdownOpen(true);
-                    }
-                  }}
-                  activeOpacity={0.8}
-                >
-                  <Text
-                    style={{
-                      fontSize: 16,
-                      color: gstPct === null ? '#8a94a6' : '#222',
-                      flex: 1,
-                    }}
-                  >
-                    {gstPct === null ? GST_PLACEHOLDER : `${gstPct}%`}
-                  </Text>
+              <Dropdown
+                style={{
+                  borderWidth: 1,
+                  borderColor: '#e0e0e0',
+                  borderRadius: 12,
+                  backgroundColor: '#fff',
+                  paddingHorizontal: 16,
+                  height: 48,
+                  marginTop: 4,
+                }}
+                data={GST_OPTIONS.map(opt => ({
+                  label: `${opt}%`,
+                  value: opt,
+                }))}
+                labelField="label"
+                valueField="value"
+                placeholder="Select GST %"
+                value={gstPct}
+                onChange={selectedItem => {
+                  setGstPct(selectedItem.value);
+                  // Recalculate all item amounts with new GST
+                  const updatedItems = items.map(item => ({
+                    ...item,
+                    amount:
+                      item.quantity *
+                      item.rate *
+                      (1 + selectedItem.value / 100),
+                  }));
+                  setItems(updatedItems);
+                }}
+                renderLeftIcon={() => (
                   <MaterialCommunityIcons
-                    name={gstDropdownOpen ? 'chevron-up' : 'chevron-down'}
-                    size={24}
+                    name="percent"
+                    size={20}
                     color="#8a94a6"
+                    style={{ marginRight: 8 }}
                   />
-                </TouchableOpacity>
-                {gstDropdownOpen && (
-                  <Modal
-                    isVisible={gstDropdownOpen}
-                    onBackdropPress={() => setGstDropdownOpen(false)}
-                    style={{ justifyContent: 'flex-end', margin: 0 }}
-                  >
-                    <View
-                      style={{
-                        position: 'absolute',
-                        top: (() => {
-                          const screenHeight = Dimensions.get('window').height;
-                          const dropdownHeight = GST_OPTIONS.length * 48 + 8;
-                          if (
-                            gstDropdownLayout.y + dropdownHeight >
-                            screenHeight
-                          ) {
-                            return Math.max(
-                              0,
-                              gstDropdownLayout.y -
-                                dropdownHeight -
-                                gstDropdownLayout.height,
-                            );
-                          }
-                          return gstDropdownLayout.y;
-                        })(),
-                        left: gstDropdownLayout.x,
-                        width: gstDropdownLayout.width,
-                        backgroundColor: '#fff',
-                        borderRadius: 12,
-                        borderWidth: 1,
-                        borderColor: '#e0e0e0',
-                        shadowColor: '#000',
-                        shadowOpacity: 0.08,
-                        shadowRadius: 8,
-                        shadowOffset: { width: 0, height: 2 },
-                        elevation: 8,
-                        zIndex: 9999,
-                        paddingVertical: 4,
-                      }}
-                    >
-                      {GST_OPTIONS.map(opt => (
-                        <TouchableOpacity
-                          key={opt}
-                          style={{
-                            paddingVertical: 14,
-                            paddingHorizontal: 24,
-                            borderBottomWidth:
-                              opt !== GST_OPTIONS[GST_OPTIONS.length - 1]
-                                ? 1
-                                : 0,
-                            borderBottomColor: '#f0f0f0',
-                          }}
-                          onPress={() => {
-                            setGstPct(opt);
-                            setGstDropdownOpen(false);
-                          }}
-                        >
-                          <Text style={{ fontSize: 16, color: '#222' }}>
-                            {opt}%
-                          </Text>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  </Modal>
                 )}
-              </View>
+                selectedTextStyle={{ fontSize: 16, color: '#222' }}
+                placeholderStyle={{ fontSize: 16, color: '#8a94a6' }}
+                itemTextStyle={{ fontSize: 16, color: '#222' }}
+                containerStyle={{
+                  borderRadius: 12,
+                  backgroundColor: '#f8fafc',
+                }}
+                activeColor="#f0f6ff"
+                maxHeight={240}
+              />
             </View>
           </View>
           {/* Items Card */}
@@ -1003,41 +1881,60 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                 <Text style={styles.addItemText}>Add Item</Text>
               </TouchableOpacity>
             </View>
-            {items.map(item => (
-              <View style={styles.itemCard} key={item.id}>
-                <Text style={styles.itemTitle}>
-                  Item {items.indexOf(item) + 1}
-                </Text>
+            {items.map((item, index) => (
+              <View style={styles.itemCard} key={index}>
+                <Text style={styles.itemTitle}>Item {index + 1}</Text>
                 <Text style={styles.inputLabel}>Description</Text>
                 <TextInput
                   ref={ref => {
-                    itemRefs.current[item.id] = ref || null;
+                    if (!itemRefs.current) itemRefs.current = {};
+                    if (!itemRefs.current[item?.id || ''])
+                      itemRefs.current[item?.id || ''] = {};
+                    itemRefs.current[item?.id || '']['description'] =
+                      ref || null;
                   }}
                   style={styles.input}
-                  value={item.description}
+                  value={item?.description || ''}
                   onChangeText={text =>
-                    updateItem(item.id, 'description', text)
+                    updateItem(item?.id || '', 'description', text)
                   }
                   placeholder="Item description"
                   onFocus={() => {
-                    const inputRef = itemRefs.current[item.id] || null;
+                    const inputRef =
+                      (itemRefs.current || {})[item?.id || '']?.description ||
+                      null;
                     if (scrollRef.current && inputRef) {
                       scrollRef.current.scrollToFocusedInput(inputRef, 120);
                     }
                   }}
                 />
+                {/* GST Field for each item */}
+
                 <View style={styles.rowBetween}>
                   <View style={styles.flex1}>
                     <Text style={styles.inputLabel}>Quantity</Text>
                     <TextInput
+                      ref={ref => {
+                        if (!itemRefs.current) itemRefs.current = {};
+                        if (!itemRefs.current[item?.id || ''])
+                          itemRefs.current[item?.id || ''] = {};
+                        itemRefs.current[item?.id || '']['quantity'] =
+                          ref || null;
+                      }}
                       style={styles.input}
-                      value={item.quantity.toString()}
+                      value={item?.quantity?.toString() || '1'}
                       onChangeText={text =>
-                        updateItem(item.id, 'quantity', parseFloat(text) || 0)
+                        updateItem(
+                          item?.id || '',
+                          'quantity',
+                          parseFloat(text) || 0,
+                        )
                       }
                       keyboardType="numeric"
                       onFocus={() => {
-                        const inputRef = itemRefs.current[item.id] || null;
+                        const inputRef =
+                          (itemRefs.current || {})[item?.id || '']?.quantity ||
+                          null;
                         if (scrollRef.current && inputRef) {
                           scrollRef.current.scrollToFocusedInput(inputRef, 120);
                         }
@@ -1045,18 +1942,28 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                     />
                   </View>
                   <View style={[styles.flex1, { marginLeft: 8 }]}>
-                    {' '}
-                    {/* Rate */}
                     <Text style={styles.inputLabel}>Rate (₹)</Text>
                     <TextInput
+                      ref={ref => {
+                        if (!itemRefs.current) itemRefs.current = {};
+                        if (!itemRefs.current[item?.id || ''])
+                          itemRefs.current[item?.id || ''] = {};
+                        itemRefs.current[item?.id || '']['rate'] = ref || null;
+                      }}
                       style={styles.input}
-                      value={item.rate.toString()}
+                      value={item?.rate?.toString() || '0'}
                       onChangeText={text =>
-                        updateItem(item.id, 'rate', parseFloat(text) || 0)
+                        updateItem(
+                          item?.id || '',
+                          'rate',
+                          parseFloat(text) || 0,
+                        )
                       }
                       keyboardType="numeric"
                       onFocus={() => {
-                        const inputRef = itemRefs.current[item.id] || null;
+                        const inputRef =
+                          (itemRefs.current || {})[item?.id || '']?.rate ||
+                          null;
                         if (scrollRef.current && inputRef) {
                           scrollRef.current.scrollToFocusedInput(inputRef, 120);
                         }
@@ -1064,17 +1971,22 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                     />
                   </View>
                   <View style={[styles.flex1, { marginLeft: 8 }]}>
-                    {' '}
-                    {/* Amount */}
                     <Text style={styles.inputLabel}>Amount (₹)</Text>
                     <TextInput
+                      ref={ref => {
+                        if (!itemRefs.current) itemRefs.current = {};
+                        if (!itemRefs.current[item?.id || ''])
+                          itemRefs.current[item?.id || ''] = {};
+                        itemRefs.current[item?.id || '']['amount'] =
+                          ref || null;
+                      }}
                       style={[styles.input, { backgroundColor: '#f0f0f0' }]}
-                      value={item.amount.toFixed(2)}
+                      value={formatCurrency(item?.amount || 0)}
                       editable={false}
                     />
                   </View>
                 </View>
-                {items.length > 1 && (
+                {items.length > 1 ? (
                   <TouchableOpacity
                     style={styles.removeItemButton}
                     onPress={() => removeItem(item.id)}
@@ -1086,30 +1998,239 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                     />
                     <Text style={styles.removeItemText}>Remove</Text>
                   </TouchableOpacity>
-                )}
+                ) : null}
               </View>
             ))}
           </View>
-          {/* Calculations Card */}
+
+          {/* Amount Details Card */}
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>Calculations</Text>
-            <View style={styles.calcRow}>
-              <Text style={styles.calcLabel}>Subtotal:</Text>
-              <Text style={styles.calcValue}>
-                {formatCurrency(calculateSubtotal())}
-              </Text>
+            <View style={styles.rowBetween}>
+              <View style={{ flexDirection: 'row', alignItems: 'baseline' }}>
+                <MaterialCommunityIcons
+                  name="currency-inr"
+                  size={18}
+                  color="#333"
+                  style={{ marginRight: 2 }}
+                />
+                <Text
+                  style={[
+                    styles.cardTitle,
+                    { fontSize: 18, fontWeight: '700', color: '#333' },
+                  ]}
+                >
+                  Amount Details
+                </Text>
+              </View>
             </View>
-            <View style={styles.calcRow}>
-              <Text style={styles.calcLabel}>GST ({gstPct}%):</Text>
-              <Text style={styles.calcValue}>
-                {formatCurrency(calculateGST())}
-              </Text>
+            <View
+              style={{
+                height: 1,
+                backgroundColor: '#e0e0e0',
+                marginVertical: 12,
+              }}
+            />
+            <View style={styles.rowBetween}>
+              <View style={styles.flex1}>
+                <Text
+                  style={[
+                    styles.inputLabel,
+                    {
+                      marginBottom: 6,
+                      fontSize: 15,
+                      color: '#555',
+                      fontWeight: '600',
+                    },
+                  ]}
+                >
+                  Tax Amount
+                </Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    {
+                      height: 40,
+                      fontSize: 14,
+                      paddingHorizontal: 12,
+                      backgroundColor: '#fff',
+                      borderColor: '#ddd',
+                      borderWidth: 1,
+                    },
+                  ]}
+                  value={taxAmount.toString()}
+                  onChangeText={text => {
+                    const value = parseFloat(text) || 0;
+                    setTaxAmount(value);
+                    // Recalculate total with new tax amount
+                    const subtotal = calculateSubtotal();
+                    const gst = calculateGST();
+                    const total = subtotal + gst + value - discountAmount;
+                    // Update items with new amounts
+                    const updatedItems = items.map(item => ({
+                      ...item,
+                      amount: item.quantity * item.rate * (1 + gstPct / 100),
+                    }));
+                    setItems(updatedItems);
+                  }}
+                  placeholder="0.00"
+                  keyboardType="numeric"
+                />
+              </View>
+              <View style={[styles.flex1, { marginLeft: 16 }]}>
+                <Text
+                  style={[
+                    styles.inputLabel,
+                    {
+                      marginBottom: 6,
+                      fontSize: 15,
+                      color: '#555',
+                      fontWeight: '600',
+                    },
+                  ]}
+                >
+                  Discount Amount
+                </Text>
+                <TextInput
+                  style={[
+                    styles.input,
+                    {
+                      height: 40,
+                      fontSize: 14,
+                      paddingHorizontal: 12,
+                      backgroundColor: '#fff',
+                      borderColor: '#ddd',
+                      borderWidth: 1,
+                    },
+                  ]}
+                  value={discountAmount.toString()}
+                  onChangeText={text => {
+                    const value = parseFloat(text) || 0;
+                    setDiscountAmount(value);
+                    // Recalculate total with new discount amount
+                    const subtotal = calculateSubtotal();
+                    const gst = calculateGST();
+                    const total = subtotal + gst + taxAmount - value;
+                    // Update items with new amounts
+                    const updatedItems = items.map(item => ({
+                      ...item,
+                      amount: item.quantity * item.rate * (1 + gstPct / 100),
+                    }));
+                    setItems(updatedItems);
+                  }}
+                  placeholder="0.00"
+                  keyboardType="numeric"
+                />
+              </View>
             </View>
-            <View style={styles.calcRow}>
-              <Text style={styles.calcTotalLabel}>Total:</Text>
-              <Text style={styles.calcTotalValue}>
-                {formatCurrency(calculateTotal())}
-              </Text>
+            {/* Summary */}
+            <View
+              style={{
+                marginTop: 20,
+                padding: 18,
+                backgroundColor: '#f8f9fa',
+                borderRadius: 10,
+                borderWidth: 1,
+                borderColor: '#e9ecef',
+              }}
+            >
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  marginBottom: 10,
+                  alignItems: 'center',
+                }}
+              >
+                <Text
+                  style={{ fontSize: 16, color: '#555', fontWeight: '600' }}
+                >
+                  Subtotal:
+                </Text>
+                <Text
+                  style={{ fontSize: 16, color: '#222', fontWeight: '700' }}
+                >
+                  ₹{calculateSubtotal().toFixed(2)}
+                </Text>
+              </View>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  marginBottom: 10,
+                  alignItems: 'center',
+                }}
+              >
+                <Text
+                  style={{ fontSize: 16, color: '#555', fontWeight: '600' }}
+                >
+                  GST ({gstPct}%):
+                </Text>
+                <Text
+                  style={{ fontSize: 16, color: '#222', fontWeight: '700' }}
+                >
+                  ₹{calculateGST().toFixed(2)}
+                </Text>
+              </View>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  marginBottom: 10,
+                  alignItems: 'center',
+                }}
+              >
+                <Text
+                  style={{ fontSize: 16, color: '#555', fontWeight: '600' }}
+                >
+                  Tax Amount:
+                </Text>
+                <Text
+                  style={{ fontSize: 16, color: '#222', fontWeight: '700' }}
+                >
+                  ₹{taxAmount.toFixed(2)}
+                </Text>
+              </View>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  marginBottom: 10,
+                  alignItems: 'center',
+                }}
+              >
+                <Text
+                  style={{ fontSize: 16, color: '#666', fontWeight: '600' }}
+                >
+                  Discount:
+                </Text>
+                <Text
+                  style={{ fontSize: 16, color: '#666', fontWeight: '600' }}
+                >
+                  -₹{discountAmount.toFixed(2)}
+                </Text>
+              </View>
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  marginTop: 14,
+                  paddingTop: 14,
+                  borderTopWidth: 1,
+                  borderTopColor: '#dee2e6',
+                  alignItems: 'center',
+                }}
+              >
+                <Text
+                  style={{ fontSize: 18, color: '#222', fontWeight: '700' }}
+                >
+                  Total:
+                </Text>
+                <Text
+                  style={{ fontSize: 18, color: '#222', fontWeight: '700' }}
+                >
+                  ₹{calculateTotal().toFixed(2)}
+                </Text>
+              </View>
             </View>
           </View>
           {/* Notes Card */}
@@ -1123,7 +2244,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
               ]}
               value={notes}
               onChangeText={setNotes}
-              placeholder={`Additional notes or terms...`}
+              placeholder="Additional notes or terms..."
               multiline
               onFocus={() => {
                 if (scrollRef.current && notesRef.current) {
@@ -1139,21 +2260,17 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
               onPress={() => handleSubmit('complete')}
               disabled={loadingSave}
             >
-              <Text style={styles.primaryButtonText}>
-                {loadingSave ? 'Saving...' : `Save ${folderName}`}
-              </Text>
+              <Text style={styles.primaryButtonText}>Save {folderName}</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.secondaryButton}
               onPress={() => handleSubmit('draft')}
               disabled={loadingDraft}
             >
-              <Text style={styles.secondaryButtonText}>
-                {loadingDraft ? 'Saving...' : 'Draft'}
-              </Text>
+              <Text style={styles.secondaryButtonText}>Draft</Text>
             </TouchableOpacity>
           </View>
-          {editingItem && (
+          {editingItem ? (
             <TouchableOpacity
               style={{
                 backgroundColor: '#000',
@@ -1169,126 +2286,606 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                 Delete {folderName}
               </Text>
             </TouchableOpacity>
-          )}
+          ) : null}
         </KeyboardAwareScrollView>
-        {/* Error/Success Modal */}
-        <Modal isVisible={showModal}>
+        {/* Enhanced Error/Success Modal */}
+        <Modal
+          isVisible={showModal}
+          animationIn="zoomIn"
+          animationOut="zoomOut"
+          animationInTiming={300}
+          animationOutTiming={300}
+          onBackdropPress={() => setShowModal(false)}
+          style={{ justifyContent: 'center', margin: 20 }}
+          backdropOpacity={0.7}
+          useNativeDriver={true}
+        >
           <View
             style={{
-              flex: 1,
-              justifyContent: 'center',
+              backgroundColor: '#fff',
+              borderRadius: 24,
+              padding: 32,
               alignItems: 'center',
-              backgroundColor: 'rgba(0,0,0,0.3)',
+              maxWidth: 380,
+              width: '100%',
+              shadowColor: '#000',
+              shadowOffset: {
+                width: 0,
+                height: 20,
+              },
+              shadowOpacity: 0.3,
+              shadowRadius: 30,
+              elevation: 15,
             }}
           >
-            <ScrollView
-              contentContainerStyle={{
-                flexGrow: 1,
-                justifyContent: 'center',
-                alignItems: 'center',
+            {error ? (
+              <>
+                <View
+                  style={{
+                    backgroundColor: '#fee',
+                    borderRadius: 50,
+                    padding: 16,
+                    marginBottom: 20,
+                    borderWidth: 2,
+                    borderColor: '#fcc',
+                  }}
+                >
+                  <MaterialCommunityIcons
+                    name="alert-circle"
+                    size={40}
+                    color="#dc3545"
+                  />
+                </View>
+                <Text
+                  style={{
+                    color: '#dc3545',
+                    fontWeight: 'bold',
+                    fontSize: 22,
+                    marginBottom: 12,
+                    textAlign: 'center',
+                  }}
+                >
+                  Error
+                </Text>
+                <Text
+                  style={{
+                    color: '#333',
+                    fontSize: 16,
+                    marginBottom: 28,
+                    textAlign: 'center',
+                    lineHeight: 22,
+                  }}
+                >
+                  {error}
+                </Text>
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: '#dc3545',
+                    paddingVertical: 16,
+                    paddingHorizontal: 32,
+                    borderRadius: 12,
+                    alignItems: 'center',
+                    shadowColor: '#dc3545',
+                    shadowOffset: {
+                      width: 0,
+                      height: 4,
+                    },
+                    shadowOpacity: 0.3,
+                    shadowRadius: 8,
+                    elevation: 4,
+                  }}
+                  onPress={() => setShowModal(false)}
+                  activeOpacity={0.8}
+                >
+                  <Text
+                    style={{
+                      color: '#fff',
+                      fontWeight: 'bold',
+                      fontSize: 16,
+                    }}
+                  >
+                    Close
+                  </Text>
+                </TouchableOpacity>
+              </>
+            ) : null}
+          </View>
+        </Modal>
+
+        {/* File Type Selection Modal */}
+        <Modal
+          isVisible={showFileTypeModal}
+          onBackdropPress={() => setShowFileTypeModal(false)}
+          animationIn="slideInUp"
+          animationOut="slideOutDown"
+          style={{
+            justifyContent: 'center',
+            alignItems: 'center',
+            margin: 0,
+            padding: 0,
+          }}
+          backdropOpacity={0.6}
+          useNativeDriver={true}
+          propagateSwipe={true}
+        >
+          <View
+            style={{
+              backgroundColor: '#fff',
+              borderRadius: 20,
+              maxHeight: '90%',
+              minHeight: 600,
+              width: '90%',
+              alignSelf: 'center',
+              shadowColor: '#000',
+              shadowOffset: {
+                width: 0,
+                height: 10,
+              },
+              shadowOpacity: 0.25,
+              shadowRadius: 20,
+              elevation: 10,
+            }}
+          >
+            {/* Header */}
+            <View
+              style={{
+                paddingHorizontal: 24,
+                paddingTop: 24,
+                paddingBottom: 16,
+                borderBottomWidth: 1,
+                borderBottomColor: '#f0f0f0',
               }}
-              style={{ width: '100%' }}
-              bounces={false}
-              showsVerticalScrollIndicator={false}
             >
-              <View
+              <Text
                 style={{
-                  backgroundColor: '#fff',
-                  borderRadius: 20,
-                  padding: 28,
-                  alignItems: 'center',
-                  maxWidth: 340,
-                  width: '90%',
-                  minHeight: 120,
-                  flexShrink: 1,
-                  overflow: 'visible',
-                  justifyContent: 'center',
+                  fontSize: 22,
+                  fontWeight: 'bold',
+                  color: '#222',
+                  textAlign: 'center',
                 }}
               >
-                {error ? (
-                  <>
+                Choose File Type
+              </Text>
+              <Text
+                style={{
+                  fontSize: 14,
+                  color: '#666',
+                  textAlign: 'center',
+                  lineHeight: 20,
+                  marginTop: 8,
+                }}
+              >
+                Select the type of file you want to upload for OCR processing
+              </Text>
+            </View>
+
+            {/* Scrollable Content */}
+            <ScrollView
+              style={{
+                flex: 1,
+                paddingHorizontal: 24,
+              }}
+              showsVerticalScrollIndicator={true}
+              contentContainerStyle={{
+                paddingVertical: 20,
+                paddingBottom: 40,
+              }}
+              nestedScrollEnabled={true}
+              bounces={true}
+              alwaysBounceVertical={false}
+            >
+              {/* File Type Options */}
+              <View style={{ marginBottom: 20 }}>
+                {/* Image Option */}
+                <TouchableOpacity
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    backgroundColor: '#f8f9fa',
+                    borderRadius: 16,
+                    padding: 20,
+                    marginBottom: 16,
+                    width: '100%',
+                    borderWidth: 2,
+                    borderColor: '#e9ecef',
+                    shadowColor: '#000',
+                    shadowOffset: {
+                      width: 0,
+                      height: 2,
+                    },
+                    shadowOpacity: 0.05,
+                    shadowRadius: 4,
+                    elevation: 2,
+                  }}
+                  onPress={() => handleFileTypeSelection('image')}
+                  activeOpacity={0.7}
+                >
+                  <View
+                    style={{
+                      backgroundColor: '#4f8cff',
+                      borderRadius: 12,
+                      padding: 10,
+                      marginRight: 16,
+                    }}
+                  >
                     <MaterialCommunityIcons
-                      name="alert-circle"
-                      size={48}
-                      color="#dc3545"
-                      style={{ marginBottom: 12 }}
+                      name="image"
+                      size={24}
+                      color="#fff"
                     />
+                  </View>
+                  <View style={{ flex: 1 }}>
                     <Text
                       style={{
-                        color: '#dc3545',
-                        fontWeight: 'bold',
                         fontSize: 18,
-                        marginBottom: 8,
+                        fontWeight: '700',
+                        color: '#222',
+                        marginBottom: 4,
                       }}
                     >
-                      Error
+                      Image
                     </Text>
                     <Text
                       style={{
-                        color: '#222',
-                        fontSize: 16,
-                        marginBottom: 20,
-                        textAlign: 'center',
+                        fontSize: 13,
+                        color: '#666',
+                        lineHeight: 18,
                       }}
                     >
-                      {error}
+                      Upload {folderName.toLowerCase()} bill images (JPG, PNG)
                     </Text>
-                    <TouchableOpacity
-                      style={[
-                        styles.primaryButton,
-                        {
-                          backgroundColor: '#dc3545',
-                          borderColor: '#dc3545',
-                          width: 120,
-                        },
-                      ]}
-                      onPress={() => setShowModal(false)}
-                    >
-                      <Text style={styles.primaryButtonText}>Close</Text>
-                    </TouchableOpacity>
-                  </>
-                ) : success ? (
-                  <>
+                  </View>
+                  <MaterialCommunityIcons
+                    name="chevron-right"
+                    size={24}
+                    color="#4f8cff"
+                  />
+                </TouchableOpacity>
+
+                {/* PDF Option */}
+                <TouchableOpacity
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    backgroundColor: '#f8f9fa',
+                    borderRadius: 16,
+                    padding: 20,
+                    marginBottom: 16,
+                    width: '100%',
+                    borderWidth: 2,
+                    borderColor: '#e9ecef',
+                    shadowColor: '#000',
+                    shadowOffset: {
+                      width: 0,
+                      height: 2,
+                    },
+                    shadowOpacity: 0.05,
+                    shadowRadius: 4,
+                    elevation: 2,
+                  }}
+                  onPress={() => handleFileTypeSelection('pdf')}
+                  activeOpacity={0.7}
+                >
+                  <View
+                    style={{
+                      backgroundColor: '#dc3545',
+                      borderRadius: 12,
+                      padding: 10,
+                      marginRight: 16,
+                    }}
+                  >
                     <MaterialCommunityIcons
-                      name="check-circle"
-                      size={48}
-                      color="#28a745"
-                      style={{ marginBottom: 12 }}
+                      name="file-pdf-box"
+                      size={24}
+                      color="#fff"
                     />
+                  </View>
+                  <View style={{ flex: 1 }}>
                     <Text
                       style={{
-                        color: '#28a745',
-                        fontWeight: 'bold',
                         fontSize: 18,
-                        marginBottom: 8,
+                        fontWeight: '700',
+                        color: '#222',
+                        marginBottom: 4,
                       }}
                     >
-                      Success
+                      PDF Document
                     </Text>
                     <Text
                       style={{
-                        color: '#222',
-                        fontSize: 16,
-                        marginBottom: 20,
-                        textAlign: 'center',
+                        fontSize: 13,
+                        color: '#666',
+                        lineHeight: 18,
                       }}
                     >
-                      {success}
+                      Upload PDF files for OCR processing
                     </Text>
-                    <TouchableOpacity
-                      style={[styles.primaryButton, { width: 120 }]}
-                      onPress={() => {
-                        setShowModal(false);
-                        setShowCreateForm(false);
-                        resetForm();
+                  </View>
+                  <MaterialCommunityIcons
+                    name="chevron-right"
+                    size={24}
+                    color="#dc3545"
+                  />
+                </TouchableOpacity>
+              </View>
+
+              {/* Shared Example */}
+              <View
+                style={{
+                  backgroundColor: '#f8f9fa',
+                  borderRadius: 12,
+                  padding: 16,
+                  marginBottom: 24,
+                  borderWidth: 1,
+                  borderColor: '#e9ecef',
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 16,
+                    fontWeight: '600',
+                    color: '#222',
+                    marginBottom: 12,
+                  }}
+                >
+                  Real {folderName} Bill Example:
+                </Text>
+                <View
+                  style={{
+                    backgroundColor: '#fff',
+                    borderRadius: 8,
+                    padding: 16,
+                    borderWidth: 1,
+                    borderColor: '#dee2e6',
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 14,
+                      fontWeight: 'bold',
+                      color: '#222',
+                      marginBottom: 8,
+                      textAlign: 'center',
+                    }}
+                  >
+                    {folderName} Bill
+                  </Text>
+                  <View style={{ marginBottom: 8 }}>
+                    <Text
+                      style={{ fontSize: 12, color: '#666', lineHeight: 18 }}
+                    >
+                      <Text style={{ fontWeight: '600' }}>Purchase Date:</Text>
+                      <Text> 2025-01-15{'\n'}</Text>
+                      <Text style={{ fontWeight: '600' }}>Supplier Name:</Text>
+                      <Text> ABC Electronics{'\n'}</Text>
+                      <Text style={{ fontWeight: '600' }}>Phone:</Text>
+                      <Text> 9876543210{'\n'}</Text>
+                      <Text style={{ fontWeight: '600' }}>Address:</Text>
+                      <Text> 123 Tech Street, Bangalore</Text>
+                    </Text>
+                  </View>
+
+                  {/* Table Header */}
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      backgroundColor: '#f8f9fa',
+                      paddingVertical: 6,
+                      paddingHorizontal: 8,
+                      borderRadius: 4,
+                      marginBottom: 4,
+                    }}
+                  >
+                    <Text
+                      style={{
+                        fontSize: 11,
+                        fontWeight: '600',
+                        color: '#222',
+                        flex: 2,
                       }}
                     >
-                      <Text style={styles.primaryButtonText}>OK</Text>
-                    </TouchableOpacity>
-                  </>
-                ) : null}
+                      Description
+                    </Text>
+                    <Text
+                      style={{
+                        fontSize: 11,
+                        fontWeight: '600',
+                        color: '#222',
+                        flex: 1,
+                      }}
+                    >
+                      GST
+                    </Text>
+                    <Text
+                      style={{
+                        fontSize: 11,
+                        fontWeight: '600',
+                        color: '#222',
+                        flex: 1,
+                      }}
+                    >
+                      Qty
+                    </Text>
+                    <Text
+                      style={{
+                        fontSize: 11,
+                        fontWeight: '600',
+                        color: '#222',
+                        flex: 1,
+                      }}
+                    >
+                      Rate
+                    </Text>
+                    <Text
+                      style={{
+                        fontSize: 11,
+                        fontWeight: '600',
+                        color: '#222',
+                        flex: 1,
+                      }}
+                    >
+                      Amount
+                    </Text>
+                  </View>
+
+                  {/* Table Rows */}
+                  <View style={{ marginBottom: 8 }}>
+                    <View style={{ flexDirection: 'row', marginBottom: 2 }}>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 2 }}>
+                        Laptop
+                      </Text>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 1 }}>
+                        18%
+                      </Text>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 1 }}>
+                        2
+                      </Text>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 1 }}>
+                        45000
+                      </Text>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 1 }}>
+                        106200.00
+                      </Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', marginBottom: 2 }}>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 2 }}>
+                        Mouse
+                      </Text>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 1 }}>
+                        18%
+                      </Text>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 1 }}>
+                        5
+                      </Text>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 1 }}>
+                        500
+                      </Text>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 1 }}>
+                        2950.00
+                      </Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', marginBottom: 2 }}>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 2 }}>
+                        Keyboard
+                      </Text>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 1 }}>
+                        18%
+                      </Text>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 1 }}>
+                        3
+                      </Text>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 1 }}>
+                        1200
+                      </Text>
+                      <Text style={{ fontSize: 11, color: '#666', flex: 1 }}>
+                        4248.00
+                      </Text>
+                    </View>
+                  </View>
+
+                  {/* Calculations */}
+                  <View style={{ marginBottom: 8 }}>
+                    <Text
+                      style={{
+                        fontSize: 12,
+                        fontWeight: '600',
+                        color: '#222',
+                        marginBottom: 4,
+                      }}
+                    >
+                      Calculations
+                    </Text>
+                    <Text
+                      style={{ fontSize: 11, color: '#666', lineHeight: 16 }}
+                    >
+                      <Text style={{ fontWeight: '600' }}>SubTotal:</Text>
+                      <Text> ₹113,400{'\n'}</Text>
+                      <Text style={{ fontWeight: '600' }}>Total GST:</Text>
+                      <Text> ₹20,412{'\n'}</Text>
+                      <Text style={{ fontWeight: '600' }}>Total:</Text>
+                      <Text> ₹133,812</Text>
+                    </Text>
+                  </View>
+
+                  {/* Notes */}
+                  <View>
+                    <Text
+                      style={{ fontSize: 11, color: '#666', lineHeight: 16 }}
+                    >
+                      <Text style={{ fontWeight: '600' }}>Notes:</Text> Delivery
+                      within 3 business days, warranty included for all items.
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Tip */}
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'flex-start',
+                    marginTop: 12,
+                    backgroundColor: '#fff3cd',
+                    borderRadius: 6,
+                    padding: 8,
+                    borderWidth: 1,
+                    borderColor: '#ffeaa7',
+                  }}
+                >
+                  <MaterialCommunityIcons
+                    name="lightbulb-outline"
+                    size={16}
+                    color="#ffc107"
+                    style={{ marginTop: 1 }}
+                  />
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      color: '#856404',
+                      marginLeft: 6,
+                      flex: 1,
+                      lineHeight: 16,
+                    }}
+                  >
+                    Tip: Clear, well-lit images or text-based PDFs with
+                    structured tables work best for OCR
+                  </Text>
+                </View>
               </View>
             </ScrollView>
+
+            {/* Footer */}
+            <View
+              style={{
+                paddingHorizontal: 24,
+                paddingVertical: 16,
+                borderTopWidth: 1,
+                borderTopColor: '#f0f0f0',
+              }}
+            >
+              <TouchableOpacity
+                style={{
+                  backgroundColor: '#f8f9fa',
+                  borderRadius: 12,
+                  paddingVertical: 14,
+                  paddingHorizontal: 24,
+                  borderWidth: 1,
+                  borderColor: '#dee2e6',
+                  alignItems: 'center',
+                }}
+                onPress={() => setShowFileTypeModal(false)}
+                activeOpacity={0.8}
+              >
+                <Text
+                  style={{
+                    fontSize: 16,
+                    fontWeight: '600',
+                    color: '#666',
+                  }}
+                >
+                  Cancel
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </Modal>
       </SafeAreaView>
@@ -1307,9 +2904,10 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
           >
             <MaterialCommunityIcons name="arrow-left" size={24} color="#222" />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>{pluralize(folderName)}</Text>
+          <Text style={styles.headerTitle}>{folderName}</Text>
         </View>
       </View>
+
       {/* Search Bar */}
       <SearchAndFilter
         value={searchFilter}
@@ -1319,25 +2917,29 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
         onRecentSearchPress={handleRecentSearchPress}
         filterBadgeCount={filterBadgeCount}
       />
+
       {/* Purchase List */}
       <View style={styles.listContainer}>
-        {loadingApi ? (
+        {loadingApi && (
           <ActivityIndicator
             size="large"
             color="#4f8cff"
             style={{ marginTop: 40 }}
           />
-        ) : apiError ? (
+        )}
+        {!loadingApi && apiError && (
           <Text style={{ color: 'red', textAlign: 'center', marginTop: 40 }}>
-            {apiError}
+            {apiError.replace(/purchase/gi, folderName)}
           </Text>
-        ) : filteredPurchases.length === 0 ? (
+        )}
+        {!loadingApi && !apiError && enhancedFilteredPurchases.length === 0 && (
           <Text style={{ color: '#888', textAlign: 'center', marginTop: 40 }}>
             {`No ${pluralize(folderName).toLowerCase()} found.`}
           </Text>
-        ) : (
+        )}
+        {!loadingApi && !apiError && enhancedFilteredPurchases.length > 0 && (
           <FlatList
-            data={[...filteredPurchases].reverse()}
+            data={[...enhancedFilteredPurchases].reverse()}
             renderItem={renderPurchaseItem}
             keyExtractor={item => String(item.id)}
             showsVerticalScrollIndicator={false}
@@ -1358,17 +2960,19 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
         <MaterialCommunityIcons name="plus" size={24} color="#fff" />
         <Text style={styles.addInvoiceText}>Add {folderName}</Text>
       </TouchableOpacity>
-      {/* Add the advanced filter modal (same as PaymentScreen, adapted for purchases) */}
+
+      {/* Advanced Filter Modal */}
       <Modal
         isVisible={filterVisible}
         onBackdropPress={() => setFilterVisible(false)}
-        style={{ justifyContent: 'flex-end', margin: 0 }}
+        style={{ justifyContent: 'flex-end', margin: 0, marginBottom: 0 }}
       >
         <KeyboardAwareScrollView
           style={{
             backgroundColor: '#fff',
             borderTopLeftRadius: 18,
             borderTopRightRadius: 18,
+            maxHeight: '80%',
           }}
           contentContainerStyle={{ padding: 20 }}
           enableOnAndroid
@@ -1389,7 +2993,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
               marginLeft: 40,
             }}
           >
-            Filter Purchases
+            Filter {folderName}
           </Text>
           {/* Amount Range */}
           <Text style={{ fontSize: 15, marginBottom: 6 }}>Amount Range</Text>
@@ -1405,11 +3009,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
               }}
               placeholder="Min"
               keyboardType="numeric"
-              value={
-                searchFilter.amountMin !== undefined
-                  ? String(searchFilter.amountMin)
-                  : ''
-              }
+              value={searchFilter.amountMin?.toString() || ''}
               onChangeText={v =>
                 setSearchFilter(f => ({
                   ...f,
@@ -1427,11 +3027,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
               }}
               placeholder="Max"
               keyboardType="numeric"
-              value={
-                searchFilter.amountMax !== undefined
-                  ? String(searchFilter.amountMax)
-                  : ''
-              }
+              value={searchFilter.amountMax?.toString() || ''}
               onChangeText={v =>
                 setSearchFilter(f => ({
                   ...f,
@@ -1461,9 +3057,11 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
               onPress={() => setShowDatePickerFrom(true)}
             >
               <Text
-                style={{ color: searchFilter.dateFrom ? '#222' : '#8a94a6' }}
+                style={{
+                  color: '#8a94a6',
+                }}
               >
-                {searchFilter.dateFrom || 'From'}
+                From
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -1476,18 +3074,18 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
               }}
               onPress={() => setShowDatePickerTo(true)}
             >
-              <Text style={{ color: searchFilter.dateTo ? '#222' : '#8a94a6' }}>
-                {searchFilter.dateTo || 'To'}
+              <Text
+                style={{
+                  color: '#8a94a6',
+                }}
+              >
+                To
               </Text>
             </TouchableOpacity>
           </View>
-          {showDatePickerFrom && (
+          {showDatePickerFrom ? (
             <DateTimePicker
-              value={
-                searchFilter.dateFrom
-                  ? new Date(searchFilter.dateFrom)
-                  : new Date()
-              }
+              value={new Date()}
               mode="date"
               display="default"
               onChange={(event, date) => {
@@ -1499,12 +3097,10 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                   }));
               }}
             />
-          )}
-          {showDatePickerTo && (
+          ) : null}
+          {showDatePickerTo ? (
             <DateTimePicker
-              value={
-                searchFilter.dateTo ? new Date(searchFilter.dateTo) : new Date()
-              }
+              value={new Date()}
               mode="date"
               display="default"
               onChange={(event, date) => {
@@ -1516,19 +3112,28 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                   }));
               }}
             />
-          )}
+          ) : null}
           {/* Payment Method filter */}
-          <Text style={{ fontSize: 15, marginBottom: 6 }}>Payment Method</Text>
+          <Text
+            style={{
+              fontSize: 16,
+              fontWeight: '600',
+              color: '#1f2937',
+              marginBottom: 12,
+              marginTop: 8,
+            }}
+          >
+            Payment Method
+          </Text>
           <View
             style={{
               flexDirection: 'row',
               flexWrap: 'wrap',
-              marginBottom: 16,
-              justifyContent: 'space-between',
+              marginBottom: 20,
+              gap: 10,
             }}
           >
             {[
-              '',
               'Cash',
               'Bank Transfer',
               'UPI',
@@ -1539,70 +3144,77 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
               <TouchableOpacity
                 key={method}
                 style={{
-                  width: '48%',
-                  backgroundColor:
-                    searchFilter.paymentMethod === method
-                      ? '#e6f0ff'
-                      : '#f6fafc',
-                  borderColor:
-                    searchFilter.paymentMethod === method
-                      ? '#4f8cff'
-                      : '#e0e0e0',
-                  borderWidth: 1,
-                  borderRadius: 8,
-                  padding: 10,
-                  marginBottom: 10,
+                  backgroundColor: '#ffffff',
+                  borderColor: '#d1d5db',
+                  borderWidth: 1.5,
+                  borderRadius: 22,
+                  paddingVertical: 10,
+                  paddingHorizontal: 18,
                   alignItems: 'center',
                   justifyContent: 'center',
+                  minWidth: 75,
                 }}
                 onPress={() =>
                   setSearchFilter(f => ({
                     ...f,
-                    paymentMethod: method || undefined,
+                    paymentMethod: method,
                   }))
                 }
               >
                 <Text
                   style={{
-                    color: '#222',
-                    fontSize: searchFilter.paymentMethod === method ? 16 : 15,
-                    fontWeight:
-                      searchFilter.paymentMethod === method ? 'bold' : '500',
+                    color: '#6b7280',
+                    fontSize: 14,
+                    fontWeight: '500',
+                    textAlign: 'center',
                   }}
                 >
-                  {method || 'All'}
+                  {method}
                 </Text>
               </TouchableOpacity>
             ))}
           </View>
           {/* Status Filter */}
-          <Text style={{ fontSize: 15, marginBottom: 6 }}>Status</Text>
-          <View style={{ flexDirection: 'row', marginBottom: 16 }}>
+          <Text
+            style={{
+              fontSize: 16,
+              fontWeight: '600',
+              color: '#1f2937',
+              marginBottom: 12,
+            }}
+          >
+            Status
+          </Text>
+          <View
+            style={{
+              flexDirection: 'row',
+              marginBottom: 20,
+              gap: 12,
+            }}
+          >
             {['', 'Paid', 'Pending'].map(status => (
               <TouchableOpacity
                 key={status}
                 style={{
                   flex: 1,
-                  backgroundColor:
-                    searchFilter.status === status ? '#e6f0ff' : '#f6fafc',
-                  borderColor:
-                    searchFilter.status === status ? '#4f8cff' : '#e0e0e0',
-                  borderWidth: 1,
-                  borderRadius: 8,
-                  padding: 10,
-                  marginRight: status !== 'Pending' ? 8 : 0,
+                  backgroundColor: '#ffffff',
+                  borderColor: '#d1d5db',
+                  borderWidth: 1.5,
+                  borderRadius: 22,
+                  paddingVertical: 10,
+                  paddingHorizontal: 16,
                   alignItems: 'center',
                   justifyContent: 'center',
                 }}
-                onPress={() =>
-                  setSearchFilter(f => ({ ...f, status: status || undefined }))
-                }
+                onPress={() => setSearchFilter(f => ({ ...f, status: status }))}
               >
                 <Text
                   style={{
-                    color: '#222',
-                    fontSize: searchFilter.status === status ? 16 : 15,
-                    fontWeight: searchFilter.status === status ? 'bold' : '500',
+                    color: '#6b7280',
+                    fontSize: 14,
+                    fontWeight: '500',
+                    textTransform: 'capitalize',
+                    textAlign: 'center',
                   }}
                 >
                   {status || 'All'}
@@ -1610,41 +3222,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
               </TouchableOpacity>
             ))}
           </View>
-          {/* Category Filter */}
-          <Text style={{ fontSize: 15, marginBottom: 6 }}>Category</Text>
-          <View style={{ flexDirection: 'row', marginBottom: 16 }}>
-            {['', 'Suppliers', 'Customers'].map(cat => (
-              <TouchableOpacity
-                key={cat}
-                style={{
-                  flex: 1,
-                  backgroundColor:
-                    searchFilter.category === cat ? '#e6f0ff' : '#f6fafc',
-                  borderColor:
-                    searchFilter.category === cat ? '#4f8cff' : '#e0e0e0',
-                  borderWidth: 1,
-                  borderRadius: 8,
-                  padding: 10,
-                  marginRight: cat !== 'Customers' ? 8 : 0,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-                onPress={() =>
-                  setSearchFilter(f => ({ ...f, category: cat || undefined }))
-                }
-              >
-                <Text
-                  style={{
-                    color: '#222',
-                    fontSize: searchFilter.category === cat ? 16 : 15,
-                    fontWeight: searchFilter.category === cat ? 'bold' : '500',
-                  }}
-                >
-                  {cat || 'All'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+
           {/* Reference Number Filter */}
           <Text style={{ fontSize: 15, marginBottom: 6 }}>
             Reference Number
@@ -1659,9 +3237,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
             }}
             placeholder="Reference number"
             value={searchFilter.reference || ''}
-            onChangeText={v =>
-              setSearchFilter(f => ({ ...f, reference: v || undefined }))
-            }
+            onChangeText={v => setSearchFilter(f => ({ ...f, reference: v }))}
           />
           {/* Description/Notes Filter */}
           <Text style={{ fontSize: 15, marginBottom: 6 }}>
@@ -1677,112 +3253,197 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
             }}
             placeholder="Description or notes keywords"
             value={searchFilter.description || ''}
-            onChangeText={v =>
-              setSearchFilter(f => ({ ...f, description: v || undefined }))
-            }
+            onChangeText={v => setSearchFilter(f => ({ ...f, description: v }))}
           />
           {/* Actions */}
-          <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
+          <View
+            style={{
+              flexDirection: 'row',
+              justifyContent: 'center',
+              marginBottom: 0,
+              marginTop: 12,
+              gap: 16,
+            }}
+          >
             <TouchableOpacity
               onPress={() => {
                 setSearchFilter({ searchText: '' });
               }}
-              style={{ marginRight: 16 }}
+              style={{
+                backgroundColor: '#f8f9fa',
+                borderWidth: 1.5,
+                borderColor: '#dc3545',
+                borderRadius: 12,
+                paddingVertical: 14,
+                paddingHorizontal: 32,
+                alignItems: 'center',
+                justifyContent: 'center',
+                minWidth: 140,
+              }}
             >
-              <Text style={{ color: '#dc3545', fontWeight: 'bold' }}>
+              <Text
+                style={{
+                  color: '#dc3545',
+                  fontWeight: '600',
+                  fontSize: 16,
+                }}
+              >
                 Reset
               </Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => setFilterVisible(false)}>
-              <Text style={{ color: '#4f8cff', fontWeight: 'bold' }}>
+            <TouchableOpacity
+              onPress={() => setFilterVisible(false)}
+              style={{
+                backgroundColor: '#4f8cff',
+                borderWidth: 1.5,
+                borderColor: '#4f8cff',
+                borderRadius: 12,
+                paddingVertical: 14,
+                paddingHorizontal: 32,
+                alignItems: 'center',
+                justifyContent: 'center',
+                minWidth: 140,
+              }}
+            >
+              <Text
+                style={{
+                  color: '#ffffff',
+                  fontWeight: '600',
+                  fontSize: 16,
+                }}
+              >
                 Apply
               </Text>
             </TouchableOpacity>
           </View>
         </KeyboardAwareScrollView>
       </Modal>
+
+      {/* Custom Popup */}
+      <Modal
+        isVisible={showPopup}
+        onBackdropPress={() => setShowPopup(false)}
+        animationIn="fadeIn"
+        animationOut="fadeOut"
+        style={{ justifyContent: 'center', margin: 20 }}
+        backdropOpacity={0.6}
+        useNativeDriver={true}
+      >
+        <View
+          style={{
+            backgroundColor: '#fff',
+            borderRadius: 16,
+            padding: 24,
+            alignItems: 'center',
+            shadowColor: '#000',
+            shadowOffset: {
+              width: 0,
+              height: 10,
+            },
+            shadowOpacity: 0.25,
+            shadowRadius: 20,
+            elevation: 10,
+          }}
+        >
+          {/* Icon */}
+          <View
+            style={{
+              width: 60,
+              height: 60,
+              borderRadius: 30,
+              backgroundColor:
+                popupType === 'success'
+                  ? '#d4edda'
+                  : popupType === 'error'
+                  ? '#f8d7da'
+                  : '#d1ecf1',
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginBottom: 16,
+            }}
+          >
+            <MaterialCommunityIcons
+              name={
+                popupType === 'success'
+                  ? 'check-circle'
+                  : popupType === 'error'
+                  ? 'alert-circle'
+                  : 'information'
+              }
+              size={32}
+              color={
+                popupType === 'success'
+                  ? '#155724'
+                  : popupType === 'error'
+                  ? '#721c24'
+                  : '#0c5460'
+              }
+            />
+          </View>
+
+          {/* Title */}
+          <Text
+            style={{
+              fontSize: 20,
+              fontWeight: 'bold',
+              color: '#222',
+              marginBottom: 8,
+              textAlign: 'center',
+            }}
+          >
+            {popupTitle}
+          </Text>
+
+          {/* Message */}
+          <Text
+            style={{
+              fontSize: 16,
+              color: '#666',
+              textAlign: 'center',
+              lineHeight: 22,
+              marginBottom: 24,
+            }}
+          >
+            {popupMessage}
+          </Text>
+
+          {/* OK Button */}
+          <TouchableOpacity
+            style={{
+              backgroundColor:
+                popupType === 'success'
+                  ? '#28a745'
+                  : popupType === 'error'
+                  ? '#dc3545'
+                  : '#17a2b8',
+              paddingVertical: 12,
+              paddingHorizontal: 32,
+              borderRadius: 8,
+              minWidth: 100,
+            }}
+            onPress={() => setShowPopup(false)}
+            activeOpacity={0.8}
+          >
+            <Text
+              style={{
+                color: '#fff',
+                fontWeight: 'bold',
+                fontSize: 16,
+              }}
+            >
+              OK
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
-};
-
-// Dropdown style enhancements
-const dropdownStyles = {
-  dropdown: {
-    height: 52,
-    borderRadius: 16,
-    borderWidth: 1.5,
-    borderColor: '#e3e7ee',
-    backgroundColor: '#fff',
-    paddingHorizontal: 18,
-    marginTop: 8,
-    shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 4,
-  },
-  dropdownFocused: {
-    borderColor: '#4f8cff',
-    backgroundColor: '#f0f6ff',
-  },
-  placeholderStyle: {
-    fontSize: 17,
-    color: '#8a94a6',
-    fontWeight: '500',
-  },
-  selectedTextStyle: {
-    fontSize: 17,
-    color: '#222',
-    fontWeight: '600',
-  },
-  iconStyle: {
-    width: 28,
-    height: 28,
-    tintColor: '#000',
-  },
-  inputSearchStyle: {
-    height: 44,
-    fontSize: 16,
-    backgroundColor: '#f0f6ff',
-    borderRadius: 12,
-    paddingLeft: 36,
-    color: '#222',
-  },
-  containerStyle: {
-    borderRadius: 16,
-    backgroundColor: '#f8fafc',
-    shadowColor: '#000',
-    shadowOpacity: 0.1,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 8,
-    marginTop: 4,
-  },
-  itemContainerStyle: {
-    borderRadius: 12,
-    marginVertical: 2,
-    paddingVertical: 12,
-    paddingHorizontal: 18,
-  },
-  itemTextStyle: {
-    fontSize: 16,
-    color: '#222',
-    fontWeight: '500',
-  },
-  selectedItemStyle: {
-    backgroundColor: '#f0f6ff',
-  },
 };
 
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: '#f6fafc',
-  },
-  container: {
-    flex: 1,
-    backgroundColor: '#f6fafc',
-    padding: 16, // Match InvoiceScreen
   },
   header: {
     flexDirection: 'row',
@@ -1805,12 +3466,28 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
     color: '#222',
-    marginLeft: 12, // match InvoiceScreen
+    marginLeft: 12,
   },
-  listContainer: {
+
+  content: {
     flex: 1,
-    padding: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
   },
+  message: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#222',
+    marginBottom: 16,
+    textAlign: 'center',
+  },
+  subMessage: {
+    fontSize: 16,
+    color: '#666',
+    textAlign: 'center',
+  },
+  // Purchase item styles
   invoiceCard: {
     backgroundColor: '#fff',
     borderRadius: 12,
@@ -1833,16 +3510,6 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#222',
   },
-  statusBadge: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  statusText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
   customerName: {
     fontSize: 14,
     color: '#666',
@@ -1862,27 +3529,27 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#222',
   },
-  addInvoiceButton: {
-    position: 'absolute',
-    bottom: 20,
-    right: 20,
+  syncButton: {
     backgroundColor: '#4f8cff',
-    borderRadius: 28,
-    paddingVertical: 16,
-    paddingHorizontal: 20,
-    flexDirection: 'row',
+    paddingVertical: 30,
+    paddingHorizontal: 32,
+    marginLeft: 10,
+    borderRadius: 8,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 8,
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#4f8cff',
   },
-  addInvoiceText: {
+  syncButtonText: {
     color: '#fff',
     fontWeight: 'bold',
-    fontSize: 16,
-    marginLeft: 8,
+    fontSize: 14,
+  },
+  // Form styles
+  container: {
+    flex: 1,
+    backgroundColor: '#f6fafc',
+    padding: 16,
   },
   card: {
     backgroundColor: '#fff',
@@ -1907,20 +3574,28 @@ const styles = StyleSheet.create({
     alignItems: 'center' as ViewStyle['alignItems'],
   },
   flex1: { flex: 1 },
-  pickerWrapper: {
+  input: {
     borderWidth: 1,
     borderColor: '#e0e0e0',
     borderRadius: 8,
-    overflow: 'hidden',
+    padding: 12,
+    fontSize: 16,
+    color: '#222',
     backgroundColor: '#f9f9f9',
-    height: 52,
-    justifyContent: 'center',
   },
-  picker: {
-    height: 52,
+  inputLabel: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 8,
+  },
+  errorTextField: {
+    color: 'red',
+    fontSize: 12,
+    marginTop: 4,
+  },
+  fieldWrapper: {
+    marginBottom: 16,
     width: '100%',
-    marginTop: -4,
-    marginBottom: -4,
   },
   itemCard: {
     backgroundColor: '#f9f9f9',
@@ -1934,12 +3609,31 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     color: '#222',
   },
+  addItemButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#222',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
+  },
+  addItemText: {
+    color: '#fff',
+    marginLeft: 4,
+    fontWeight: 'bold',
+    fontSize: 16,
+  },
   removeItemButton: {
     flexDirection: 'row',
     alignItems: 'center',
     marginTop: 8,
     alignSelf: 'flex-end',
-    backgroundColor: '#dc3545', // Bootstrap red
+    backgroundColor: '#dc3545',
     borderRadius: 8,
     paddingVertical: 6,
     paddingHorizontal: 14,
@@ -2015,87 +3709,31 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     fontSize: 16,
   },
-  iconButton: {
-    backgroundColor: '#fff',
-    padding: 8,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#e0e0e0',
+  listContainer: {
+    flex: 1,
+    padding: 16,
   },
-  input: {
-    borderWidth: 1,
-    borderColor: '#e0e0e0',
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 16,
-    color: '#222',
-    backgroundColor: '#f9f9f9',
-  },
-  inputLabel: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 8,
-  },
-  addItemButton: {
+  addInvoiceButton: {
+    position: 'absolute',
+    bottom: 20,
+    right: 20,
+    backgroundColor: '#4f8cff',
+    borderRadius: 28,
+    paddingVertical: 16,
+    paddingHorizontal: 20,
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#222', // Match InvoiceScreen primary button
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 8,
     shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 8,
   },
-  addItemText: {
-    color: '#fff',
-    marginLeft: 4,
-    fontWeight: 'bold',
-    fontSize: 16,
-  },
-  placeholderStyle: {
-    fontSize: 16,
-  },
-  selectedTextStyle: {
-    fontSize: 16,
-  },
-  inputSearchStyle: {
-    height: 40,
-    fontSize: 16,
-  },
-  iconStyle: {
-    width: 20,
-    height: 20,
-  },
-  // Add a fieldWrapper style
-  fieldWrapper: {
-    marginBottom: 16,
-    width: '100%',
-  },
-  errorTextField: {
-    color: 'red',
-    fontSize: 12,
-    marginTop: 4,
-  },
-  syncButton: {
-    backgroundColor: '#4f8cff',
-    paddingVertical: 30, // further increased height
-    paddingHorizontal: 32,
-    marginLeft: 10,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#4f8cff',
-  },
-  syncButtonText: {
+  addInvoiceText: {
     color: '#fff',
     fontWeight: 'bold',
-    fontSize: 14,
+    fontSize: 16,
+    marginLeft: 8,
   },
 });
 

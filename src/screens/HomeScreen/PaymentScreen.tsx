@@ -3,7 +3,9 @@ import {
   View,
   Text,
   StyleSheet,
+  StatusBar,
   TouchableOpacity,
+  TouchableWithoutFeedback,
   ScrollView,
   TextInput,
   ViewStyle,
@@ -20,21 +22,32 @@ import { Picker } from '@react-native-picker/picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import Modal from 'react-native-modal'; // Add this import for bottom sheet modal
 import axios from 'axios';
-import { BASE_URL } from '../../api/index';
+import { BASE_URL } from '../../api';
 import { getToken, getUserIdFromToken } from '../../utils/storage';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { launchImageLibrary } from 'react-native-image-picker';
+import {
+  pick,
+  types as DocumentPickerTypes,
+} from '@react-native-documents/picker';
+import RNFS from 'react-native-fs';
+import XLSX from 'xlsx';
+import { OCRService } from '../../services/ocrService';
 
 import { RootStackParamList } from '../../types/navigation';
 import UploadDocument from '../../components/UploadDocument';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import SupplierSelector from '../../components/SupplierSelector';
-import { useSupplierContext } from '../../context/SupplierContext';
+import CustomerSelector from '../../components/CustomerSelector';
+import { useCustomerContext } from '../../context/CustomerContext';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import SearchAndFilter, {
   PaymentSearchFilterState,
   RecentSearch,
 } from '../../components/SearchAndFilter';
 import StatusBadge from '../../components/StatusBadge';
+import { useVouchers } from '../../context/VoucherContext';
+import { useTransactionLimit } from '../../context/TransactionLimitContext';
+import { generateNextDocumentNumber } from '../../utils/autoNumberGenerator';
 
 interface FolderProp {
   folder?: { id?: number; title?: string; icon?: string };
@@ -43,6 +56,14 @@ interface FolderProp {
 const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
   const folderName = folder?.title || 'Payment';
+
+  // Add safety check and logging
+  console.log(
+    'PaymentScreen render - folder:',
+    folder,
+    'folderName:',
+    folderName,
+  );
   // Helper for pluralizing folder name
   const pluralize = (name: string) => {
     if (!name) return '';
@@ -58,10 +79,12 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   const [paymentMethod, setPaymentMethod] = useState('');
   const [description, setDescription] = useState('');
   const [reference, setReference] = useState('');
-  const [category, setCategory] = useState('Supplier');
-  const [paymentNumber, setPaymentNumber] = useState('');
+  const [category, setCategory] = useState('');
+
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [supplierInput, setSupplierInput] = useState('');
+  const [supplierPhone, setSupplierPhone] = useState('');
+  const [supplierAddress, setSupplierAddress] = useState('');
   const [notes, setNotes] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -72,6 +95,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   const [searchText, setSearchText] = useState('');
   const [showPaymentMethodDropdown, setShowPaymentMethodDropdown] =
     useState(false);
+  const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
   const paymentMethodInputRef = useRef<TextInput>(null);
   // Add two loading states
   const [loadingSave, setLoadingSave] = useState(false);
@@ -81,10 +105,23 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   const [apiError, setApiError] = useState<string | null>(null);
   // 1. Add editingItem state
   const [editingItem, setEditingItem] = useState<any>(null);
+  // FIX: Add the missing state variable and its setter function
+  const [paymentNumber, setPaymentNumber] = useState('');
+
+  // OCR and file upload state variables
+  const [selectedFile, setSelectedFile] = useState<any>(null);
+  const [documentName, setDocumentName] = useState('');
+  const [fileType, setFileType] = useState('');
+  const [ocrLoading, setOcrLoading] = useState(false);
+  const [ocrError, setOcrError] = useState<string | null>(null);
+  const [showFileTypeModal, setShowFileTypeModal] = useState(false);
+
   const scrollRef = useRef<KeyboardAwareScrollView>(null);
-  const paymentNumberRef = useRef<TextInput>(null);
+
   const paymentDateRef = useRef<TextInput>(null);
   const amountRef = useRef<TextInput>(null);
+  const supplierPhoneRef = useRef<TextInput>(null);
+  const supplierAddressRef = useRef<TextInput>(null);
   const notesRef = useRef<TextInput>(null);
   const [syncYN, setSyncYN] = useState('N');
 
@@ -125,7 +162,303 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     setSearchFilter({ ...searchFilter, searchText: search.text });
   };
 
-  const { suppliers, add, fetchAll } = useSupplierContext();
+  // File upload and OCR processing functions
+  const handleUploadDocument = () => {
+    console.log('🔍 Upload Document button pressed');
+    setShowFileTypeModal(true);
+  };
+
+  const handleFileTypeSelection = async (type: string) => {
+    console.log('🔍 File type selection started:', type);
+    console.log('🔍 DocumentPickerTypes available:', DocumentPickerTypes);
+    setShowFileTypeModal(false);
+    if (!type) return;
+    try {
+      let file: any = null;
+      if (type === 'image') {
+        const result = await launchImageLibrary({ mediaType: 'photo' });
+        if (result.assets && result.assets.length > 0) {
+          file = result.assets[0];
+        }
+      } else if (type === 'pdf' || type === 'excel') {
+        try {
+          const result = await pick({
+            type:
+              type === 'pdf'
+                ? [DocumentPickerTypes.pdf]
+                : [DocumentPickerTypes.xlsx, DocumentPickerTypes.xls],
+          });
+
+          // DocumentPicker.pick returns an array, so we need to handle it properly
+          if (result && result.length > 0) {
+            file = result[0];
+          }
+        } catch (pickerError: any) {
+          if (pickerError?.code === 'DOCUMENT_PICKER_CANCELED') {
+            console.log('👤 User cancelled document picker');
+            return;
+          }
+          throw pickerError;
+        }
+      }
+      if (!file) {
+        console.log('👤 No file selected - user likely cancelled');
+        return; // Don't show error modal when no file is selected
+      }
+
+      console.log('📄 File selected:', {
+        fileName: file.fileName || file.name,
+        uri: file.uri,
+        type: file.type,
+        size: file.size,
+      });
+
+      setSelectedFile(file);
+      setDocumentName(file.fileName || file.name || '');
+      setFileType(type.toUpperCase());
+      if (type === 'image') {
+        setOcrLoading(true);
+        setOcrError(null);
+
+        try {
+          // Use backend OCR API instead of MLKit
+          const text = await OCRService.extractTextFromImage(
+            file.uri,
+            file.fileName || file.name || 'image.jpg',
+          );
+
+          // Robust parsing for payment fields
+          const parsed = parsePaymentOcrText(text);
+
+          console.log('🔍 OCR Parsing Results:', {
+            paymentNumber: parsed.paymentNumber,
+            supplierName: parsed.supplierName,
+            supplierPhone: parsed.supplierPhone,
+            supplierAddress: parsed.supplierAddress,
+            paymentDate: parsed.paymentDate,
+            amount: parsed.amount,
+            paymentMethod: parsed.paymentMethod,
+            category: parsed.category,
+            description: parsed.description,
+            notes: parsed.notes,
+          });
+
+          if (parsed.paymentNumber) setPaymentNumber(parsed.paymentNumber);
+          if (parsed.supplierName) setSupplierInput(parsed.supplierName);
+          if (parsed.supplierPhone) setSupplierPhone(parsed.supplierPhone);
+          if (parsed.supplierAddress) {
+            console.log('📍 Setting supplier address:', parsed.supplierAddress);
+            setSupplierAddress(parsed.supplierAddress);
+          }
+          if (parsed.paymentDate) setPaymentDate(parsed.paymentDate);
+          if (parsed.amount) setAmount(parsed.amount);
+          if (parsed.paymentMethod) setPaymentMethod(parsed.paymentMethod);
+          if (parsed.category) setCategory(parsed.category);
+          if (parsed.description) setDescription(parsed.description);
+          if (parsed.notes) setNotes(parsed.notes);
+
+          // Success - no need to show popup since we have the processing banner
+          console.log('✅ OCR processing completed successfully');
+        } catch (ocrErr) {
+          console.error('❌ OCR processing failed:', ocrErr);
+          setOcrError(
+            ocrErr instanceof Error ? ocrErr.message : 'OCR processing failed',
+          );
+        } finally {
+          setOcrLoading(false);
+        }
+      } else if (type === 'pdf') {
+        setOcrLoading(true);
+        setOcrError(null);
+
+        try {
+          console.log(
+            '📄 Starting PDF processing for file:',
+            file.fileName || file.name,
+          );
+          console.log('📄 File URI:', file.uri);
+
+          // Use backend OCR API for PDF
+          const text = await OCRService.extractTextFromPDF(
+            file.uri,
+            file.fileName || file.name || 'document.pdf',
+          );
+
+          console.log(
+            '📄 PDF OCR Text extracted:',
+            text ? text.substring(0, 200) + '...' : 'No text',
+          );
+
+          // Use the same robust parsing logic as images
+          const parsed = parsePaymentOcrText(text);
+
+          console.log('🔍 PDF OCR Parsing Results:', {
+            paymentNumber: parsed.paymentNumber,
+            supplierName: parsed.supplierName,
+            supplierPhone: parsed.supplierPhone,
+            supplierAddress: parsed.supplierAddress,
+            paymentDate: parsed.paymentDate,
+            amount: parsed.amount,
+            paymentMethod: parsed.paymentMethod,
+            category: parsed.category,
+            description: parsed.description,
+            notes: parsed.notes,
+          });
+
+          if (parsed.paymentNumber) setPaymentNumber(parsed.paymentNumber);
+          if (parsed.supplierName) setSupplierInput(parsed.supplierName);
+          if (parsed.supplierPhone) setSupplierPhone(parsed.supplierPhone);
+          if (parsed.supplierAddress) {
+            console.log(
+              '📍 Setting supplier address from PDF:',
+              parsed.supplierAddress,
+            );
+            setSupplierAddress(parsed.supplierAddress);
+          }
+          if (parsed.paymentDate) setPaymentDate(parsed.paymentDate);
+          if (parsed.amount) setAmount(parsed.amount);
+          if (parsed.paymentMethod) setPaymentMethod(parsed.paymentMethod);
+          if (parsed.category) setCategory(parsed.category);
+          if (parsed.description) setDescription(parsed.description);
+          if (parsed.notes) setNotes(parsed.notes);
+
+          // Success - no need to show popup since we have the processing banner
+          console.log('✅ PDF OCR processing completed successfully');
+        } catch (ocrErr: any) {
+          console.error('❌ PDF OCR processing failed:', ocrErr);
+          console.error('❌ Error details:', {
+            message: ocrErr?.message || 'Unknown error',
+            stack: ocrErr?.stack || 'No stack trace',
+            file: file.fileName || file.name,
+          });
+
+          // More specific error message based on the error type
+          let errorMessage = 'Failed to process the PDF. Please try again.';
+          const errorMsg = ocrErr?.message || '';
+
+          if (errorMsg.includes('network') || errorMsg.includes('fetch')) {
+            errorMessage =
+              'Network error. Please check your connection and try again.';
+          } else if (
+            errorMsg.includes('permission') ||
+            errorMsg.includes('access')
+          ) {
+            errorMessage =
+              'Permission denied. Please check file access permissions.';
+          } else if (
+            errorMsg.includes('format') ||
+            errorMsg.includes('invalid')
+          ) {
+            errorMessage =
+              'Invalid PDF format. Please try a different PDF file.';
+          }
+
+          setOcrError(errorMessage);
+        } finally {
+          setOcrLoading(false);
+        }
+      } else if (type === 'excel') {
+        const b64 = await RNFS.readFile(file.uri, 'base64');
+        const wb = XLSX.read(b64, { type: 'base64' });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const data = XLSX.utils.sheet_to_json(sheet);
+        if (data.length > 0) {
+          // TODO: Implement Excel data mapping for payments
+          console.log('📊 Excel data:', data[0]);
+        }
+      }
+    } catch (err: any) {
+      console.error('❌ File processing error:', err);
+
+      // Check for user cancellation scenarios
+      if (
+        err?.code === 'DOCUMENT_PICKER_CANCELED' ||
+        err?.message?.includes('cancelled') ||
+        err?.message?.includes('canceled') ||
+        err?.message?.includes('user cancelled') ||
+        err?.message?.includes('user canceled')
+      ) {
+        console.log('👤 User cancelled file selection');
+        return; // Don't show error modal for user cancellation
+      }
+
+      // Check for permission denied scenarios
+      if (
+        err?.message?.includes('permission') ||
+        err?.message?.includes('access') ||
+        err?.code === 'PERMISSION_DENIED'
+      ) {
+        console.log('🔒 Permission denied');
+        setError('Permission denied. Please check file access permissions.');
+        return;
+      }
+
+      // Check for network errors
+      if (
+        err?.message?.includes('network') ||
+        err?.message?.includes('fetch') ||
+        err?.message?.includes('connection')
+      ) {
+        console.log('🌐 Network error');
+        setError('Network error. Please check your connection and try again.');
+        return;
+      }
+
+      // Check for file format errors
+      if (
+        err?.message?.includes('format') ||
+        err?.message?.includes('invalid') ||
+        err?.message?.includes('unsupported')
+      ) {
+        console.log('📄 File format error');
+        setError('Invalid file format. Please try a different file.');
+        return;
+      }
+
+      // Check for file size errors
+      if (
+        err?.message?.includes('size') ||
+        err?.message?.includes('large') ||
+        err?.message?.includes('too big')
+      ) {
+        console.log('📏 File size error');
+        setError('File too large. Please try a smaller file.');
+        return;
+      }
+
+      // Only show generic error for unexpected errors
+      console.error('❌ Unexpected error details:', {
+        message: err?.message || 'Unknown error',
+        code: err?.code || 'No code',
+        stack: err?.stack || 'No stack trace',
+      });
+      setError('Failed to process the file. Please try again.');
+    }
+  };
+
+  const { customers, add, fetchAll } = useCustomerContext();
+  const { appendVoucher } = useVouchers();
+  const { forceCheckTransactionLimit, forceShowPopup, getServiceStatus } =
+    useTransactionLimit();
+
+  // Function to close dropdowns when clicking outside
+  const handleOutsideClick = () => {
+    setShowPaymentMethodDropdown(false);
+    setShowCategoryDropdown(false);
+  };
+
+  // Test function to debug transaction limit popup
+  const testTransactionLimitPopup = async () => {
+    try {
+      console.log('🧪 Testing transaction limit popup...');
+      const status = await getServiceStatus();
+      console.log('📊 Service status:', status);
+      await forceShowPopup();
+      console.log('✅ Force popup called');
+    } catch (error) {
+      console.error('❌ Test error:', error);
+    }
+  };
 
   // Move fetchPayments to top-level so it can be called from handleSubmit
   const fetchPayments = async () => {
@@ -133,12 +466,35 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     setApiError(null);
     try {
       const token = await AsyncStorage.getItem('accessToken');
+
+      // First, fetch customers/suppliers to get party information
+      const customersRes = await fetch(`${BASE_URL}/customers`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!customersRes.ok) {
+        throw new Error(`Failed to fetch customers: ${customersRes.status}`);
+      }
+
+      const customersData = await customersRes.json();
+      const customers = customersData.data || [];
+
+      console.log('📊 Raw customers/suppliers data:', {
+        totalCustomers: customers.length,
+        sampleCustomer: customers[0] || 'No customers',
+        customerFields: customers[0] ? Object.keys(customers[0]) : [],
+      });
+
+      // Then fetch vouchers for payments
       let query = `?type=${encodeURIComponent(folderName.toLowerCase())}`;
       const res = await fetch(`${BASE_URL}/vouchers${query}`, {
         headers: {
           Authorization: `Bearer ${token}`,
         },
       });
+
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(
@@ -146,13 +502,139 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
             `Failed to fetch ${folderName.toLowerCase()}s: ${res.status}`,
         );
       }
+
       const data = await res.json();
-      // Only filter by type
-      const filtered = (data.data || []).filter(
-        (v: any) => v.type === folderName.toLowerCase(),
+      const vouchers = data.data || [];
+
+      console.log('📊 Raw vouchers data:', {
+        totalVouchers: vouchers.length,
+        sampleVoucher: vouchers[0] || 'No vouchers',
+        voucherFields: vouchers[0] ? Object.keys(vouchers[0]) : [],
+        firstVoucher: vouchers[0]
+          ? {
+              id: vouchers[0].id,
+              partyName: vouchers[0].partyName,
+              partyId: vouchers[0].partyId,
+              type: vouchers[0].type,
+              amount: vouchers[0].amount,
+              date: vouchers[0].date,
+            }
+          : null,
+      });
+
+      // Debug: Check voucher types before filtering
+      console.log('🔍 Voucher types found:', {
+        folderName: folderName.toLowerCase(),
+        allVoucherTypes: [...new Set(vouchers.map((v: any) => v.type))],
+        vouchersBeforeFilter: vouchers.length,
+      });
+
+      // Filter customers to get suppliers for payments
+      const suppliers = customers.filter(
+        (c: any) => c.partyType === 'supplier' || c.voucherType === 'payment',
       );
-      setApiPayments(filtered);
+      console.log('🔍 Suppliers found:', {
+        totalCustomers: customers.length,
+        totalSuppliers: suppliers.length,
+        supplierTypes: [...new Set(suppliers.map((s: any) => s.partyType))],
+      });
+
+      // Merge customer/supplier data with vouchers
+      const enrichedPayments = vouchers
+        .filter((v: any) => {
+          const matches = v.type === folderName.toLowerCase();
+          if (!matches) {
+            console.log('❌ Voucher filtered out:', {
+              id: v.id,
+              type: v.type,
+              expectedType: folderName.toLowerCase(),
+              partyName: v.partyName,
+            });
+          }
+          return matches;
+        })
+        .map((voucher: any) => {
+          console.log('🔍 Processing voucher:', {
+            id: voucher.id,
+            partyName: voucher.partyName,
+            partyId: voucher.partyId,
+            type: voucher.type,
+          });
+
+          // Find matching customer/supplier using multiple strategies
+          let party = null;
+
+          // Strategy 1: Try to match by partyName first (most reliable for vouchers)
+          if (voucher.partyName) {
+            party = suppliers.find(
+              (c: any) =>
+                c.partyName?.toLowerCase() === voucher.partyName?.toLowerCase(),
+            );
+            if (party) {
+              console.log('✅ Matched by exact partyName:', party.partyName);
+            }
+          }
+
+          // Strategy 2: Try partial name matching if exact match didn't work
+          if (!party && voucher.partyName) {
+            party = suppliers.find(
+              (c: any) =>
+                c.partyName
+                  ?.toLowerCase()
+                  .includes(voucher.partyName?.toLowerCase()) ||
+                voucher.partyName
+                  ?.toLowerCase()
+                  .includes(c.partyName?.toLowerCase()),
+            );
+            if (party) {
+              console.log('✅ Matched by partial partyName:', party.partyName);
+            }
+          }
+
+          // Strategy 3: Try to match by partyId as fallback (if it exists)
+          if (!party && voucher.partyId) {
+            party = suppliers.find((c: any) => c.id === voucher.partyId);
+            if (party) {
+              console.log('✅ Matched by partyId:', party.partyName);
+            }
+          }
+
+          // If no match found, log it for debugging
+          if (!party) {
+            console.log('❌ No supplier match found for voucher:', {
+              voucherId: voucher.id,
+              voucherPartyName: voucher.partyName,
+              availableSuppliers: suppliers.map((c: any) => ({
+                id: c.id,
+                name: c.partyName,
+                partyType: c.partyType,
+              })),
+            });
+          }
+
+          return {
+            ...voucher,
+            partyName: party?.partyName || voucher.partyName || 'Unknown Party',
+            partyPhone: party?.phoneNumber || voucher.partyPhone || '',
+            partyAddress: party?.address || voucher.partyAddress || '',
+            partyType: party?.partyType || 'customer',
+            // Add debug info
+            _debug: {
+              matched: !!party,
+              matchedPartyId: party?.id,
+              matchedPartyName: party?.partyName,
+              originalPartyName: voucher.partyName,
+            },
+          };
+        });
+
+      setApiPayments(enrichedPayments);
+      console.log(
+        '✅ Fetched payments with supplier data:',
+        enrichedPayments.length,
+      );
     } catch (e: any) {
+      console.error('❌ Error fetching payments:', e);
       setApiError(e.message || `Error fetching ${folderName.toLowerCase()}s`);
     } finally {
       setLoadingApi(false);
@@ -161,29 +643,46 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
 
   useEffect(() => {
     fetchPayments();
+    // Initialize payment number with auto-generated value
+    const initializePaymentNumber = async () => {
+      try {
+        const nextNumber = await generateNextDocumentNumber(
+          folderName.toLowerCase(),
+        );
+        setPaymentNumber(nextNumber);
+      } catch (error) {
+        console.error('Error initializing payment number:', error);
+        // Fallback to default format
+        setPaymentNumber('PAY-001');
+      }
+    };
+    initializePaymentNumber();
   }, []);
 
   // 1. Add deletePayment function
   const deletePayment = async (id: string) => {
     try {
       const token = await AsyncStorage.getItem('accessToken');
-      let query = '';
-      if (folderName)
-        query += `?type=${encodeURIComponent(folderName.toLowerCase())}`;
-      const res = await fetch(`${BASE_URL}/vouchers/${id}${query}`, {
+      const res = await fetch(`${BASE_URL}/vouchers/${id}`, {
         method: 'DELETE',
         headers: {
           Authorization: `Bearer ${token}`,
         },
       });
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.message || 'Failed to delete payment.');
+        const err = await res
+          .json()
+          .catch(() => ({ message: 'Unknown error occurred' }));
+        throw new Error(
+          err.message || `Failed to delete payment. Status: ${res.status}`,
+        );
       }
       await fetchPayments();
       setShowCreateForm(false);
       setEditingItem(null);
+      console.log('✅ Payment deleted successfully');
     } catch (e: any) {
+      console.error('❌ Error deleting payment:', e);
       setError(e.message || 'Failed to delete payment.');
       setShowModal(true);
     }
@@ -211,9 +710,11 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       setPaymentMethod(editingItem.method || '');
       setDescription(editingItem.description || '');
       setReference(editingItem.reference || '');
-      setCategory(editingItem.category || 'Supplier');
+      setCategory(editingItem.category || '');
       setPaymentNumber(editingItem.billNumber || '');
       setSupplierInput(editingItem.partyName || '');
+      setSupplierPhone(editingItem.partyPhone || '');
+      setSupplierAddress(editingItem.partyAddress || '');
       setNotes(editingItem.notes || '');
     } else {
       setPartyName('');
@@ -222,9 +723,12 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       setPaymentMethod('');
       setDescription('');
       setReference('');
-      setCategory('Supplier');
-      setPaymentNumber(''); // <-- Ensure empty for new
+      setCategory('');
+      // FIX: Ensure setPaymentNumber is called for new payments
+      setPaymentNumber('');
       setSupplierInput('');
+      setSupplierPhone('');
+      setSupplierAddress('');
       setNotes('');
     }
   }, [editingItem, showCreateForm]);
@@ -275,20 +779,22 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   };
 
   // 4. When closing the form, reset editingItem
-  const handleBackToList = () => {
+  const handleBackToList = async () => {
     setShowCreateForm(false);
     setEditingItem(null);
     // Reset form data
     setPartyName('');
     setPaymentDate(new Date().toISOString().split('T')[0]);
     setAmount('');
-    setPaymentMethod('Cash');
+    setPaymentMethod('');
     setDescription('');
     setNotes('');
     setReference('');
     setCategory('Supplier');
-    setPaymentNumber(`PAY-${Date.now()}`);
+
     setSupplierInput('');
+    setSupplierPhone('');
+    setSupplierAddress('');
     setTriedSubmit(false);
     setError(null);
     setSuccess(null);
@@ -340,11 +846,11 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   // Add validation function before handleSavePayment
   const validatePayment = () => {
     if (
-      !paymentNumber ||
       !paymentDate ||
       !supplierInput ||
       !amount ||
-      !paymentMethod
+      !paymentMethod ||
+      !category
     ) {
       return 'Please fill in all required fields.';
     }
@@ -354,15 +860,29 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     return null;
   };
 
-  // Validation helpers
-  const isFieldInvalid = (field: string) => triedSubmit && !field;
+  // Enhanced validation helpers
+  const isFieldInvalid = (field: string, fieldType?: string) => {
+    if (!triedSubmit) return false;
+
+    if (fieldType === 'phone') {
+      // Phone validation: should be at least 10 digits and max 16 digits
+      const phoneDigits = field.replace(/\D/g, '');
+      return !field || phoneDigits.length < 10 || phoneDigits.length > 16;
+    }
+
+    if (fieldType === 'address') {
+      // Address validation: should be at least 10 characters
+      return !field || field.trim().length < 10;
+    }
+
+    // Default validation: field should not be empty
+    return !field;
+  };
 
   // Add a helper for field-specific error messages
   const getFieldError = (field: string) => {
     if (!triedSubmit) return '';
     switch (field) {
-      case 'paymentNumber':
-        return !paymentNumber ? `${folderName} Number is required.` : '';
       case 'paymentDate':
         return !paymentDate ? 'Date is required.' : '';
       case 'supplierInput':
@@ -371,6 +891,21 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         return !amount ? 'Amount is required.' : '';
       case 'paymentMethod':
         return !paymentMethod ? 'Payment method is required.' : '';
+      case 'category':
+        return !category ? 'Category is required.' : '';
+      case 'supplierPhone':
+        if (!supplierPhone) return 'Phone is required';
+        const phoneDigits = supplierPhone.replace(/\D/g, '');
+        if (phoneDigits.length < 10)
+          return 'Phone number must be at least 10 digits';
+        if (phoneDigits.length > 16)
+          return 'Phone number cannot exceed 16 digits';
+        return '';
+      case 'supplierAddress':
+        if (!supplierAddress) return 'Address is required';
+        if (supplierAddress.trim().length < 10)
+          return 'Address must be at least 10 characters';
+        return '';
       default:
         return '';
     }
@@ -381,19 +916,54 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     status: 'complete' | 'draft',
     syncYNOverride?: 'Y' | 'N',
   ) => {
+    console.log('handleSubmit called with status:', status);
     setTriedSubmit(true);
     setError(null);
     setSuccess(null);
+
+    // Check transaction limits BEFORE making API call
+    try {
+      console.log('🔍 Checking transaction limits before payment creation...');
+      await forceCheckTransactionLimit();
+    } catch (limitError) {
+      console.error('❌ Error checking transaction limits:', limitError);
+      // Continue with API call if limit check fails
+    }
+
     // Validate required fields BEFORE showing loader or calling API
+    console.log('Validating fields:', {
+      paymentDate,
+      supplierInput,
+      amount,
+      paymentMethod,
+      category,
+      supplierPhone,
+      supplierAddress,
+    });
+
     if (
-      !paymentNumber ||
       !paymentDate ||
       !supplierInput ||
       !amount ||
-      !paymentMethod
+      !paymentMethod ||
+      !category
     ) {
-      setError('Please fill all required fields.');
+      console.log('Required fields validation failed');
+      setError('Please fill all required fields correctly.');
       // triedSubmit will trigger red borders and error messages below fields
+      return;
+    }
+
+    // Validate optional fields if they have values
+    if (supplierPhone && isFieldInvalid(supplierPhone, 'phone')) {
+      setError(
+        'Phone number must be at least 10 digits and cannot exceed 16 digits.',
+      );
+      return;
+    }
+
+    if (supplierAddress && isFieldInvalid(supplierAddress, 'address')) {
+      setError('Address must be at least 10 characters.');
       return;
     }
     if (status === 'complete') setLoadingSave(true);
@@ -401,18 +971,22 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     try {
       // Check if supplier exists, if not, create
       let supplierNameToUse = supplierInput.trim();
-      let existingSupplier = suppliers.find(
-        s => s.name.trim().toLowerCase() === supplierNameToUse.toLowerCase(),
+      let existingSupplier = customers.find(
+        c =>
+          c.partyName?.trim().toLowerCase() === supplierNameToUse.toLowerCase(),
       );
       if (!existingSupplier) {
-        const newSupplier = await add({ name: supplierNameToUse });
+        const newSupplier = await add({ partyName: supplierNameToUse });
         if (newSupplier) {
-          supplierNameToUse = newSupplier.name;
+          supplierNameToUse = newSupplier.partyName || '';
           await fetchAll('');
         }
       }
       const userId = await getUserIdFromToken();
-      if (!userId) throw new Error('User not authenticated.');
+      if (!userId) {
+        setError('User not authenticated. Please login again.');
+        return;
+      }
       // API body
       const body = {
         user_id: userId,
@@ -425,27 +999,36 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         description: description || '',
         notes: notes || '',
         partyName: supplierNameToUse,
-        partyPhone: '',
-        partyAddress: '',
-        billNumber: paymentNumber, // <-- use billNumber
-        invoiceNumber: '', // <-- clear invoiceNumber
-        receiptNumber: '',
+        partyPhone: supplierPhone || '',
+        partyAddress: supplierAddress || '',
         method: paymentMethod,
-        category: '',
-        gstNumber: '',
+        category: category || '',
         items: [],
-        cGST: '',
-        discount: '',
-        documentDate: new Date(paymentDate).toISOString(),
-        gstPct: '',
-        iGST: '',
-        sGST: '',
-        shippingAmount: '',
-        subTotal: '',
-        totalAmount: parseFloat(amount).toFixed(2),
-        syncYN: syncYNOverride || syncYN || 'N',
+      };
+
+      // Clean the body object to only include fields that exist in backend schema
+      const cleanBody = {
+        user_id: body.user_id,
+        type: body.type,
+        amount: body.amount,
+        date: body.date,
+        status: body.status,
+        description: body.description,
+        notes: body.notes,
+        partyName: body.partyName,
+        partyPhone: body.partyPhone,
+        partyAddress: body.partyAddress,
+        method: body.method,
+        category: body.category,
+        items: body.items,
+        createdBy: body.createdBy,
+        updatedBy: body.updatedBy,
       };
       const token = await AsyncStorage.getItem('accessToken');
+      if (!token) {
+        setError('Authentication token not found. Please login again.');
+        return;
+      }
       let res;
       if (editingItem) {
         // PATCH update: only send updatable, non-empty fields
@@ -456,12 +1039,13 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         if (body.amount) patchBody.amount = body.amount;
         if (body.status) patchBody.status = body.status;
         if (body.partyName) patchBody.partyName = body.partyName;
-        if (body.method) patchBody.method = body.method;
-        if (body.invoiceNumber) patchBody.invoiceNumber = body.invoiceNumber;
-        if (body.billNumber) patchBody.billNumber = body.billNumber;
-        if (body.receiptNumber) patchBody.receiptNumber = body.receiptNumber;
-        if (body.description) patchBody.description = body.description;
-        if (body.notes) patchBody.notes = body.notes;
+        if (body.partyPhone) patchBody.partyPhone = body.partyPhone;
+        if (body.partyAddress) patchBody.partyAddress = body.partyAddress;
+        if (cleanBody.method) patchBody.method = cleanBody.method;
+        if (cleanBody.category) patchBody.category = cleanBody.category;
+        if (cleanBody.description)
+          patchBody.description = cleanBody.description;
+        if (cleanBody.notes) patchBody.notes = cleanBody.notes;
         res = await fetch(`${BASE_URL}/vouchers/${editingItem.id}`, {
           method: 'PATCH',
           headers: {
@@ -478,12 +1062,35 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify(body),
+          body: JSON.stringify(cleanBody),
         });
+        if (res.ok) {
+          const newVoucher = await res.json();
+          appendVoucher(newVoucher.data || newVoucher);
+        }
       }
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.message || 'Failed to save payment.');
+        const err = await res
+          .json()
+          .catch(() => ({ message: 'Unknown error occurred' }));
+
+        // Check if it's a transaction limit error
+        if (
+          err.message?.includes('transaction limit') ||
+          err.message?.includes('limit exceeded') ||
+          err.message?.includes('Internal server error')
+        ) {
+          // Trigger transaction limit popup
+          await forceShowPopup();
+          setError(
+            'Transaction limit reached. Please upgrade your plan to continue.',
+          );
+          return;
+        }
+
+        throw new Error(
+          err.message || `Failed to save payment. Status: ${res.status}`,
+        );
       }
       setSuccess(
         editingItem
@@ -509,11 +1116,11 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     setSuccess(null);
     setTriedSubmit(true);
     if (
-      !paymentNumber ||
       !paymentDate ||
       !supplierInput ||
       !amount ||
-      !paymentMethod
+      !paymentMethod ||
+      !category
     ) {
       setError('Please fill all required fields before previewing.');
       return;
@@ -528,7 +1135,11 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   }
 
   // Utility: Numeric range match
-  function inRange(num: number, min?: number, max?: number) {
+  function inRange(
+    num: number | string,
+    min?: number | string,
+    max?: number | string,
+  ) {
     const n = Number(num);
     const minN =
       min !== undefined && min !== null && min !== '' ? Number(min) : undefined;
@@ -546,6 +1157,223 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     if (from && date < new Date(from)) return false;
     if (to && date > new Date(to)) return false;
     return true;
+  }
+
+  // Helper: Parse OCR text from payment image
+  interface ParsedPaymentData {
+    paymentNumber: string;
+    paymentDate: string;
+    supplierName: string;
+    supplierPhone: string;
+    supplierAddress: string;
+    amount: string;
+    paymentMethod: string;
+    category: string;
+    description: string;
+    notes: string;
+  }
+
+  function parsePaymentOcrText(text: string): ParsedPaymentData {
+    console.log('🔍 Starting payment OCR parsing...');
+    console.log('📄 Raw OCR text:', text);
+
+    // Clean the text
+    const cleaned = text
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .replace(/\n+/g, '\n')
+      .trim();
+
+    console.log('🧹 Cleaned text:', cleaned);
+
+    // Initialize variables
+    let paymentNumber = '';
+    let paymentDate = '';
+    let supplierName = '';
+    let supplierPhone = '';
+    let supplierAddress = '';
+    let amount = '';
+    let paymentMethod = '';
+    let category = '';
+    let description = '';
+    let notes = '';
+
+    // 1. Extract Payment Number
+    const paymentNumberPatterns = [
+      /Payment\s*Number\s*[:\-]?\s*([A-Z0-9\-]+)/i,
+      /Payment\s*[:\-]?\s*([A-Z0-9\-]+)/i,
+      /([A-Z]{2,4}-\d{5,})/i,
+    ];
+
+    for (const pattern of paymentNumberPatterns) {
+      const match = cleaned.match(pattern);
+      if (match) {
+        paymentNumber = match[1]?.trim() || '';
+        console.log('📋 Found Payment Number:', paymentNumber);
+        break;
+      }
+    }
+
+    // 2. Extract Payment Date
+    const datePatterns = [
+      /Payment\s*Date\s*[:\-]?\s*(\d{4}-\d{2}-\d{2})/i,
+      /Date\s*[:\-]?\s*(\d{4}-\d{2}-\d{2})/i,
+      /(\d{4}-\d{2}-\d{2})/,
+    ];
+
+    for (const pattern of datePatterns) {
+      const match = cleaned.match(pattern);
+      if (match) {
+        paymentDate = match[1]?.trim() || '';
+        console.log('📅 Found Payment Date:', paymentDate);
+        break;
+      }
+    }
+
+    // 3. Extract Supplier Name
+    const supplierNamePatterns = [
+      /Supplier\s*Name\s*[:\-]?\s*([A-Za-z\s]+?)(?=\n|Phone|Address|Amount|Payment|Category|$)/i,
+      /Supplier\s*[:\-]?\s*([A-Za-z\s]+?)(?=\n|Phone|Address|Amount|Payment|Category|$)/i,
+    ];
+
+    for (const pattern of supplierNamePatterns) {
+      const match = cleaned.match(pattern);
+      if (match) {
+        supplierName = match[1]?.trim() || '';
+        console.log('👤 Found Supplier Name:', supplierName);
+        break;
+      }
+    }
+
+    // 4. Extract Supplier Phone
+    const phonePatterns = [/Phone\s*[:\-]?\s*(\d{10,})/i, /(\d{10,})/];
+
+    for (const pattern of phonePatterns) {
+      const match = cleaned.match(pattern);
+      if (match) {
+        supplierPhone = match[1]?.trim() || '';
+        console.log('📞 Found Supplier Phone:', supplierPhone);
+        break;
+      }
+    }
+
+    // 5. Extract Supplier Address
+    const addressPatterns = [
+      /Address\s*[:\-]?\s*([A-Za-z0-9\s,.-]+?)(?=\n|Amount|Payment|Category|Description|Notes|$)/i,
+      /Location\s*[:\-]?\s*([A-Za-z0-9\s,.-]+?)(?=\n|Amount|Payment|Category|Description|Notes|$)/i,
+    ];
+
+    for (const pattern of addressPatterns) {
+      const match = cleaned.match(pattern);
+      if (match) {
+        supplierAddress = match[1]?.trim() || '';
+        // Clean up any remaining artifacts
+        supplierAddress = supplierAddress
+          .replace(/\s+/g, ' ') // Normalize spaces
+          .replace(/[^\w\s,.-]/g, '') // Remove special characters except common address chars
+          .trim();
+        console.log('📍 Found Supplier Address:', supplierAddress);
+        break;
+      }
+    }
+
+    // 6. Extract Amount
+    const amountPatterns = [
+      /Amount\s*[:\-]?\s*(\d+(?:\.\d{2})?)/i,
+      /(\d+(?:\.\d{2})?)/,
+    ];
+
+    for (const pattern of amountPatterns) {
+      const match = cleaned.match(pattern);
+      if (match) {
+        amount = match[1]?.trim() || '';
+        console.log('💰 Found Amount:', amount);
+        break;
+      }
+    }
+
+    // 7. Extract Payment Method
+    const paymentMethodPatterns = [
+      /Payment\s*Method\s*[:\-]?\s*([A-Za-z\s]+?)(?=\n|Category|Description|Notes|$)/i,
+      /Method\s*[:\-]?\s*([A-Za-z\s]+?)(?=\n|Category|Description|Notes|$)/i,
+    ];
+
+    for (const pattern of paymentMethodPatterns) {
+      const match = cleaned.match(pattern);
+      if (match) {
+        paymentMethod = match[1]?.trim() || '';
+        console.log('💳 Found Payment Method:', paymentMethod);
+        break;
+      }
+    }
+
+    // 8. Extract Category
+    const categoryPatterns = [
+      /Category\s*[:\-]?\s*([A-Za-z\s]+?)(?=\n|Description|Notes|$)/i,
+    ];
+
+    for (const pattern of categoryPatterns) {
+      const match = cleaned.match(pattern);
+      if (match) {
+        category = match[1]?.trim() || '';
+        console.log('📂 Found Category:', category);
+        break;
+      }
+    }
+
+    // 9. Extract Description
+    const descriptionPatterns = [
+      /Description\s*[:\-]?\s*([^]+?)(?=\n|Notes|$)/i,
+    ];
+
+    for (const pattern of descriptionPatterns) {
+      const match = cleaned.match(pattern);
+      if (match) {
+        description = match[1]?.trim() || '';
+        // Clean up OCR artifacts from description
+        description = description
+          .replace(/[^\w\s,.-]/g, '') // Remove special characters
+          .replace(/\s+/g, ' ') // Normalize spaces
+          .replace(/\s*,\s*/g, ', ') // Fix comma spacing
+          .trim();
+        console.log('📝 Found Description:', description);
+        break;
+      }
+    }
+
+    // 10. Extract Notes
+    const notesPatterns = [
+      /Notes\s*[:\-]?\s*([^]+?)(?=\n|$)/i,
+      /Remarks\s*[:\-]?\s*([^]+?)(?=\n|$)/i,
+    ];
+
+    for (const pattern of notesPatterns) {
+      const match = cleaned.match(pattern);
+      if (match) {
+        notes = match[1]?.trim() || '';
+        // Clean up OCR artifacts from notes
+        notes = notes
+          .replace(/[^\w\s,.-]/g, '') // Remove special characters
+          .replace(/\s+/g, ' ') // Normalize spaces
+          .replace(/\s*,\s*/g, ', ') // Fix comma spacing
+          .trim();
+        console.log('📝 Found Notes:', notes);
+        break;
+      }
+    }
+
+    return {
+      paymentNumber,
+      paymentDate,
+      supplierName,
+      supplierPhone,
+      supplierAddress,
+      amount,
+      paymentMethod,
+      category,
+      description,
+      notes,
+    };
   }
 
   // Advanced fuzzy search and filter logic
@@ -649,7 +1477,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   };
 
   // Add a helper to reset the form
-  const resetForm = () => {
+  const resetForm = async () => {
     setPartyName('');
     setPaymentDate(new Date().toISOString().split('T')[0]);
     setAmount('');
@@ -657,9 +1485,11 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     setDescription('');
     setNotes('');
     setReference('');
-    setCategory('Supplier');
-    setPaymentNumber(`PAY-${Date.now()}`);
+    setCategory('');
+
     setSupplierInput('');
+    setSupplierPhone('');
+    setSupplierAddress('');
     setTriedSubmit(false);
     setError(null);
     setSuccess(null);
@@ -678,10 +1508,18 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         },
         body: JSON.stringify(patchBody),
       });
-      if (!res.ok) throw new Error('Failed to sync');
+      if (!res.ok) {
+        const err = await res
+          .json()
+          .catch(() => ({ message: 'Unknown error occurred' }));
+        throw new Error(err.message || `Failed to sync. Status: ${res.status}`);
+      }
       await fetchPayments();
-    } catch (e) {
-      // Optionally show error
+      console.log('✅ Payment synced successfully');
+    } catch (e: any) {
+      console.error('❌ Sync error:', e.message);
+      // Optionally show error to user
+      setError(e.message || 'Failed to sync payment.');
     }
   };
 
@@ -712,7 +1550,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         <View style={styles.invoiceDetails}>
           <Text style={styles.invoiceDate}>{item.date?.slice(0, 10)}</Text>
           <Text style={styles.invoiceAmount}>
-            {formatCurrency(Number(item.amount))}
+            {`₹${Number(item.amount).toLocaleString('en-IN')}`}
           </Text>
         </View>
       </TouchableOpacity>
@@ -736,6 +1574,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   if (showCreateForm) {
     return (
       <SafeAreaView style={styles.safeArea}>
+        <StatusBar barStyle="dark-content" backgroundColor="#f6fafc" />
         {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
@@ -767,247 +1606,496 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         >
           {/* Upload Document Component */}
           <UploadDocument
-            onUploadDocument={() => {
-              console.log('Upload document pressed');
-            }}
+            onUploadDocument={handleUploadDocument}
             onVoiceHelper={() => {
               console.log('Voice helper pressed');
             }}
             folderName={folderName}
           />
+
+          {/* OCR Loading and Error States */}
+          {ocrLoading && (
+            <View
+              style={{
+                backgroundColor: '#fff3cd',
+                borderRadius: 8,
+                padding: 12,
+                marginTop: 16,
+                marginBottom: 8,
+                borderWidth: 1,
+                borderColor: '#ffeaa7',
+                flexDirection: 'row',
+                alignItems: 'center',
+              }}
+            >
+              <ActivityIndicator
+                size="small"
+                color="#856404"
+                style={{ marginRight: 8 }}
+              />
+              <Text
+                style={{ color: '#856404', fontSize: 14, fontWeight: '500' }}
+              >
+                Processing document with OCR...
+              </Text>
+            </View>
+          )}
+          {ocrError && (
+            <View
+              style={{
+                backgroundColor: '#f8d7da',
+                borderRadius: 8,
+                padding: 12,
+                marginTop: 16,
+                marginBottom: 8,
+                borderWidth: 1,
+                borderColor: '#f5c6cb',
+              }}
+            >
+              <Text style={{ color: '#721c24', fontSize: 14 }}>
+                <Text style={{ fontWeight: 'bold' }}>OCR Error: </Text>
+                {ocrError}
+              </Text>
+            </View>
+          )}
           {/* Payment Details Card */}
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>{folderName} Details</Text>
-            <View style={{ flexDirection: 'row', marginBottom: 16 }}>
-              <View style={{ flex: 1, marginRight: 8 }}>
-                <Text style={styles.inputLabel}>{folderName} Number</Text>
+          <TouchableWithoutFeedback onPress={handleOutsideClick}>
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>{folderName} Details</Text>
+              <View style={{ flexDirection: 'row', marginBottom: 16 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.inputLabel}>{folderName} Date</Text>
+                  <TouchableOpacity onPress={() => setShowDatePicker(true)}>
+                    <TextInput
+                      ref={paymentDateRef}
+                      style={[
+                        styles.input,
+                        isFieldInvalid(paymentDate) && { borderColor: 'red' },
+                      ]}
+                      value={paymentDate}
+                      editable={false}
+                      pointerEvents="none"
+                      onFocus={() => {
+                        if (scrollRef.current && paymentDateRef.current) {
+                          scrollRef.current.scrollToFocusedInput(
+                            paymentDateRef.current,
+                            120,
+                          );
+                        }
+                      }}
+                    />
+                  </TouchableOpacity>
+                  {triedSubmit && !paymentDate && (
+                    <Text style={styles.errorTextField}>Date is required.</Text>
+                  )}
+                  {showDatePicker && (
+                    <DateTimePicker
+                      value={new Date(paymentDate)}
+                      mode="date"
+                      display="default"
+                      onChange={(event: unknown, date?: Date | undefined) => {
+                        setShowDatePicker(false);
+                        if (date)
+                          setPaymentDate(date.toISOString().split('T')[0]);
+                      }}
+                    />
+                  )}
+                </View>
+              </View>
+              <View style={styles.fieldWrapper}>
+                <Text style={styles.inputLabel}>{folderName} Supplier</Text>
+                <View
+                  style={{
+                    borderWidth: 1,
+                    zIndex: 999999999,
+                    borderColor: isFieldInvalid(supplierInput)
+                      ? 'red'
+                      : '#e0e0e0',
+                    borderRadius: 8,
+                    // overflow: 'hidden',
+                  }}
+                >
+                  <CustomerSelector
+                    value={supplierInput}
+                    onChange={(name, obj) => setSupplierInput(name)}
+                    placeholder={`Type or search supplier`}
+                    scrollRef={scrollRef}
+                    onCustomerSelect={supplier => {
+                      console.log(
+                        '🔍 PaymentScreen: onCustomerSelect called with:',
+                        supplier,
+                      );
+                      console.log(
+                        '🔍 PaymentScreen: Setting supplierInput to:',
+                        supplier.partyName,
+                      );
+                      console.log(
+                        '🔍 PaymentScreen: Setting supplierPhone to:',
+                        supplier.phoneNumber,
+                      );
+                      console.log(
+                        '🔍 PaymentScreen: Setting supplierAddress to:',
+                        supplier.address,
+                      );
+
+                      setSupplierInput(supplier.partyName || '');
+                      setSupplierPhone(supplier.phoneNumber || '');
+                      setSupplierAddress(supplier.address || '');
+                    }}
+                  />
+                </View>
+                {isFieldInvalid(supplierInput) && (
+                  <Text style={styles.errorTextField}>
+                    Supplier is required.
+                  </Text>
+                )}
+              </View>
+              <View style={styles.fieldWrapper}>
+                <Text style={styles.inputLabel}>Phone</Text>
                 <TextInput
-                  ref={paymentNumberRef}
+                  ref={supplierPhoneRef}
                   style={[
                     styles.input,
-                    isFieldInvalid(paymentNumber) && { borderColor: 'red' },
+                    isFieldInvalid(supplierPhone, 'phone') && {
+                      borderColor: 'red',
+                    },
                   ]}
-                  value={paymentNumber}
-                  onChangeText={setPaymentNumber}
-                  editable
-                  placeholder={`Enter ${folderName.toLowerCase()} number`}
+                  value={supplierPhone}
+                  onChangeText={setSupplierPhone}
+                  placeholder="+91 98765 43210"
+                  keyboardType="phone-pad"
+                  maxLength={16}
                   onFocus={() => {
-                    if (scrollRef.current && paymentNumberRef.current) {
+                    if (scrollRef.current && supplierPhoneRef.current) {
                       scrollRef.current.scrollToFocusedInput(
-                        paymentNumberRef.current,
+                        supplierPhoneRef.current,
                         120,
                       );
                     }
                   }}
                 />
-                {triedSubmit && !paymentNumber ? (
-                  <Text
-                    style={styles.errorTextField}
-                  >{`${folderName} Number is required`}</Text>
+                {getFieldError('supplierPhone') ? (
+                  <Text style={styles.errorTextField}>
+                    {getFieldError('supplierPhone')}
+                  </Text>
                 ) : null}
               </View>
-              <View style={{ flex: 1, marginLeft: 8 }}>
-                <Text style={styles.inputLabel}>{folderName} Date</Text>
-                <TouchableOpacity onPress={() => setShowDatePicker(true)}>
-                  <TextInput
-                    ref={paymentDateRef}
-                    style={[
-                      styles.input,
-                      isFieldInvalid(paymentDate) && { borderColor: 'red' },
-                    ]}
-                    value={paymentDate}
-                    editable={false}
-                    pointerEvents="none"
-                    onFocus={() => {
-                      if (scrollRef.current && paymentDateRef.current) {
-                        scrollRef.current.scrollToFocusedInput(
-                          paymentDateRef.current,
-                          120,
-                        );
-                      }
-                    }}
-                  />
-                </TouchableOpacity>
-                {triedSubmit && !paymentDate && (
-                  <Text style={styles.errorTextField}>Date is required.</Text>
-                )}
-                {showDatePicker && (
-                  <DateTimePicker
-                    value={new Date(paymentDate)}
-                    mode="date"
-                    display="default"
-                    onChange={(event: unknown, date?: Date | undefined) => {
-                      setShowDatePicker(false);
-                      if (date)
-                        setPaymentDate(date.toISOString().split('T')[0]);
-                    }}
-                  />
+              <View style={styles.fieldWrapper}>
+                <Text style={styles.inputLabel}>Address</Text>
+                <TextInput
+                  ref={supplierAddressRef}
+                  style={[
+                    styles.input,
+                    { minHeight: 80, textAlignVertical: 'top' },
+                    isFieldInvalid(supplierAddress, 'address') && {
+                      borderColor: 'red',
+                    },
+                  ]}
+                  value={supplierAddress}
+                  onChangeText={setSupplierAddress}
+                  placeholder="Supplier address"
+                  multiline
+                  onFocus={() => {
+                    if (scrollRef.current && supplierAddressRef.current) {
+                      scrollRef.current.scrollToFocusedInput(
+                        supplierAddressRef.current,
+                        120,
+                      );
+                    }
+                  }}
+                />
+                {getFieldError('supplierAddress') ? (
+                  <Text style={styles.errorTextField}>
+                    {getFieldError('supplierAddress')}
+                  </Text>
+                ) : null}
+              </View>
+              <View style={styles.fieldWrapper}>
+                <Text style={styles.inputLabel}>Amount (₹)</Text>
+                <TextInput
+                  ref={amountRef}
+                  style={[
+                    styles.input,
+                    isFieldInvalid(amount) && { borderColor: 'red' },
+                  ]}
+                  value={amount}
+                  onChangeText={setAmount}
+                  placeholder="0"
+                  keyboardType="numeric"
+                  onFocus={() => {
+                    if (scrollRef.current && amountRef.current) {
+                      scrollRef.current.scrollToFocusedInput(
+                        amountRef.current,
+                        120,
+                      );
+                    }
+                  }}
+                />
+                {triedSubmit && !amount && (
+                  <Text style={styles.errorTextField}>Amount is required.</Text>
                 )}
               </View>
-            </View>
-            <View style={styles.fieldWrapper}>
-              <Text style={styles.inputLabel}>{folderName} Supplier</Text>
-              <SupplierSelector
-                value={supplierInput}
-                onChange={(name, obj) => setSupplierInput(name)}
-                placeholder={`Type or search supplier`}
-                scrollRef={scrollRef}
-              />
-              {triedSubmit && !supplierInput && (
-                <Text style={styles.errorTextField}>Supplier is required.</Text>
-              )}
-            </View>
-            <View style={styles.fieldWrapper}>
-              <Text style={styles.inputLabel}>Amount (₹)</Text>
-              <TextInput
-                ref={amountRef}
-                style={[
-                  styles.input,
-                  isFieldInvalid(amount) && { borderColor: 'red' },
-                ]}
-                value={amount}
-                onChangeText={setAmount}
-                placeholder="0"
-                keyboardType="numeric"
-                onFocus={() => {
-                  if (scrollRef.current && amountRef.current) {
-                    scrollRef.current.scrollToFocusedInput(
-                      amountRef.current,
-                      120,
-                    );
-                  }
-                }}
-              />
-              {triedSubmit && !amount && (
-                <Text style={styles.errorTextField}>Amount is required.</Text>
-              )}
-            </View>
-            <View style={styles.fieldWrapper}>
-              <Text style={styles.inputLabel}>Payment Method</Text>
-              <View style={{ position: 'relative' }}>
-                <TouchableOpacity
-                  style={{
-                    flexDirection: 'row',
-                    alignItems: 'center',
-                    backgroundColor: '#fff',
-                    borderRadius: 8,
-                    borderWidth: 1,
-                    borderColor: isFieldInvalid(paymentMethod)
-                      ? 'red'
-                      : '#e0e0e0',
-                    paddingHorizontal: 10,
-                    height: 48,
-                    marginTop: 4,
-                    justifyContent: 'space-between',
-                  }}
-                  onPress={() =>
-                    setShowPaymentMethodDropdown(!showPaymentMethodDropdown)
-                  }
-                  activeOpacity={0.8}
-                >
-                  <Text
+              <View style={styles.fieldWrapper}>
+                <Text style={styles.inputLabel}>Payment Method</Text>
+                <View style={{ position: 'relative' }}>
+                  <TouchableOpacity
                     style={{
-                      fontSize: 16,
-                      color: paymentMethod ? '#222' : '#8a94a6',
-                      flex: 1,
-                    }}
-                  >
-                    {paymentMethod ? paymentMethod : 'Select payment method'}
-                  </Text>
-                  <MaterialCommunityIcons
-                    name={
-                      showPaymentMethodDropdown ? 'chevron-up' : 'chevron-down'
-                    }
-                    size={24}
-                    color="#8a94a6"
-                  />
-                </TouchableOpacity>
-                {showPaymentMethodDropdown && (
-                  <View
-                    style={{
-                      position: 'absolute',
-                      top: 52,
-                      left: 0,
-                      right: 0,
+                      flexDirection: 'row',
+                      alignItems: 'center',
                       backgroundColor: '#fff',
                       borderRadius: 8,
                       borderWidth: 1,
-                      borderColor: '#e0e0e0',
-                      zIndex: 10,
-                      shadowColor: '#000',
-                      shadowOpacity: 0.08,
-                      shadowRadius: 8,
-                      shadowOffset: { width: 0, height: 2 },
-                      elevation: 4,
+                      borderColor: isFieldInvalid(paymentMethod)
+                        ? 'red'
+                        : '#e0e0e0',
+                      paddingHorizontal: 10,
+                      height: 48,
+                      marginTop: 4,
+                      justifyContent: 'space-between',
                     }}
+                    onPress={() => {
+                      setShowCategoryDropdown(false);
+                      setShowPaymentMethodDropdown(!showPaymentMethodDropdown);
+                    }}
+                    activeOpacity={0.8}
                   >
-                    {[
-                      'Cash',
-                      'Bank Transfer',
-                      'UPI',
-                      'Credit Card',
-                      'Debit Card',
-                      'Cheque',
-                    ].map(method => (
-                      <TouchableOpacity
-                        key={method}
-                        onPress={() => {
-                          setPaymentMethod(method);
-                          setShowPaymentMethodDropdown(false);
-                        }}
-                        style={{
-                          paddingVertical: 14,
-                          paddingHorizontal: 24,
-                          borderBottomWidth: method !== 'Cheque' ? 1 : 0,
-                          borderBottomColor: '#f0f0f0',
-                        }}
+                    <Text
+                      style={{
+                        fontSize: 16,
+                        color: paymentMethod ? '#222' : '#8a94a6',
+                        flex: 1,
+                      }}
+                    >
+                      {paymentMethod ? paymentMethod : 'Select payment method'}
+                    </Text>
+                    <MaterialCommunityIcons
+                      name={
+                        showPaymentMethodDropdown
+                          ? 'chevron-up'
+                          : 'chevron-down'
+                      }
+                      size={24}
+                      color="#8a94a6"
+                    />
+                  </TouchableOpacity>
+                  {showPaymentMethodDropdown && (
+                    <View
+                      style={{
+                        position: 'absolute',
+                        top: 52,
+                        left: 0,
+                        right: 0,
+                        backgroundColor: '#fff',
+                        borderRadius: 12,
+                        borderWidth: 1,
+                        borderColor: '#e0e0e0',
+                        zIndex: 10,
+                        shadowColor: '#000',
+                        shadowOpacity: 0.1,
+                        shadowRadius: 12,
+                        shadowOffset: { width: 0, height: 4 },
+                        elevation: 8,
+                        maxHeight: 250,
+                      }}
+                    >
+                      <ScrollView
+                        nestedScrollEnabled={true}
+                        showsVerticalScrollIndicator={false}
+                        contentContainerStyle={{ paddingBottom: 8 }}
                       >
-                        <Text style={{ fontSize: 16, color: '#222' }}>
-                          {method}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
+                        {[
+                          'Cash',
+                          'Bank Transfer',
+                          'UPI',
+                          'Credit Card',
+                          'Debit Card',
+                          'Cheque',
+                        ].map((method, index) => (
+                          <TouchableOpacity
+                            key={method}
+                            onPress={() => {
+                              setPaymentMethod(method);
+                              setShowPaymentMethodDropdown(false);
+                            }}
+                            style={{
+                              paddingVertical: 16,
+                              paddingHorizontal: 20,
+                              borderBottomWidth: index < 5 ? 1 : 0,
+                              borderBottomColor: '#f0f0f0',
+                              backgroundColor:
+                                paymentMethod === method
+                                  ? '#f0f6ff'
+                                  : 'transparent',
+                            }}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 16,
+                                color:
+                                  paymentMethod === method ? '#4f8cff' : '#222',
+                                fontWeight:
+                                  paymentMethod === method ? '600' : '400',
+                              }}
+                            >
+                              {method}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </ScrollView>
+                    </View>
+                  )}
+                </View>
+                {isFieldInvalid(paymentMethod) && (
+                  <Text style={styles.errorTextField}>
+                    Payment method is required.
+                  </Text>
                 )}
               </View>
-              {triedSubmit && !paymentMethod && (
-                <Text style={styles.errorTextField}>
-                  Payment method is required.
-                </Text>
-              )}
+              <View style={styles.fieldWrapper}>
+                <Text style={styles.inputLabel}>Category</Text>
+                <View style={{ position: 'relative' }}>
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      backgroundColor: '#fff',
+                      borderRadius: 8,
+                      borderWidth: 1,
+                      borderColor: isFieldInvalid(category) ? 'red' : '#e0e0e0',
+                      paddingHorizontal: 10,
+                      height: 48,
+                      marginTop: 4,
+                      justifyContent: 'space-between',
+                    }}
+                    onPress={() => {
+                      setShowPaymentMethodDropdown(false);
+                      setShowCategoryDropdown(!showCategoryDropdown);
+                    }}
+                    activeOpacity={0.8}
+                  >
+                    <Text
+                      style={{
+                        fontSize: 16,
+                        color: category ? '#222' : '#8a94a6',
+                        flex: 1,
+                      }}
+                    >
+                      {category ? category : 'Select category'}
+                    </Text>
+                    <MaterialCommunityIcons
+                      name={
+                        showCategoryDropdown ? 'chevron-up' : 'chevron-down'
+                      }
+                      size={24}
+                      color="#8a94a6"
+                    />
+                  </TouchableOpacity>
+                  {showCategoryDropdown && (
+                    <View
+                      style={{
+                        position: 'absolute',
+                        top: 52,
+                        left: 0,
+                        right: 0,
+                        backgroundColor: '#fff',
+                        borderRadius: 12,
+                        borderWidth: 1,
+                        borderColor: '#e0e0e0',
+                        zIndex: 10,
+                        shadowColor: '#000',
+                        shadowOpacity: 0.1,
+                        shadowRadius: 12,
+                        shadowOffset: { width: 0, height: 4 },
+                        elevation: 8,
+                        maxHeight: 250,
+                      }}
+                    >
+                      <ScrollView
+                        nestedScrollEnabled={true}
+                        showsVerticalScrollIndicator={false}
+                        contentContainerStyle={{ paddingBottom: 8 }}
+                      >
+                        {[
+                          'Supplier',
+                          'Expense',
+                          'Salary',
+                          'Rent',
+                          'Utilities',
+                          'Maintenance',
+                          'Marketing',
+                          'Travel',
+                          'Office Supplies',
+                          'Other',
+                        ].map((cat, index) => (
+                          <TouchableOpacity
+                            key={cat}
+                            onPress={() => {
+                              setCategory(cat);
+                              setShowCategoryDropdown(false);
+                            }}
+                            style={{
+                              paddingVertical: 16,
+                              paddingHorizontal: 20,
+                              borderBottomWidth: index < 9 ? 1 : 0,
+                              borderBottomColor: '#f0f0f0',
+                              backgroundColor:
+                                category === cat ? '#f0f6ff' : 'transparent',
+                            }}
+                          >
+                            <Text
+                              style={{
+                                fontSize: 16,
+                                color: category === cat ? '#4f8cff' : '#222',
+                                fontWeight: category === cat ? '600' : '400',
+                              }}
+                            >
+                              {cat}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </ScrollView>
+                    </View>
+                  )}
+                </View>
+                {isFieldInvalid(category) && (
+                  <Text style={styles.errorTextField}>
+                    Category is required.
+                  </Text>
+                )}
+              </View>
+              <View style={styles.fieldWrapper}>
+                <Text style={styles.inputLabel}>Description</Text>
+                <TextInput
+                  style={styles.input}
+                  value={description}
+                  onChangeText={setDescription}
+                  placeholder={`Payment description`}
+                />
+              </View>
+              <View style={styles.fieldWrapper}>
+                <Text style={styles.inputLabel}>Notes</Text>
+                <TextInput
+                  ref={notesRef}
+                  style={[
+                    styles.input,
+                    { minHeight: 60, textAlignVertical: 'top' },
+                  ]}
+                  value={notes}
+                  onChangeText={setNotes}
+                  placeholder={`Additional notes...`}
+                  multiline
+                  onFocus={() => {
+                    if (scrollRef.current && notesRef.current) {
+                      scrollRef.current.scrollToFocusedInput(
+                        notesRef.current,
+                        120,
+                      );
+                    }
+                  }}
+                />
+              </View>
             </View>
-            <View style={styles.fieldWrapper}>
-              <Text style={styles.inputLabel}>Description</Text>
-              <TextInput
-                style={styles.input}
-                value={description}
-                onChangeText={setDescription}
-                placeholder={`Payment description`}
-              />
-            </View>
-            <View style={styles.fieldWrapper}>
-              <Text style={styles.inputLabel}>Notes</Text>
-              <TextInput
-                ref={notesRef}
-                style={[
-                  styles.input,
-                  { minHeight: 60, textAlignVertical: 'top' },
-                ]}
-                value={notes}
-                onChangeText={setNotes}
-                placeholder={`Additional notes...`}
-                multiline
-                onFocus={() => {
-                  if (scrollRef.current && notesRef.current) {
-                    scrollRef.current.scrollToFocusedInput(
-                      notesRef.current,
-                      120,
-                    );
-                  }
-                }}
-              />
-            </View>
-          </View>
+          </TouchableWithoutFeedback>
 
           {/* Action Buttons */}
           <View style={styles.actionButtonsBottom}>
@@ -1030,6 +2118,19 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
               </Text>
             </TouchableOpacity>
           </View>
+
+          {/* Test Button for Transaction Limit Popup */}
+          <TouchableOpacity
+            style={[
+              styles.primaryButton,
+              { backgroundColor: '#ff6b6b', marginTop: 10 },
+            ]}
+            onPress={testTransactionLimitPopup}
+          >
+            <Text style={styles.primaryButtonText}>
+              🧪 Test Transaction Limit Popup
+            </Text>
+          </TouchableOpacity>
           {editingItem && (
             <TouchableOpacity
               style={{
@@ -1052,6 +2153,383 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
               {success}
             </Text>
           )}
+
+          {/* File Type Selection Modal */}
+          <Modal
+            isVisible={showFileTypeModal}
+            onBackdropPress={() => setShowFileTypeModal(false)}
+            animationIn="slideInUp"
+            animationOut="slideOutDown"
+            style={{ justifyContent: 'center', margin: 8 }}
+            backdropOpacity={0.6}
+            useNativeDriver={true}
+            propagateSwipe={true}
+          >
+            <View
+              style={{
+                backgroundColor: '#fff',
+                borderRadius: 20,
+                maxHeight: '95%',
+                minHeight: 600,
+                width: '95%',
+                shadowColor: '#000',
+                shadowOffset: {
+                  width: 0,
+                  height: 10,
+                },
+                shadowOpacity: 0.25,
+                shadowRadius: 20,
+                elevation: 10,
+              }}
+            >
+              {/* Header */}
+              <View
+                style={{
+                  paddingHorizontal: 24,
+                  paddingTop: 24,
+                  paddingBottom: 16,
+                  borderBottomWidth: 1,
+                  borderBottomColor: '#f0f0f0',
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 22,
+                    fontWeight: 'bold',
+                    color: '#222',
+                    textAlign: 'center',
+                  }}
+                >
+                  Choose File Type
+                </Text>
+                <Text
+                  style={{
+                    fontSize: 14,
+                    color: '#666',
+                    textAlign: 'center',
+                    lineHeight: 20,
+                    marginTop: 8,
+                  }}
+                >
+                  Select the type of file you want to upload for OCR processing
+                </Text>
+              </View>
+
+              {/* Scrollable Content */}
+              <ScrollView
+                style={{
+                  flex: 1,
+                  paddingHorizontal: 24,
+                }}
+                showsVerticalScrollIndicator={true}
+                contentContainerStyle={{
+                  paddingVertical: 20,
+                  paddingBottom: 40,
+                }}
+                nestedScrollEnabled={true}
+                bounces={true}
+                alwaysBounceVertical={false}
+              >
+                {/* File Type Options */}
+                <View style={{ marginBottom: 20 }}>
+                  {/* Image Option */}
+                  <TouchableOpacity
+                    style={{
+                      backgroundColor: '#fff',
+                      borderRadius: 12,
+                      padding: 20,
+                      marginBottom: 12,
+                      borderWidth: 1,
+                      borderColor: '#e0e0e0',
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      shadowColor: '#000',
+                      shadowOffset: { width: 0, height: 2 },
+                      shadowOpacity: 0.05,
+                      shadowRadius: 4,
+                      elevation: 2,
+                    }}
+                    onPress={() => handleFileTypeSelection('image')}
+                    activeOpacity={0.7}
+                  >
+                    <View
+                      style={{
+                        width: 48,
+                        height: 48,
+                        borderRadius: 12,
+                        backgroundColor: '#f0f6ff',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        marginRight: 16,
+                      }}
+                    >
+                      <MaterialCommunityIcons
+                        name="image"
+                        size={24}
+                        color="#4f8cff"
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={{
+                          fontSize: 16,
+                          fontWeight: '600',
+                          color: '#222',
+                          marginBottom: 4,
+                        }}
+                      >
+                        Image
+                      </Text>
+                      <Text
+                        style={{
+                          fontSize: 14,
+                          color: '#666',
+                          lineHeight: 20,
+                        }}
+                      >
+                        Upload payment images (JPG, PNG) for OCR processing
+                      </Text>
+                    </View>
+                    <MaterialCommunityIcons
+                      name="chevron-right"
+                      size={24}
+                      color="#ccc"
+                    />
+                  </TouchableOpacity>
+
+                  {/* PDF Option */}
+                  <TouchableOpacity
+                    style={{
+                      backgroundColor: '#fff',
+                      borderRadius: 12,
+                      padding: 20,
+                      marginBottom: 12,
+                      borderWidth: 1,
+                      borderColor: '#e0e0e0',
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      shadowColor: '#000',
+                      shadowOffset: { width: 0, height: 2 },
+                      shadowOpacity: 0.05,
+                      shadowRadius: 4,
+                      elevation: 2,
+                    }}
+                    onPress={() => handleFileTypeSelection('pdf')}
+                    activeOpacity={0.7}
+                  >
+                    <View
+                      style={{
+                        width: 48,
+                        height: 48,
+                        borderRadius: 12,
+                        backgroundColor: '#fff3cd',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        marginRight: 16,
+                      }}
+                    >
+                      <MaterialCommunityIcons
+                        name="file-pdf-box"
+                        size={24}
+                        color="#ffc107"
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={{
+                          fontSize: 16,
+                          fontWeight: '600',
+                          color: '#222',
+                          marginBottom: 4,
+                        }}
+                      >
+                        PDF Document
+                      </Text>
+                      <Text
+                        style={{
+                          fontSize: 14,
+                          color: '#666',
+                          lineHeight: 20,
+                        }}
+                      >
+                        Upload PDF payments for text extraction and processing
+                      </Text>
+                    </View>
+                    <MaterialCommunityIcons
+                      name="chevron-right"
+                      size={24}
+                      color="#ccc"
+                    />
+                  </TouchableOpacity>
+                </View>
+
+                {/* Payment Template Example */}
+                <View
+                  style={{
+                    backgroundColor: '#f8f9fa',
+                    borderRadius: 12,
+                    padding: 16,
+                    marginBottom: 24,
+                    borderWidth: 1,
+                    borderColor: '#e9ecef',
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 16,
+                      fontWeight: '600',
+                      color: '#222',
+                      marginBottom: 12,
+                    }}
+                  >
+                    Real Payment Example:
+                  </Text>
+                  <View
+                    style={{
+                      backgroundColor: '#fff',
+                      borderRadius: 8,
+                      padding: 16,
+                      borderWidth: 1,
+                      borderColor: '#dee2e6',
+                    }}
+                  >
+                    <Text
+                      style={{
+                        fontSize: 14,
+                        fontWeight: 'bold',
+                        color: '#222',
+                        marginBottom: 8,
+                        textAlign: 'center',
+                      }}
+                    >
+                      Payment
+                    </Text>
+                    <View style={{ marginBottom: 8 }}>
+                      <Text
+                        style={{ fontSize: 12, color: '#666', lineHeight: 18 }}
+                      >
+                        <Text style={{ fontWeight: '600' }}>
+                          Payment Number:
+                        </Text>
+                        <Text> PAY-76575{'\n'}</Text>
+                        <Text style={{ fontWeight: '600' }}>Payment Date:</Text>
+                        <Text> 2025-07-15{'\n'}</Text>
+                        <Text style={{ fontWeight: '600' }}>
+                          Supplier Name:
+                        </Text>
+                        <Text> Rajesh Singh{'\n'}</Text>
+                        <Text style={{ fontWeight: '600' }}>Phone:</Text>
+                        <Text> 917865434576{'\n'}</Text>
+                        <Text style={{ fontWeight: '600' }}>Address:</Text>
+                        <Text> 404 Jack Palace, Switzerland{'\n'}</Text>
+                        <Text style={{ fontWeight: '600' }}>Amount:</Text>
+                        <Text> 800{'\n'}</Text>
+                        <Text style={{ fontWeight: '600' }}>
+                          Payment Method:
+                        </Text>
+                        <Text> Cash{'\n'}</Text>
+                        <Text style={{ fontWeight: '600' }}>Category:</Text>
+                        <Text> Sales</Text>
+                      </Text>
+                    </View>
+                    {/* Description */}
+                    <View style={{ marginBottom: 8 }}>
+                      <Text
+                        style={{
+                          fontSize: 12,
+                          fontWeight: '600',
+                          color: '#222',
+                          marginBottom: 4,
+                        }}
+                      >
+                        Description
+                      </Text>
+                      <Text
+                        style={{ fontSize: 11, color: '#666', lineHeight: 16 }}
+                      >
+                        That invoice is for basic thing that i sold
+                      </Text>
+                    </View>
+                    {/* Notes */}
+                    <View>
+                      <Text
+                        style={{ fontSize: 11, color: '#666', lineHeight: 16 }}
+                      >
+                        <Text style={{ fontWeight: '600' }}>Notes:</Text>
+                        <Text> Weather is Clean, and air is fresh</Text>
+                      </Text>
+                    </View>
+                  </View>
+                  {/* Tip */}
+                  <View
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'flex-start',
+                      marginTop: 12,
+                      backgroundColor: '#fff3cd',
+                      borderRadius: 6,
+                      padding: 8,
+                      borderWidth: 1,
+                      borderColor: '#ffeaa7',
+                    }}
+                  >
+                    <MaterialCommunityIcons
+                      name="lightbulb-outline"
+                      size={16}
+                      color="#ffc107"
+                      style={{ marginTop: 1 }}
+                    />
+                    <Text
+                      style={{
+                        fontSize: 12,
+                        color: '#856404',
+                        marginLeft: 6,
+                        flex: 1,
+                        lineHeight: 16,
+                      }}
+                    >
+                      Tip: Clear, well-lit images or text-based PDFs work best
+                      for OCR
+                    </Text>
+                  </View>
+                </View>
+              </ScrollView>
+
+              {/* Footer */}
+              <View
+                style={{
+                  paddingHorizontal: 24,
+                  paddingVertical: 16,
+                  borderTopWidth: 1,
+                  borderTopColor: '#f0f0f0',
+                }}
+              >
+                <TouchableOpacity
+                  style={{
+                    backgroundColor: '#f8f9fa',
+                    borderRadius: 12,
+                    paddingVertical: 14,
+                    paddingHorizontal: 24,
+                    borderWidth: 1,
+                    borderColor: '#dee2e6',
+                    alignItems: 'center',
+                  }}
+                  onPress={() => setShowFileTypeModal(false)}
+                  activeOpacity={0.8}
+                >
+                  <Text
+                    style={{
+                      fontSize: 16,
+                      fontWeight: '600',
+                      color: '#666',
+                    }}
+                  >
+                    Cancel
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Modal>
         </KeyboardAwareScrollView>
         {/* Error/Success Modal */}
         <Modal isVisible={showModal}>
@@ -1168,13 +2646,14 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       <Modal
         isVisible={filterVisible}
         onBackdropPress={() => setFilterVisible(false)}
-        style={{ justifyContent: 'flex-end', margin: 0 }}
+        style={{ justifyContent: 'flex-end', margin: 0, marginBottom: 0 }}
       >
         <KeyboardAwareScrollView
           style={{
             backgroundColor: '#fff',
             borderTopLeftRadius: 18,
             borderTopRightRadius: 18,
+            maxHeight: '80%',
           }}
           contentContainerStyle={{ padding: 20 }}
           enableOnAndroid
@@ -1325,17 +2804,26 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
             />
           )}
           {/* Payment Method filter */}
-          <Text style={{ fontSize: 15, marginBottom: 6 }}>Payment Method</Text>
+          <Text
+            style={{
+              fontSize: 16,
+              fontWeight: '600',
+              color: '#1f2937',
+              marginBottom: 12,
+              marginTop: 8,
+            }}
+          >
+            Payment Method
+          </Text>
           <View
             style={{
               flexDirection: 'row',
               flexWrap: 'wrap',
-              marginBottom: 16,
-              justifyContent: 'space-between',
+              marginBottom: 20,
+              gap: 10,
             }}
           >
             {[
-              '',
               'Cash',
               'Bank Transfer',
               'UPI',
@@ -1346,58 +2834,83 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
               <TouchableOpacity
                 key={method}
                 style={{
-                  width: '48%',
                   backgroundColor:
                     searchFilter.paymentMethod === method
-                      ? '#e6f0ff'
-                      : '#f6fafc',
+                      ? '#e5e7eb'
+                      : '#ffffff',
                   borderColor:
                     searchFilter.paymentMethod === method
-                      ? '#4f8cff'
-                      : '#e0e0e0',
-                  borderWidth: 1,
-                  borderRadius: 8,
-                  padding: 10,
-                  marginBottom: 10,
+                      ? '#9ca3af'
+                      : '#d1d5db',
+                  borderWidth: 1.5,
+                  borderRadius: 22,
+                  paddingVertical: 10,
+                  paddingHorizontal: 18,
                   alignItems: 'center',
                   justifyContent: 'center',
+                  minWidth: 75,
                 }}
                 onPress={() =>
                   setSearchFilter(f => ({
                     ...f,
-                    paymentMethod: method || undefined,
+                    paymentMethod: method,
                   }))
                 }
               >
                 <Text
                   style={{
-                    color: '#222',
-                    fontSize: searchFilter.paymentMethod === method ? 16 : 15,
+                    color:
+                      searchFilter.paymentMethod === method
+                        ? '#1f2937'
+                        : '#6b7280',
+                    fontSize: 14,
                     fontWeight:
-                      searchFilter.paymentMethod === method ? 'bold' : '500',
+                      searchFilter.paymentMethod === method ? '600' : '500',
+                    textAlign: 'center',
                   }}
                 >
-                  {method || 'All'}
+                  {method}
                 </Text>
               </TouchableOpacity>
             ))}
           </View>
           {/* Status filter */}
-          <Text style={{ fontSize: 15, marginBottom: 6 }}>Status</Text>
-          <View style={{ flexDirection: 'row', marginBottom: 16 }}>
+          <Text
+            style={{
+              fontSize: 16,
+              fontWeight: '600',
+              color: '#1f2937',
+              marginBottom: 12,
+            }}
+          >
+            Status
+          </Text>
+          <View
+            style={{
+              flexDirection: 'row',
+              marginBottom: 20,
+              gap: 12,
+            }}
+          >
             {['', 'Paid', 'Pending'].map(status => (
               <TouchableOpacity
                 key={status}
                 style={{
                   flex: 1,
                   backgroundColor:
-                    searchFilter.status === status ? '#e6f0ff' : '#f6fafc',
+                    (status === '' && !searchFilter.status) ||
+                    searchFilter.status === status
+                      ? '#e5e7eb'
+                      : '#ffffff',
                   borderColor:
-                    searchFilter.status === status ? '#4f8cff' : '#e0e0e0',
-                  borderWidth: 1,
-                  borderRadius: 8,
-                  padding: 10,
-                  marginRight: status !== 'Pending' ? 8 : 0,
+                    (status === '' && !searchFilter.status) ||
+                    searchFilter.status === status
+                      ? '#9ca3af'
+                      : '#d1d5db',
+                  borderWidth: 1.5,
+                  borderRadius: 22,
+                  paddingVertical: 10,
+                  paddingHorizontal: 16,
                   alignItems: 'center',
                   justifyContent: 'center',
                 }}
@@ -1407,9 +2920,19 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
               >
                 <Text
                   style={{
-                    color: '#222',
-                    fontSize: searchFilter.status === status ? 16 : 15,
-                    fontWeight: searchFilter.status === status ? 'bold' : '500',
+                    color:
+                      (status === '' && !searchFilter.status) ||
+                      searchFilter.status === status
+                        ? '#1f2937'
+                        : '#6b7280',
+                    fontSize: 14,
+                    fontWeight:
+                      (status === '' && !searchFilter.status) ||
+                      searchFilter.status === status
+                        ? '600'
+                        : '500',
+                    textTransform: 'capitalize',
+                    textAlign: 'center',
                   }}
                 >
                   {status || 'All'}
@@ -1418,36 +2941,68 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
             ))}
           </View>
           {/* Category Filter */}
-          <Text style={{ fontSize: 15, marginBottom: 6 }}>Category</Text>
-          <View style={{ flexDirection: 'row', marginBottom: 16 }}>
-            {['', 'Suppliers', 'Customers'].map(cat => (
+          <Text
+            style={{
+              fontSize: 16,
+              fontWeight: '600',
+              color: '#1f2937',
+              marginBottom: 12,
+            }}
+          >
+            Category
+          </Text>
+          <View
+            style={{
+              flexDirection: 'row',
+              flexWrap: 'wrap',
+              marginBottom: 20,
+              gap: 10,
+            }}
+          >
+            {[
+              'Supplier',
+              'Expense',
+              'Salary',
+              'Rent',
+              'Utilities',
+              'Maintenance',
+              'Marketing',
+              'Travel',
+              'Office Supplies',
+              'Other',
+            ].map((cat, idx) => (
               <TouchableOpacity
                 key={cat}
                 style={{
-                  flex: 1,
                   backgroundColor:
-                    searchFilter.category === cat ? '#e6f0ff' : '#f6fafc',
+                    searchFilter.category === cat ? '#e5e7eb' : '#ffffff',
                   borderColor:
-                    searchFilter.category === cat ? '#4f8cff' : '#e0e0e0',
-                  borderWidth: 1,
-                  borderRadius: 8,
-                  padding: 10,
-                  marginRight: cat !== 'Customers' ? 8 : 0,
+                    searchFilter.category === cat ? '#9ca3af' : '#d1d5db',
+                  borderWidth: 1.5,
+                  borderRadius: 22,
+                  paddingVertical: 10,
+                  paddingHorizontal: 18,
                   alignItems: 'center',
                   justifyContent: 'center',
+                  minWidth: 75,
                 }}
                 onPress={() =>
-                  setSearchFilter(f => ({ ...f, category: cat || undefined }))
+                  setSearchFilter(f => ({
+                    ...f,
+                    category: cat,
+                  }))
                 }
               >
                 <Text
                   style={{
-                    color: '#222',
-                    fontSize: searchFilter.category === cat ? 16 : 15,
-                    fontWeight: searchFilter.category === cat ? 'bold' : '500',
+                    color:
+                      searchFilter.category === cat ? '#1f2937' : '#6b7280',
+                    fontSize: 14,
+                    fontWeight: searchFilter.category === cat ? '600' : '500',
+                    textAlign: 'center',
                   }}
                 >
-                  {cat || 'All'}
+                  {cat}
                 </Text>
               </TouchableOpacity>
             ))}
@@ -1492,24 +3047,32 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           <View
             style={{
               flexDirection: 'row',
-              justifyContent: 'flex-end',
-              marginTop: 16,
+              justifyContent: 'center',
+              marginBottom: 20,
+              marginTop: 12,
+              gap: 16,
             }}
           >
             <TouchableOpacity
               onPress={() => setSearchFilter({ searchText: '' })}
               style={{
-                paddingVertical: 10,
-                paddingHorizontal: 24,
-                borderRadius: 8,
-                backgroundColor: '#fff',
-                borderWidth: 1,
+                backgroundColor: '#f8f9fa',
+                borderWidth: 1.5,
                 borderColor: '#dc3545',
-                marginRight: 12,
+                borderRadius: 12,
+                paddingVertical: 14,
+                paddingHorizontal: 32,
+                alignItems: 'center',
+                justifyContent: 'center',
+                minWidth: 140,
               }}
             >
               <Text
-                style={{ color: '#dc3545', fontWeight: 'bold', fontSize: 16 }}
+                style={{
+                  color: '#dc3545',
+                  fontWeight: '600',
+                  fontSize: 16,
+                }}
               >
                 Reset
               </Text>
@@ -1517,13 +3080,24 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
             <TouchableOpacity
               onPress={() => setFilterVisible(false)}
               style={{
-                paddingVertical: 10,
-                paddingHorizontal: 24,
-                borderRadius: 8,
                 backgroundColor: '#4f8cff',
+                borderWidth: 1.5,
+                borderColor: '#4f8cff',
+                borderRadius: 12,
+                paddingVertical: 14,
+                paddingHorizontal: 32,
+                alignItems: 'center',
+                justifyContent: 'center',
+                minWidth: 140,
               }}
             >
-              <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}>
+              <Text
+                style={{
+                  color: '#ffffff',
+                  fontWeight: '600',
+                  fontSize: 16,
+                }}
+              >
                 Apply
               </Text>
             </TouchableOpacity>
@@ -1579,10 +3153,19 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
     padding: 16,
   },
   card: {
+    // backgroundColor: '#fff',
+    // borderRadius: 12,
+    // padding: 16,
+    // marginBottom: 16,
     backgroundColor: '#fff',
     borderRadius: 12,
     padding: 16,
     marginBottom: 16,
+    shadowColor: '#000',
+    shadowOpacity: 0.05,
+    shadowRadius: 5,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
   },
   cardTitle: {
     fontSize: 18,
@@ -1698,10 +3281,10 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
     fontWeight: 'bold',
   },
   customerName: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#222',
+    fontSize: 14,
+    color: '#666',
     marginBottom: 8,
+    fontWeight: 'normal',
   },
   invoiceDetails: {
     flexDirection: 'row',
@@ -1715,7 +3298,7 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
   invoiceAmount: {
     fontSize: 16,
     fontWeight: 'bold',
-    color: '#28a745',
+    color: '#222',
   },
   listContainer: {
     flex: 1,
@@ -1799,6 +3382,7 @@ const styles: StyleSheet.NamedStyles<any> = StyleSheet.create({
     color: '#222',
     marginLeft: 12,
   },
+
   ...invoiceLikeStyles,
   modalOverlay: {
     flex: 1,

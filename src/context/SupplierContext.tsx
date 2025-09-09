@@ -44,6 +44,8 @@ export const SupplierProvider = ({ children }: { children: ReactNode }) => {
     setError(null);
     try {
       const data = await fetchSuppliers(query);
+      console.log('🔍 SupplierContext: Fetched suppliers:', data);
+      console.log('🔍 SupplierContext: First supplier sample:', data[0]);
       setSuppliers(data);
     } catch (e: any) {
       setError(e.message || 'Failed to fetch suppliers');

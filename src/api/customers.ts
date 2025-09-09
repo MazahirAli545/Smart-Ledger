@@ -4,7 +4,12 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export interface Customer {
   id: number;
-  name: string;
+  partyName: string;
+  partyType?: string;
+  phoneNumber?: string;
+  address?: string;
+  gstNumber?: string;
+  voucherType?: string;
   userId?: number;
   createdAt?: string;
   updatedAt?: string;
@@ -12,7 +17,7 @@ export interface Customer {
 
 export async function fetchCustomers(query: string = ''): Promise<Customer[]> {
   const token = await AsyncStorage.getItem('accessToken');
-  const url = `${BASE_URL}/customer${
+  const url = `${BASE_URL}/customers${
     query ? `?search=${encodeURIComponent(query)}` : ''
   }`;
   const res = await fetch(url, {
@@ -26,10 +31,10 @@ export async function fetchCustomers(query: string = ''): Promise<Customer[]> {
 }
 
 export async function addCustomer(
-  customer: Omit<Customer, 'id'>,
+  customer: Omit<Customer, 'id' | 'userId' | 'createdAt' | 'updatedAt'>,
 ): Promise<Customer> {
   const token = await AsyncStorage.getItem('accessToken');
-  const res = await fetch(`${BASE_URL}/customer`, {
+  const res = await fetch(`${BASE_URL}/customers`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -46,10 +51,12 @@ export async function addCustomer(
 
 export async function updateCustomer(
   id: number,
-  customer: Partial<Customer>,
+  customer: Partial<
+    Omit<Customer, 'id' | 'userId' | 'createdAt' | 'updatedAt'>
+  >,
 ): Promise<Customer> {
   const token = await AsyncStorage.getItem('accessToken');
-  const res = await fetch(`${BASE_URL}/customer/${id}`, {
+  const res = await fetch(`${BASE_URL}/customers/${id}`, {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
@@ -66,7 +73,7 @@ export async function updateCustomer(
 
 export async function deleteCustomer(id: number): Promise<void> {
   const token = await AsyncStorage.getItem('accessToken');
-  const res = await fetch(`${BASE_URL}/customer/${id}`, {
+  const res = await fetch(`${BASE_URL}/customers/${id}`, {
     method: 'DELETE',
     headers: {
       Authorization: `Bearer ${token}`,

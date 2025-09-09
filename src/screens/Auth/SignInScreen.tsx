@@ -9,9 +9,9 @@ import {
   Keyboard,
   TouchableWithoutFeedback,
   SafeAreaView,
-  Alert,
   Platform,
   Modal,
+  Dimensions,
 } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
@@ -21,16 +21,21 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { RootStackParamList } from '../../types/navigation';
 import { navigationRef, ROOT_STACK_APP } from '../../../Navigation';
 import { useAuth } from '../../context/AuthContext';
+import { useAlert } from '../../context/AlertContext';
 import { SafeAreaView as SafeAreaViewRN } from 'react-native-safe-area-context';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import CountryPicker from 'react-native-country-picker-modal';
 import SignInOtpScreen from './SignInOtpScreen';
+import TestCredentialsPanel from '../../components/TestCredentialsPanel';
+import { getTestUser, TestUser } from '../../config/testCredentials';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
 
 const SignInScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
   const { login } = useAuth();
+  const { showAlert } = useAlert();
   const [mobile, setMobile] = useState('');
   const [callingCode, setCallingCode] = useState('91');
   const [countryCode, setCountryCode] = useState('IN');
@@ -40,8 +45,17 @@ const SignInScreen: React.FC = () => {
   const [showCountryPicker, setShowCountryPicker] = useState(false);
   const [showProfilePopup, setShowProfilePopup] = useState(false);
   const [pendingMobile, setPendingMobile] = useState<string | null>(null);
+  const [otp, setOtp] = useState<string[]>(['', '', '', '', '', '', '']);
+  const [showTestCredentials, setShowTestCredentials] = useState(false);
+
+  // Get screen dimensions for responsive design
+  const screenWidth = Dimensions.get('window').width;
+  const isSmallScreen = screenWidth < 375; // iPhone SE and smaller devices
 
   useEffect(() => {
+    console.log(
+      '🔍 SignInScreen - Component mounted (direct navigation from splash)',
+    );
     setCountry({
       cca2: 'IN',
       callingCode: ['91'],
@@ -67,139 +81,90 @@ const SignInScreen: React.FC = () => {
     return String.fromCodePoint(...codePoints);
   };
 
+  // Handle test user selection
+  const handleTestUserSelect = (user: TestUser) => {
+    setMobile(user.mobileNumber);
+    setError(null);
+  };
+
+  // UNIFIED AUTH APPROACH: Single endpoint handles both login and registration
   const handleSendOtp = async () => {
+    console.log('🚀 handleSendOtp called with mobile:', mobile);
+
     if (mobile.length === 10) {
       setLoading(true);
       setError(null);
       const fullPhone = `${callingCode}${mobile}`;
+
+      console.log('🔍 Processing mobile number:', fullPhone);
+      console.log('🎯 Using UNIFIED AUTH endpoint for both login/registration');
+
       try {
-        const response = await fetch(`${BASE_URL}/user/login/request-otp`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
+        // Use the unified auth endpoint that handles both scenarios automatically
+        const response = await fetch(
+          `${BASE_URL}/user/unified-auth/request-otp`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mobileNumber: fullPhone }),
           },
-          body: JSON.stringify({ mobileNumber: fullPhone }),
-        });
+        );
+
         const result = await response.json();
+        console.log('🎯 Unified auth response:', response.status, result);
+
         if (response.ok && result.otp) {
+          console.log('✅ OTP sent successfully via unified auth');
           setLoading(false);
-          navigation.navigate('SignInOtp', {
-            phone: fullPhone,
-            backendOtp: result.otp,
-            callingCode,
-            countryCode,
+
+          // Navigate to unified OTP verification screen
+          (navigation as any).navigate('Auth', {
+            screen: 'SignInOtp',
+            params: {
+              phone: fullPhone,
+              backendOtp: result.otp,
+              callingCode,
+              countryCode,
+              isExistingUser: null, // Will be determined during verification
+              useUnifiedAuth: true, // Flag to use unified auth
+            },
           });
         } else {
           throw new Error(result.message || 'Failed to send OTP');
         }
       } catch (err: any) {
-        setError(err.message || 'Failed to send OTP');
-        Alert.alert('Error', err.message || 'Failed to send OTP');
+        console.error('❌ Error in unified auth:', err);
         setLoading(false);
+        setError(err.message || 'Failed to send OTP. Please try again.');
+        showAlert({
+          title: 'Error',
+          message: err.message || 'Failed to send OTP. Please try again.',
+          type: 'error',
+        });
       }
+    } else {
+      showAlert({
+        title: 'Error',
+        message: 'Please enter a valid 10-digit mobile number',
+        type: 'error',
+      });
     }
   };
 
   const handleResend = async () => {
-    setLoading(true);
-    setError(null);
-
-    const fullPhone = `${callingCode}${mobile}`;
-    try {
-      const response = await fetch(`${BASE_URL}/user/login/request-otp`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ mobileNumber: fullPhone }),
-      });
-
-      const result = await response.json();
-
-      if (response.ok && result.otp) {
-        // setBackendOtp(result.otp); // Removed
-        // setTimer(30); // Removed
-        // setOtp(['', '', '', '', '', '']); // Removed
-      } else {
-        throw new Error(result.message || 'Failed to resend OTP');
-      }
-    } catch (err: any) {
-      setError(err.message || 'Failed to resend OTP');
-      Alert.alert('Error', err.message || 'Failed to resend OTP');
-    } finally {
-      setLoading(false);
-    }
+    // Resend functionality will be handled in the respective OTP screens
+    // This function is kept for future use if needed
+    console.log('Resend functionality handled in OTP screens');
   };
 
   const handleVerify = async () => {
-    // if (otp.join('').length === 6) { // Removed
-    //   setLoading(true); // Removed
-    //   setError(null); // Removed
-    //   const fullPhone = `${callingCode}${mobile}`; // Removed
-    //   try { // Removed
-    //     const response = await fetch(`${BASE_URL}/user/login/verify-otp`, { // Removed
-    //       method: 'POST', // Removed
-    //       headers: { // Removed
-    //         'Content-Type': 'application/json', // Removed
-    //       }, // Removed
-    //       body: JSON.stringify({ // Removed
-    //         mobileNumber: fullPhone, // Removed
-    //         otp: otp.join(''), // Removed
-    //       }), // Removed
-    //     }); // Removed
-    //     const result = await response.json(); // Removed
-    //     if (response.ok && result.success) { // Removed
-    //       const verifiedMobile = result.data?.mobileNumber || fullPhone; // Removed
-    //       await AsyncStorage.setItem('userMobileNumber', verifiedMobile); // Removed
-    //       // Handle tokens safely // Removed
-    //       if (result.accessToken != null) { // Removed
-    //         await AsyncStorage.setItem('accessToken', result.accessToken); // Removed
-    //       } else { // Removed
-    //         await AsyncStorage.removeItem('accessToken'); // Removed
-    //       } // Removed
-    //       if (result.refreshToken != null) { // Removed
-    //         await AsyncStorage.setItem('refreshToken', result.refreshToken); // Removed
-    //       } else { // Removed
-    //         await AsyncStorage.removeItem('refreshToken'); // Removed
-    //       } // Removed
-    //       const profileComplete = // Removed
-    //         typeof result.data?.profileComplete === 'boolean' // Removed
-    //           ? result.data.profileComplete // Removed
-    //           : typeof result.profileComplete === 'boolean' // Removed
-    //           ? result.profileComplete // Removed
-    //           : undefined; // Removed
-    //       if (typeof profileComplete === 'boolean') { // Removed
-    //         if (!profileComplete) { // Removed
-    //           setShowProfilePopup(true); // Removed
-    //           setPendingMobile(verifiedMobile); // Removed
-    //         } else { // Removed
-    //           await login(result.accessToken, result.refreshToken, true); // Removed
-    //           navigation.navigate('App', { screen: 'Dashboard' }); // Removed
-    //         } // Removed
-    //       } else { // Removed
-    //         setError('Unexpected server response. Please try again.'); // Removed
-    //         Alert.alert( // Removed
-    //           'Error', // Removed
-    //           'Unexpected server response. Please try again.', // Removed
-    //         ); // Removed
-    //       } // Removed
-    //     } else { // Removed
-    //       throw new Error(result.message || 'Invalid OTP'); // Removed
-    //     } // Removed
-    //   } catch (err: any) { // Removed
-    //     setError(err.message || 'Failed to verify OTP'); // Removed
-    //     Alert.alert('Error', err.message || 'Failed to verify OTP'); // Removed
-    //   } finally { // Removed
-    //     setLoading(false); // Removed
-    //   } // Removed
-    // } // Removed
+    // OTP verification logic removed as per original code
   };
 
   const otpInputRefs: Array<TextInput | null> = Array(6).fill(null);
 
   const handleOtpChange = (text: string, index: number) => {
     if (text.length > 1) {
-      // Handle paste: fill all boxes in order
       const chars = text.replace(/\D/g, '').slice(0, 6).split('');
       let newOtpArr = [...otp];
       for (let i = 0; i < 6; i++) {
@@ -225,12 +190,10 @@ const SignInScreen: React.FC = () => {
   const handleOtpKeyPress = (nativeEvent: any, index: number) => {
     if (nativeEvent.key === 'Backspace') {
       if (otp[index]) {
-        // Clear current box only
         let newOtpArr = [...otp];
         newOtpArr[index] = '';
         setOtp(newOtpArr);
       } else if (index > 0) {
-        // Move back and clear previous box
         otpInputRefs[index - 1]?.focus();
         let newOtpArr = [...otp];
         newOtpArr[index - 1] = '';
@@ -246,109 +209,133 @@ const SignInScreen: React.FC = () => {
   return (
     <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
       <SafeAreaViewRN style={styles.safeArea}>
-        <View style={styles.container}>
-          <TouchableOpacity
-            style={styles.topBar}
-            onPress={() => navigation.goBack()}
-          >
-            <Ionicons
-              name="arrow-back"
-              size={36}
-              color="#222"
-              style={styles.backArrow}
-            />
-          </TouchableOpacity>
-          <Text style={styles.welcome}>Welcome Back</Text>
-          <Text style={styles.subtitle}>Sign in to your account</Text>
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Sign In</Text>
-            <Text style={styles.cardSubtitle}>
-              Enter your credentials to access your account
-            </Text>
-            <>
-              <Text style={styles.label}>Phone Number</Text>
-              <View style={styles.phoneInputRow}>
-                <TouchableOpacity
-                  style={styles.countryTrigger}
-                  onPress={() => setShowCountryPicker(true)}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.flag}>{country?.flag || '🇮🇳'}</Text>
-                  <Text style={styles.code}>+{callingCode}</Text>
-                  <Ionicons
-                    name="chevron-down"
-                    size={18}
-                    color="#888"
-                    style={{ marginLeft: 2 }}
-                  />
-                </TouchableOpacity>
-                <TextInput
-                  style={styles.phoneInput}
-                  placeholder="9999999999"
-                  placeholderTextColor="#8a94a6"
-                  value={mobile}
-                  onChangeText={text =>
-                    setMobile(text.replace(/\D/g, '').slice(0, 10))
-                  }
-                  keyboardType="number-pad"
-                  maxLength={10}
-                />
-                {/* Removed CountryPicker from here to eliminate right-side flag */}
+        <KeyboardAwareScrollView
+          contentContainerStyle={{ flexGrow: 1 }}
+          enableOnAndroid
+          extraScrollHeight={24}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={styles.container}>
+            {/* Header Section */}
+            <View style={styles.headerSection}>
+              <View style={styles.titleSection}>
+                <Text style={styles.welcome}>Welcome to Smart Ledger</Text>
+                <Text style={styles.subtitle}>
+                  Sign in or create your account
+                </Text>
               </View>
-              {/* Render CountryPicker as a modal only when showCountryPicker is true */}
-              {showCountryPicker && (
-                <CountryPicker
-                  countryCode={countryCode as any}
-                  withFilter
-                  withAlphaFilter
-                  withFlag
-                  withCountryNameButton={false}
-                  withCallingCodeButton={false}
-                  visible={showCountryPicker}
-                  onSelect={onSelectCountry}
-                  onClose={() => setShowCountryPicker(false)}
-                  theme={{
-                    backgroundColor: '#fff',
-                    fontSize: 18,
-                    itemHeight: 48,
-                    filterPlaceholderTextColor: '#8a94a6',
-                    primaryColor: '#4f8cff',
-                  }}
-                />
-              )}
-              <LinearGradient
-                colors={['#8f5cff', '#6f4cff']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-                style={styles.purpleButton}
-              >
-                <TouchableOpacity
-                  style={styles.button}
-                  onPress={handleSendOtp}
-                  disabled={mobile.length !== 10 || loading}
-                >
-                  <Text style={styles.buttonText}>
-                    {loading ? 'Sending...' : 'Continue'}
+            </View>
+
+            {/* Main Content Card */}
+            <View style={styles.mainContent}>
+              <View style={styles.card}>
+                <View style={styles.cardHeader}>
+                  <Text style={styles.cardTitle}>Sign In / Sign Up</Text>
+                  <Text style={styles.cardSubtitle}>
+                    Enter your mobile number to continue
                   </Text>
-                </TouchableOpacity>
-              </LinearGradient>
-            </>
-            {error && <Text style={styles.errorText}>{error}</Text>}
-            <Text style={styles.bottomText}>
-              Don't have an account?{' '}
-              <Text
-                style={styles.link}
-                onPress={() =>
-                  (navigation as any).navigate('Auth', {
-                    screen: 'CreateAccount',
-                  })
-                }
-              >
-                Create one here
-              </Text>
-            </Text>
+                </View>
+
+                <View style={styles.formSection}>
+                  <Text style={styles.infoText}>
+                    We'll automatically detect if you're new or existing user
+                    and send the appropriate OTP. New users get instant access
+                    with default settings.
+                  </Text>
+
+                  <View style={styles.inputSection}>
+                    <Text style={styles.label}>Phone Number</Text>
+                    <View style={styles.phoneInputRow}>
+                      <TouchableOpacity
+                        style={styles.countryTrigger}
+                        onPress={() => setShowCountryPicker(true)}
+                        activeOpacity={0.8}
+                      >
+                        <Text style={styles.flag}>{country?.flag || '🇮🇳'}</Text>
+                        <Text style={styles.code}>+{callingCode}</Text>
+                        <Ionicons
+                          name="chevron-down"
+                          size={16}
+                          color="#718096"
+                          style={{ marginLeft: 4 }}
+                        />
+                      </TouchableOpacity>
+                      <TextInput
+                        style={styles.phoneInput}
+                        placeholder="9999999999"
+                        placeholderTextColor="#a0aec0"
+                        value={mobile}
+                        onChangeText={text =>
+                          setMobile(text.replace(/\D/g, '').slice(0, 10))
+                        }
+                        keyboardType="number-pad"
+                        maxLength={10}
+                      />
+                    </View>
+                  </View>
+
+                  {showCountryPicker && (
+                    <CountryPicker
+                      countryCode={countryCode as any}
+                      withFilter
+                      withAlphaFilter
+                      withFlag
+                      withCountryNameButton={false}
+                      withCallingCodeButton={false}
+                      visible={showCountryPicker}
+                      onSelect={onSelectCountry}
+                      onClose={() => setShowCountryPicker(false)}
+                      theme={{
+                        backgroundColor: '#fff',
+                        fontSize: 18,
+                        itemHeight: 48,
+                        filterPlaceholderTextColor: '#8a94a6',
+                        primaryColor: '#4f8cff',
+                      }}
+                    />
+                  )}
+
+                  <View style={styles.buttonSection}>
+                    <LinearGradient
+                      colors={['#8f5cff', '#6f4cff']}
+                      start={{ x: 0, y: 0 }}
+                      end={{ x: 1, y: 0 }}
+                      style={styles.purpleButton}
+                    >
+                      <TouchableOpacity
+                        style={styles.button}
+                        onPress={handleSendOtp}
+                        disabled={mobile.length !== 10 || loading}
+                      >
+                        <Text style={styles.buttonText}>
+                          {loading ? 'Checking User...' : 'Send OTP'}
+                        </Text>
+                      </TouchableOpacity>
+                    </LinearGradient>
+                  </View>
+
+                  {error && <Text style={styles.errorText}>{error}</Text>}
+                </View>
+
+                <View style={styles.footerSection}>
+                  <Text style={styles.bottomText}>
+                    One mobile number, one account. New users get instant
+                    access, existing users login normally.
+                  </Text>
+                </View>
+              </View>
+            </View>
           </View>
-        </View>
+        </KeyboardAwareScrollView>
+
+        {/* Test Credentials Panel */}
+        <TestCredentialsPanel
+          visible={showTestCredentials}
+          onClose={() => setShowTestCredentials(false)}
+          onSelectUser={handleTestUserSelect}
+          mode="login"
+        />
+
         {/* Profile Complete Popup */}
         <Modal
           visible={showProfilePopup}
@@ -433,76 +420,83 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#f6fafc',
     alignItems: 'center',
-    justifyContent: 'flex-start',
-    paddingHorizontal: 0,
+    justifyContent: 'center',
+    paddingHorizontal: 16, // Responsive padding
   },
-  topBar: {
-    flexDirection: 'row',
+  // Header Section
+  headerSection: {
+    width: '100%',
     alignItems: 'center',
-    alignSelf: 'flex-start',
-    marginTop: 24,
-    marginLeft: 16,
-    marginBottom: 4,
-    height: 44,
+    marginBottom: 20,
   },
-  backArrow: {
-    marginLeft: 0,
-    marginTop: 0,
-    textShadowColor: '#dbeafe',
-    textShadowOffset: { width: 1, height: 2 },
-    textShadowRadius: 3,
+  titleSection: {
+    alignItems: 'center',
+    marginTop: 20,
   },
   welcome: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#222',
-    marginTop: 2,
+    fontSize: 26,
+    fontWeight: '700',
+    color: '#1a202c',
     textAlign: 'center',
+    marginBottom: 6,
+  },
+  mainContent: {
+    width: '100%',
+    flex: 1,
+    justifyContent: 'center',
   },
   subtitle: {
     fontSize: 15,
-    color: '#7a869a',
-    marginBottom: 12,
+    color: '#718096',
     textAlign: 'center',
     fontWeight: '400',
+    lineHeight: 20,
   },
   card: {
     backgroundColor: '#fff',
     borderRadius: 16,
-    padding: 24,
-    marginHorizontal: 12,
-    marginTop: 8,
-    marginBottom: 24,
+    padding: 24, // Reduced from 28 to give more space for content
     shadowColor: '#000',
-    shadowOpacity: 0.07,
+    shadowOpacity: 0.06,
     shadowRadius: 12,
     shadowOffset: { width: 0, height: 2 },
-    elevation: 3,
-    alignItems: 'center',
-    width: '94%',
+    elevation: 4,
+    width: '100%',
+    maxWidth: 360, // Reduced from 380 to give more space on smaller screens
     alignSelf: 'center',
   },
+  cardHeader: {
+    alignItems: 'center',
+    marginBottom: 28,
+  },
   cardTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#222',
-    marginBottom: 2,
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#1a202c',
+    marginBottom: 6,
     textAlign: 'center',
   },
   cardSubtitle: {
-    fontSize: 14,
-    color: '#7a869a',
-    marginBottom: 14,
+    fontSize: 15,
+    color: '#718096',
     textAlign: 'center',
     fontWeight: '400',
+    lineHeight: 20,
+  },
+  formSection: {
+    width: '100%',
+    marginBottom: 20,
   },
   label: {
     fontSize: 15,
-    color: '#222',
-    marginBottom: 6,
-    marginTop: 16,
-    fontWeight: 'bold',
+    color: '#1a202c',
+    marginBottom: 10,
+    fontWeight: '600',
     alignSelf: 'flex-start',
+  },
+  inputSection: {
+    width: '100%',
+    marginBottom: 20,
   },
   input: {
     width: '100%',
@@ -532,8 +526,8 @@ const styles = StyleSheet.create({
   },
   button: {
     paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 8,
+    paddingVertical: 14,
+    borderRadius: 12,
     backgroundColor: 'transparent',
     width: '100%',
     alignItems: 'center',
@@ -541,12 +535,9 @@ const styles = StyleSheet.create({
   buttonText: {
     color: '#fff',
     fontSize: 16,
-    fontWeight: 'bold',
+    fontWeight: '600',
     textAlign: 'center',
     letterSpacing: 0.2,
-    textShadowColor: '#1ecb81',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2,
   },
   otpInfo: {
     fontSize: 13,
@@ -564,9 +555,9 @@ const styles = StyleSheet.create({
   },
   bottomText: {
     fontSize: 14,
-    color: '#7a869a',
-    marginTop: 10,
+    color: '#718096',
     textAlign: 'center',
+    lineHeight: 20,
   },
   link: {
     color: '#4f8cff',
@@ -577,10 +568,14 @@ const styles = StyleSheet.create({
   errorText: {
     color: '#e53e3e',
     fontSize: 14,
-    marginTop: 8,
+    marginTop: 16,
     marginBottom: 8,
     textAlign: 'center',
-    fontWeight: 'bold',
+    fontWeight: '600',
+    backgroundColor: '#fed7d7',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
   },
   phoneInputRow: {
     flexDirection: 'row',
@@ -589,14 +584,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     borderRadius: 12,
     borderWidth: 1.5,
-    borderColor: '#e3e7ee',
-    marginBottom: 18,
-    marginTop: 2,
+    borderColor: '#e2e8f0',
     shadowColor: '#000',
-    shadowOpacity: 0.06,
+    shadowOpacity: 0.03,
     shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 1,
+    overflow: 'hidden', // Prevent content from extending beyond borders
+    minHeight: 52, // Ensure consistent height
   },
   countryTrigger: {
     flexDirection: 'row',
@@ -604,7 +599,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     height: 52,
     borderRightWidth: 1.5,
-    borderRightColor: '#e3e7ee',
+    borderRightColor: '#e2e8f0',
+    minWidth: 80, // Set minimum width for country selector
+    maxWidth: 100, // Set maximum width to prevent taking too much space
   },
   flag: {
     fontSize: 22,
@@ -612,28 +609,32 @@ const styles = StyleSheet.create({
   },
   code: {
     fontSize: 16,
-    color: '#222',
-    fontWeight: 'bold',
-    marginRight: 2,
+    color: '#1a202c',
+    fontWeight: '600',
+    marginRight: 3,
   },
   phoneInput: {
     flex: 1,
     height: 52,
-    paddingHorizontal: 16,
+    paddingHorizontal: 12,
     fontSize: 16,
-    color: '#222',
+    color: '#1a202c',
     backgroundColor: '#fff',
+    minWidth: 0, // Allow flex to shrink properly
+    textAlignVertical: 'center', // Ensure text is centered vertically
   },
   purpleButton: {
     borderRadius: 12,
     width: '100%',
-    marginTop: 2,
-    marginBottom: 10,
     shadowColor: '#8f5cff',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.13,
+    shadowOpacity: 0.15,
     shadowRadius: 8,
-    elevation: 3,
+    elevation: 6,
+  },
+  buttonSection: {
+    width: '100%',
+    marginTop: 4,
   },
   otpContainer: {
     flexDirection: 'row',
@@ -644,16 +645,16 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   otpBox: {
-    width: 44,
-    height: 54,
+    width: 36,
+    height: 46,
     borderWidth: 1.5,
     borderColor: '#e3e7ee',
-    borderRadius: 10,
+    borderRadius: 8,
     backgroundColor: '#fff',
     textAlign: 'center',
-    fontSize: 22,
+    fontSize: 18,
     color: '#222',
-    marginHorizontal: 3,
+    marginHorizontal: 2,
     shadowColor: '#000',
     shadowOpacity: 0.06,
     shadowRadius: 6,
@@ -666,6 +667,21 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.13,
     shadowRadius: 8,
     elevation: 3,
+  },
+
+  infoText: {
+    fontSize: 14,
+    color: '#718096',
+    marginBottom: 24,
+    textAlign: 'center',
+    lineHeight: 20,
+    paddingHorizontal: 8,
+  },
+  footerSection: {
+    alignItems: 'center',
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#f1f5f9',
   },
 });
 

@@ -54,9 +54,11 @@ export const getUserIdFromToken = async (): Promise<number | null> => {
   if (!token) return null;
   try {
     const decoded: any = jwtDecode(token);
-    // Adjust the property name if your JWT uses a different claim for user ID
-    return decoded.user_id || decoded.id || decoded.sub || null;
+    console.log('🔍 Decoded token payload:', decoded);
+    // Backend expects 'id' field based on TokenPayload interface
+    return decoded.id || decoded.user_id || decoded.sub || null;
   } catch (e) {
+    console.error('❌ Error decoding token:', e);
     return null;
   }
 };

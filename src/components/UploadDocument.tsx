@@ -8,8 +8,6 @@ import {
   Alert,
 } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-// import DocumentPicker from 'react-native-document-picker';
-// import TextRecognition from 'react-native-text-recognition';
 
 interface UploadDocumentProps {
   onUploadDocument?: () => void;
@@ -22,53 +20,26 @@ const UploadDocument: React.FC<UploadDocumentProps> = ({
   onUploadDocument,
   onVoiceHelper,
   onOcrExtracted,
-  folderName = 'invoice', // Default to 'invoice'
+  folderName = 'sell', // Default to 'sell'
 }) => {
   const [loading, setLoading] = React.useState(false);
 
-  //   const handlePickFile = async () => {
-  //     try {
-  //       setLoading(true);
-  //       const res = await DocumentPicker.pickSingle({
-  //         type: [DocumentPicker.types.images],
-  //       });
-  //       if (res.uri) {
-  //         // Run OCR on the selected image
-  //         const result = await TextRecognition.recognize(res.uri);
-  //         const text = result.join(' ');
-  //         if (onOcrExtracted) {
-  //           on
-  //         O crExtracted({ text });
-
-  //               }
-  //         Alert.al
-  //         ert('OCR Result', text.length > 0 ?
-  //  t          ext : 'No text fo
-  //  u          nd.');
-
-  //                 }
-  //     }
-  //           catch (err: any) {
-  //       if (!DocumentPicker.isCancel(err)) {
-  //         Alert.alert('Error', 'Failed to pick or process the file.');
-  //       }
-  //     } finally {
-  //       setLoading(false);
-  //     }
-  //   };
-
   return (
     <View style={styles.card}>
-      <Text style={styles.cardTitle}>
+      <View style={styles.cardTitleContainer}>
         <MaterialCommunityIcons
           name="file-document-outline"
           size={24}
           color="#222"
-        />{' '}
-        Upload Document
-      </Text>
+        />
+        <Text style={styles.cardTitle}>Upload Document</Text>
+      </View>
       <View style={styles.uploadRow}>
-        <TouchableOpacity style={styles.uploadButton}>
+        <TouchableOpacity
+          style={styles.uploadButton}
+          onPress={onUploadDocument}
+          // disabled={true}
+        >
           <MaterialCommunityIcons
             name="file-document-outline"
             size={28}
@@ -76,7 +47,11 @@ const UploadDocument: React.FC<UploadDocumentProps> = ({
           />
           <Text style={styles.uploadButtonText}>Upload Document</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.uploadButton} onPress={onVoiceHelper}>
+        <TouchableOpacity
+          style={styles.uploadButton}
+          onPress={onVoiceHelper}
+          disabled={true}
+        >
           <MaterialCommunityIcons name="microphone" size={28} color="#222" />
           <Text style={styles.uploadButtonText}>Voice Helper</Text>
         </TouchableOpacity>
@@ -85,7 +60,11 @@ const UploadDocument: React.FC<UploadDocumentProps> = ({
         <ActivityIndicator size="small" color="#222" style={{ marginTop: 8 }} />
       )}
       <Text style={styles.uploadDesc}>
-        {`Upload ${folderName.toLowerCase()}/bill images or PDFs to auto-fill details using OCR`}
+        {`Upload ${
+          (folderName || 'sell').toLowerCase() === 'invoice'
+            ? 'sell'
+            : (folderName || 'sell').toLowerCase()
+        }/bill images or PDFs to auto-fill details using OCR`}
       </Text>
     </View>
   );
@@ -103,11 +82,16 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 2,
   },
+  cardTitleContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
   cardTitle: {
     fontSize: 18,
     fontWeight: 'bold',
     color: '#222',
-    marginBottom: 16,
+    marginLeft: 8,
   },
   uploadRow: {
     flexDirection: 'row',

@@ -47,20 +47,12 @@ const TeamSetupScreen: React.FC = () => {
   return (
     <SafeAreaView style={styles.safeArea}>
       <KeyboardAwareScrollView
-        contentContainerStyle={{ flexGrow: 1 }}
+        contentContainerStyle={{ flexGrow: 1, justifyContent: 'center' }}
         keyboardShouldPersistTaps="handled"
         enableOnAndroid={true}
         extraScrollHeight={60}
         showsVerticalScrollIndicator={false}
       >
-        {/* Progress Bar */}
-        <View style={styles.progressRow}>
-          <Text style={styles.progressText}>Step 2 of 5</Text>
-          <Text style={styles.progressTextRight}>40% Complete</Text>
-        </View>
-        <View style={styles.progressBarBg}>
-          <View style={styles.progressBarFill} />
-        </View>
         {/* Card Container */}
         <View style={styles.card}>
           <Image source={{ uri: TEAM_ICON }} style={styles.teamIcon} />
@@ -184,37 +176,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     letterSpacing: 0.2,
   },
-  progressRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginHorizontal: 24,
-    marginBottom: 2,
-    marginTop: 30,
-  },
-  progressText: {
-    color: '#222',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  progressTextRight: {
-    color: '#888',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  progressBarBg: {
-    height: 6,
-    backgroundColor: '#e3e7ee',
-    borderRadius: 4,
-    marginHorizontal: 24,
-    marginBottom: 18,
-  },
-  progressBarFill: {
-    height: 6,
-    width: '40%',
-    backgroundColor: '#222',
-    borderRadius: 4,
-  },
+
   card: {
     backgroundColor: '#fff',
     borderRadius: 16,
@@ -258,9 +220,7 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     alignSelf: 'flex-start',
   },
-  pickerWrapper: undefined, // Remove old picker styles
-  picker: undefined,
-  pickerItem: undefined,
+
   dropdown1: {
     marginTop: 12,
     height: 50,

@@ -11,6 +11,8 @@ import {
   StatusBar,
   Dimensions,
   Modal,
+  RefreshControl,
+  Platform,
 } from 'react-native';
 import {
   DrawerActions,
@@ -23,13 +25,101 @@ import { BASE_URL } from '../../api';
 import LinearGradient from 'react-native-linear-gradient';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { PieChart, BarChart } from 'react-native-chart-kit';
-import { RootStackParamList } from '../../types/navigation';
 import { AppStackParamList } from '../../types/navigation';
-import { navigationRef, ROOT_STACK_AUTH } from '../../../Navigation'; // adjust path if needed
 import { useAuth } from '../../context/AuthContext';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import axios from 'axios';
 import { getUserIdFromToken } from '../../utils/storage';
+import { useVouchers } from '../../context/VoucherContext';
+import { useNotifications } from '../../context/NotificationContext';
+import PremiumBadge from '../../components/PremiumBadge';
+import DashboardShimmer from '../../components/DashboardShimmer';
+import { useScreenTracking } from '../../hooks/useScreenTracking';
+
+// Global cache for Dashboard with TTL (Time To Live)
+let globalDashboardCache: any = {
+  userData: null,
+  folders: [],
+  fullUserData: null,
+  vouchers: [],
+  lastUpdated: 0,
+};
+let globalDashboardCacheChecked = false;
+
+// Cache TTL: 30 seconds (30,000 ms) - reduced for more responsive updates
+const CACHE_TTL = 30 * 1000;
+
+// Function to clear global cache
+export const clearDashboardCache = () => {
+  globalDashboardCache = {
+    userData: null,
+    folders: [],
+    fullUserData: null,
+    vouchers: [],
+    lastUpdated: 0,
+  };
+  globalDashboardCacheChecked = false;
+};
+
+// Function to force refresh dashboard data
+export const forceRefreshDashboard = () => {
+  clearDashboardCache();
+  return true;
+};
+
+// Function to refresh specific data types
+export const refreshDashboardData = async (
+  dataType: 'vouchers' | 'folders' | 'all' = 'all',
+) => {
+  try {
+    const accessToken = await AsyncStorage.getItem('accessToken');
+    if (!accessToken) return false;
+
+    if (dataType === 'vouchers' || dataType === 'all') {
+      const vouchersResult = await fetch(`${BASE_URL}/vouchers`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }).then(res => res.json());
+
+      if (vouchersResult?.data) {
+        globalDashboardCache.vouchers = vouchersResult.data;
+        globalDashboardCache.lastUpdated = Date.now();
+      }
+    }
+
+    if (dataType === 'folders' || dataType === 'all') {
+      const foldersResult = await fetch(`${BASE_URL}/menus`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }).then(res => res.json());
+
+      if (foldersResult) {
+        globalDashboardCache.folders = foldersResult.filter(
+          (item: any) =>
+            item.parentId === null &&
+            item.isCustom === true &&
+            !DEFAULT_TYPES.includes(item.title.toLowerCase()) &&
+            item.title.toLowerCase() !== 'add folder',
+        );
+        globalDashboardCache.lastUpdated = Date.now();
+      }
+    }
+
+    return true;
+  } catch (error) {
+    console.error('Error refreshing dashboard data:', error);
+    return false;
+  }
+};
+
+// Function to check if cache is still valid
+const isCacheValid = () => {
+  const now = Date.now();
+  return (
+    globalDashboardCache.lastUpdated > 0 &&
+    now - globalDashboardCache.lastUpdated < CACHE_TTL
+  );
+};
+
+// import EntryForm from '../../components/EntryForm';
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
 const PROFILE_ICON =
@@ -61,46 +151,192 @@ interface Transaction {
   status: 'Paid' | 'Pending' | 'Received';
 }
 
-const DEFAULT_TYPES = ['invoice', 'receipt', 'payment', 'purchase'];
+const DEFAULT_TYPES = ['sell', 'receipt', 'payment', 'purchase'];
 
 // Map API icon field to MaterialCommunityIcons name
 const FOLDER_TYPE_ICONS: Record<string, string> = {
-  invoice: 'file-document-outline',
+  sell: 'cart-plus',
   receipt: 'receipt',
   payment: 'currency-inr',
   purchase: 'cart-outline',
 };
+const getFolderIcon = (icon: string | undefined, title?: string) => {
+  if (!icon) {
+    // Fallback to title-based icon mapping
+    if (title) {
+      const lowerTitle = title.toLowerCase();
+      if (lowerTitle === 'sell') return 'cart-plus';
+      if (lowerTitle === 'receipt') return 'receipt';
+      if (lowerTitle === 'payment') return 'currency-inr';
+      if (lowerTitle === 'purchase') return 'cart-outline';
+      if (lowerTitle === 'add folder') return 'folder-plus';
+
+      // For custom folders, try to determine appropriate icon based on name
+      if (lowerTitle.includes('gst') || lowerTitle.includes('tax'))
+        return 'calculator';
+      if (lowerTitle.includes('cash') || lowerTitle.includes('money'))
+        return 'cash-multiple';
+      if (lowerTitle.includes('bank') || lowerTitle.includes('account'))
+        return 'bank';
+      if (lowerTitle.includes('expense') || lowerTitle.includes('cost'))
+        return 'cash-minus';
+      if (lowerTitle.includes('income') || lowerTitle.includes('revenue'))
+        return 'cash-plus';
+      if (lowerTitle.includes('report') || lowerTitle.includes('analytics'))
+        return 'chart-line';
+      if (lowerTitle.includes('customer') || lowerTitle.includes('client'))
+        return 'account-group';
+      if (lowerTitle.includes('supplier') || lowerTitle.includes('vendor'))
+        return 'truck-delivery';
+      if (lowerTitle.includes('product') || lowerTitle.includes('item'))
+        return 'package-variant';
+      if (lowerTitle.includes('service') || lowerTitle.includes('work'))
+        return 'briefcase';
+
+      // For very short or random names, use a generic folder icon
+      if (lowerTitle.length <= 5) return 'folder-multiple';
+
+      // Default for custom folders
+      return 'folder-multiple';
+    }
+    return 'folder-outline';
+  }
+
+  const mapped = FOLDER_TYPE_ICONS[String(icon).toLowerCase()];
+  return mapped || icon || 'folder-outline';
+};
 
 const Dashboard: React.FC = () => {
+  // Screen tracking hook
+  useScreenTracking();
+
   const navigation = useNavigation<StackNavigationProp<AppStackParamList>>();
   const { isAuthenticated, logout } = useAuth();
-  const [userData, setUserData] = useState<UserData | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { vouchers, setAllVouchers } = useVouchers();
+  const { notificationService } = useNotifications();
+
+  const [userData, setUserData] = useState<UserData | null>(
+    globalDashboardCache.userData,
+  );
+  const [loading, setLoading] = useState(!globalDashboardCacheChecked);
   const [error, setError] = useState<string | null>(null);
-  const [folders, setFolders] = useState<any[]>([]);
-  const [fullUserData, setFullUserData] = useState<any>(null);
+  const [folders, setFolders] = useState<any[]>(globalDashboardCache.folders);
+  const [fullUserData, setFullUserData] = useState<any>(
+    globalDashboardCache.fullUserData,
+  );
   const [profileModalVisible, setProfileModalVisible] = useState(false);
   const [profileLoading, setProfileLoading] = useState(false);
-  const [vouchers, setVouchers] = useState<any[]>([]);
   const screenWidth = Dimensions.get('window').width;
   const scrollRef = React.useRef<ScrollView>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [deleteModalVisible, setDeleteModalVisible] = useState(false);
+  const [folderToDelete, setFolderToDelete] = useState<any>(null);
+  const [fcmToken, setFcmToken] = useState<string | null>(null);
 
+  // Check for cached data on component mount
   useEffect(() => {
-    const unsubscribe = navigation.addListener('focus', () => {
-      fetchFullUserData();
-    });
-    return unsubscribe;
-  }, [navigation]);
+    checkCachedData();
+  }, []);
 
+  // Listen for voucher context changes and update dashboard
+  useEffect(() => {
+    if (vouchers.length > 0 && vouchers !== globalDashboardCache.vouchers) {
+      // Update cache only when vouchers actually change
+      globalDashboardCache.vouchers = vouchers;
+      globalDashboardCache.lastUpdated = Date.now();
+    }
+  }, [vouchers]);
+
+  // Fetch FCM token only once on mount
+  useEffect(() => {
+    const fetchFCMToken = async () => {
+      try {
+        const token = notificationService.getCurrentFCMToken();
+        setFcmToken(token);
+
+        // Register FCM token with backend only if we don't have it cached
+        if (token && !globalDashboardCache.fcmToken) {
+          try {
+            const accessToken = await AsyncStorage.getItem('accessToken');
+            if (accessToken) {
+              const response = await fetch(
+                `${BASE_URL}/notifications/register-token`,
+                {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${accessToken}`,
+                  },
+                  body: JSON.stringify({
+                    token: token,
+                    deviceType: Platform.OS,
+                  }),
+                },
+              );
+
+              if (!response.ok) {
+                throw new Error(`FCM registration failed: ${response.status}`);
+              }
+
+              // Cache the FCM token to avoid re-registration
+              globalDashboardCache.fcmToken = token;
+              console.log('✅ FCM token registered successfully');
+            }
+          } catch (error) {
+            console.error('Error registering FCM token:', error);
+            // Don't block the app for FCM registration failures
+          }
+        }
+      } catch (error) {
+        console.error('Error fetching FCM token:', error);
+      }
+    };
+
+    fetchFCMToken();
+  }, [notificationService]);
+
+  // Handle navigation back to screen - refresh data only when needed
   useFocusEffect(
     React.useCallback(() => {
       // Scroll to top when screen is focused
       if (scrollRef.current) {
         scrollRef.current.scrollTo({ y: 0, animated: true });
       }
-      // Refetch full user data on focus
-      fetchFullUserData();
-    }, [navigation]),
+
+      // Only refresh data if cache is stale or we don't have data
+      const shouldRefresh =
+        !isCacheValid() ||
+        !globalDashboardCache.vouchers.length ||
+        !globalDashboardCache.folders.length;
+
+      if (shouldRefresh) {
+        const refreshOnFocus = async () => {
+          try {
+            const accessToken = await AsyncStorage.getItem('accessToken');
+            if (accessToken) {
+              // Fetch fresh data only if needed
+              const [vouchersResult, foldersResult] = await Promise.all([
+                fetchVouchers(accessToken),
+                fetchFolders(accessToken),
+              ]);
+
+              // Update cache with fresh data
+              globalDashboardCache.vouchers = vouchersResult;
+              globalDashboardCache.folders = foldersResult;
+              globalDashboardCache.lastUpdated = Date.now();
+
+              // Update state with fresh data
+              setAllVouchers(vouchersResult);
+              setFolders(foldersResult);
+            }
+          } catch (error) {
+            console.error('❌ Dashboard: Focus refresh error:', error);
+          }
+        };
+
+        refreshOnFocus();
+      }
+    }, []), // Remove dependencies to prevent loops
   );
 
   // Mock data for GST Summary
@@ -182,115 +418,219 @@ const Dashboard: React.FC = () => {
     legend: ['Income', 'Expenses'],
   };
 
-  useEffect(() => {
-    fetchUserData();
-    fetchFolders();
-    fetchVouchers();
-  }, []);
+  // Check for cached data on component mount
+  const checkCachedData = async () => {
+    // If we have valid cache, use it immediately but still refresh in background
+    if (isCacheValid()) {
+      setUserData(globalDashboardCache.userData);
+      setFolders(globalDashboardCache.folders);
+      setFullUserData(globalDashboardCache.fullUserData);
+      setLoading(false);
+      globalDashboardCacheChecked = true;
 
-  const fetchVouchers = async () => {
-    try {
-      const accessToken = await AsyncStorage.getItem('accessToken');
-      const res = await axios.get(`${BASE_URL}/vouchers`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-      if (res.data && Array.isArray(res.data.data)) {
-        setVouchers(res.data.data);
+      // Only fetch fresh data in background if cache is stale
+      if (!isCacheValid()) {
+        setTimeout(() => {
+          fetchDataInBackground();
+        }, 100);
       }
-    } catch (err) {
-      // Optionally handle error
+      return;
     }
+
+    // If no valid cache, fetch all data
+    await fetchAllData();
   };
 
-  // Compute Today's Sync and Pending counts
-  const syncCount = vouchers.filter(v => v.syncYN === 'Y').length;
-  const pendingCount = vouchers.filter(v => v.syncYN === 'N').length;
-
-  // Compute top 10 latest transactions (by date desc)
-  const recentTransactions = [...vouchers]
-    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-    .slice(0, 10);
-
-  const fetchUserData = async () => {
+  // Fetch all data at once to reduce API calls
+  const fetchAllData = async () => {
     try {
+      setLoading(true);
       const accessToken = await AsyncStorage.getItem('accessToken');
-      const mobileNumber =
-        (await AsyncStorage.getItem('userMobileNumber')) || '9844587867';
 
       if (!accessToken) {
         throw new Error('Authentication token not found');
       }
 
-      // This is a placeholder for the actual API call
-      // In a real app, you would make an API call to get user data
-      // For now, we'll use mock data
+      console.log(
+        '🔑 Dashboard: Using token:',
+        accessToken.substring(0, 20) + '...',
+      );
+      console.log('🌐 Dashboard: Making API calls to:', BASE_URL);
 
-      // Simulating API call with timeout
-      setTimeout(() => {
-        // Mock user data - replace with actual API call in production
-        const mockUserData: UserData = {
-          id: 1,
-          businessName: 'Smart Business Solutions',
-          ownerName: 'John Doe',
-          mobileNumber: mobileNumber,
-          businessType: 'Private Limited',
-          businessSize: 'Small',
-          industry: 'Technology',
-          profileComplete: true,
-        };
+      // Add timeout wrapper to prevent API calls from hanging
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(
+          () => reject(new Error('Dashboard API request timeout')),
+          20000,
+        );
+      });
 
-        setUserData(mockUserData);
-        setLoading(false);
-      }, 1000);
+      // Fetch data in parallel to reduce total time with timeout
+      const [
+        userDataResult,
+        foldersResult,
+        vouchersResult,
+        fullUserDataResult,
+      ] = (await Promise.race([
+        Promise.all([
+          fetchUserData(accessToken),
+          fetchFolders(accessToken),
+          fetchVouchers(accessToken),
+          fetchFullUserData(accessToken),
+        ]),
+        timeoutPromise,
+      ])) as [any, any, any, any];
+
+      console.log('✅ Dashboard: All API calls completed successfully');
+
+      // Update cache with timestamp
+      globalDashboardCache = {
+        userData: userDataResult,
+        folders: foldersResult,
+        vouchers: vouchersResult,
+        fullUserData: fullUserDataResult,
+        lastUpdated: Date.now(),
+      };
+      globalDashboardCacheChecked = true;
+
+      // Update state
+      setUserData(userDataResult);
+      setFolders(foldersResult);
+      setAllVouchers(vouchersResult);
+      setFullUserData(fullUserDataResult);
+      setLoading(false);
     } catch (err: any) {
-      console.error('Error fetching user data:', err);
-      setError(err.message || 'Failed to load user data');
+      console.error('❌ Error fetching dashboard data:', err);
+      console.error('❌ Error details:', {
+        message: err.message,
+        status: err.response?.status,
+        statusText: err.response?.statusText,
+        data: err.response?.data,
+        code: err.code,
+      });
+
+      let errorMessage = 'Failed to load dashboard data';
+      if (err.message === 'Dashboard API request timeout') {
+        errorMessage =
+          'Request timeout. Please check your connection and try again.';
+      } else if (err.response?.status === 401) {
+        errorMessage = 'Authentication failed. Please login again.';
+      } else if (err.response?.status >= 500) {
+        errorMessage = 'Server error. Please try again later.';
+      } else if (err.message) {
+        errorMessage = err.message;
+      }
+
+      setError(errorMessage);
       setLoading(false);
     }
   };
 
-  const fetchFolders = async () => {
+  // Background refresh function
+  const fetchDataInBackground = async () => {
     try {
       const accessToken = await AsyncStorage.getItem('accessToken');
+      if (!accessToken) return;
+
+      // Only refresh vouchers in background (most frequently changing data)
+      const vouchersResult = await fetchVouchers(accessToken);
+      if (vouchersResult && vouchersResult !== globalDashboardCache.vouchers) {
+        globalDashboardCache.vouchers = vouchersResult;
+        globalDashboardCache.lastUpdated = Date.now();
+        setAllVouchers(vouchersResult);
+      }
+    } catch (error) {
+      console.error('❌ Dashboard: Background refresh error:', error);
+    }
+  };
+
+  // Individual fetch functions (simplified)
+  const fetchUserData = async (accessToken: string): Promise<UserData> => {
+    // Use mock data for now to reduce API calls
+    const mobileNumber =
+      (await AsyncStorage.getItem('userMobileNumber')) || '9844587867';
+
+    return {
+      id: 1,
+      businessName: 'Smart Business Solutions',
+      ownerName: 'John Doe',
+      mobileNumber: mobileNumber,
+      businessType: 'Private Limited',
+      businessSize: 'Small',
+      industry: 'Technology',
+      profileComplete: true,
+    };
+  };
+
+  const fetchFolders = async (accessToken: string): Promise<any[]> => {
+    try {
       const response = await axios.get(`${BASE_URL}/menus`, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
+
       const userFolders = response.data.filter(
         (item: any) =>
-          item.parentId === 28 &&
+          item.parentId === null &&
+          item.isCustom === true &&
           !DEFAULT_TYPES.includes(item.title.toLowerCase()) &&
           item.title.toLowerCase() !== 'add folder',
       );
-      setFolders(userFolders);
+
+      console.log('🔍 Dashboard - Filtered user folders:', userFolders);
+      return userFolders;
     } catch (err) {
-      // Optionally handle error
+      console.error('Error fetching folders:', err);
+      return [];
     }
   };
 
-  // Fetch full user details when Dashboard loads
-  const fetchFullUserData = async () => {
-    setProfileLoading(true);
+  const fetchVouchers = async (accessToken: string): Promise<any[]> => {
     try {
-      const accessToken = await AsyncStorage.getItem('accessToken');
+      const res = await axios.get(`${BASE_URL}/vouchers`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+
+      if (res.data && Array.isArray(res.data.data)) {
+        return res.data.data;
+      }
+      return [];
+    } catch (err) {
+      console.error('Error fetching vouchers:', err);
+      return [];
+    }
+  };
+
+  const fetchFullUserData = async (accessToken: string): Promise<any> => {
+    try {
       const userId = await getUserIdFromToken();
-      if (!userId) throw new Error('User ID not found');
+      if (!userId) return null;
+
       const res = await axios.get(`${BASE_URL}/user/${userId}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
-      setFullUserData(res.data.data);
+
+      return res.data.data;
     } catch (err) {
-      setFullUserData(null);
-    } finally {
-      setProfileLoading(false);
+      console.error('Error fetching full user data:', err);
+      return null;
     }
   };
 
-  // Fetch full user data on mount or when userData.id changes
-  useEffect(() => {
-    fetchFullUserData();
-  }, []);
+  // Compute Today's Sync and Pending counts
+  const syncCount = vouchers.filter(v => v && v.syncYN === 'Y').length;
+  const pendingCount = vouchers.filter(v => v && v.syncYN === 'N').length;
+
+  // Compute top 10 latest transactions (by date desc)
+  const recentTransactions = [...vouchers]
+    .filter(v => v && v.date) // Filter out vouchers without dates
+    .sort((a, b) => {
+      try {
+        return new Date(b.date).getTime() - new Date(a.date).getTime();
+      } catch (error) {
+        return 0; // If date parsing fails, keep original order
+      }
+    })
+    .slice(0, 10);
 
   const handleLogout = async () => {
     Alert.alert('Logout', 'Are you sure you want to logout?', [
@@ -311,36 +651,211 @@ const Dashboard: React.FC = () => {
     ]);
   };
 
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
-    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
-      2,
-      '0',
-    )}-${String(date.getDate()).padStart(2, '0')}`;
+  const onRefresh = async () => {
+    setRefreshing(true);
+    // Clear cache and fetch completely fresh data on pull-to-refresh
+    try {
+      clearDashboardCache(); // Clear cache to force fresh fetch
+      const accessToken = await AsyncStorage.getItem('accessToken');
+      if (accessToken) {
+        const [
+          vouchersResult,
+          foldersResult,
+          userDataResult,
+          fullUserDataResult,
+        ] = await Promise.all([
+          fetchVouchers(accessToken),
+          fetchFolders(accessToken),
+          fetchUserData(accessToken),
+          fetchFullUserData(accessToken),
+        ]);
+
+        // Update cache with completely fresh data
+        globalDashboardCache = {
+          userData: userDataResult,
+          folders: foldersResult,
+          vouchers: vouchersResult,
+          fullUserData: fullUserDataResult,
+          lastUpdated: Date.now(),
+        };
+
+        // Update all state with fresh data
+        setUserData(userDataResult);
+        setFolders(foldersResult);
+        setAllVouchers(vouchersResult);
+        setFullUserData(fullUserDataResult);
+      }
+    } catch (error) {
+      console.error('Refresh error:', error);
+    } finally {
+      setRefreshing(false);
+    }
   };
 
-  const formatCurrency = (amount: number) => {
-    return `₹${amount.toLocaleString('en-IN')}`;
+  const handleDeleteFolder = async (folderId: number) => {
+    try {
+      const token = await AsyncStorage.getItem('accessToken');
+      if (!token) {
+        Alert.alert(
+          'Error',
+          'Authentication token not found. Please login again.',
+        );
+        return;
+      }
+
+      const response = await axios.delete(`${BASE_URL}/menus/${folderId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+
+      if (response.status === 200 || response.status === 204) {
+        // Update local state and cache only on successful deletion
+        const updatedFolders = folders.filter(f => f.id !== folderId);
+        setFolders(updatedFolders);
+        globalDashboardCache.folders = updatedFolders;
+        globalDashboardCache.lastUpdated = Date.now();
+        console.log('✅ Folder deleted successfully');
+      } else {
+        throw new Error(`Delete failed with status: ${response.status}`);
+      }
+    } catch (err: any) {
+      console.error('Error deleting folder:', err);
+      let errorMessage = 'Failed to delete folder.';
+
+      if (err.response?.status === 401) {
+        errorMessage = 'Authentication failed. Please login again.';
+      } else if (err.response?.status === 403) {
+        errorMessage = 'You do not have permission to delete this folder.';
+      } else if (err.response?.status === 404) {
+        errorMessage = 'Folder not found. It may have been already deleted.';
+      } else if (err.message) {
+        errorMessage = `Delete failed: ${err.message}`;
+      }
+
+      Alert.alert('Error', errorMessage);
+    }
   };
 
-  // Helper to check for valid MaterialCommunityIcons icon name
-  const isValidIcon = (icon: string | undefined) =>
-    typeof icon === 'string' &&
-    icon.length > 1 &&
-    !icon.startsWith('http') &&
-    !icon.startsWith('blob:');
+  const showDeleteModal = (folder: any) => {
+    setFolderToDelete(folder);
+    setDeleteModalVisible(true);
+  };
+
+  const hideDeleteModal = () => {
+    setDeleteModalVisible(false);
+    setFolderToDelete(null);
+  };
+
+  const confirmDeleteFolder = async () => {
+    if (!folderToDelete || !folderToDelete.id) {
+      Alert.alert('Error', 'Invalid folder selected for deletion.');
+      hideDeleteModal();
+      return;
+    }
+
+    try {
+      await handleDeleteFolder(folderToDelete.id);
+      hideDeleteModal();
+    } catch (error) {
+      console.error('Error in confirmDeleteFolder:', error);
+      // Error is already handled in handleDeleteFolder
+    }
+  };
 
   if (!isAuthenticated) return null;
 
   if (loading) {
+    return <DashboardShimmer />;
+  }
+
+  // Show error state with retry option
+  if (error) {
     return (
-      <SafeAreaView style={styles.loadingContainer}>
+      <SafeAreaView style={styles.safeArea}>
         <StatusBar barStyle="dark-content" backgroundColor="#f6fafc" />
-        <Image source={LOGO} style={styles.logo} />
-        <Text style={styles.loadingText}>Loading...</Text>
+        <View style={styles.errorContainer}>
+          <MaterialCommunityIcons
+            name="alert-circle"
+            size={64}
+            color="#dc3545"
+            style={styles.errorIcon}
+          />
+          <Text style={styles.errorTitle}>Something went wrong</Text>
+          <Text style={styles.errorMessage}>{error}</Text>
+          <TouchableOpacity
+            style={styles.retryButton}
+            onPress={() => {
+              setError(null);
+              checkCachedData();
+            }}
+          >
+            <Text style={styles.retryButtonText}>Try Again</Text>
+          </TouchableOpacity>
+        </View>
       </SafeAreaView>
     );
   }
+
+  // Plan hierarchy for comparison (only free and premium)
+  const PLAN_HIERARCHY = {
+    free: 0,
+    premium: 1,
+  };
+
+  // Utility to check if a plan level is accessible to the user
+  const isPlanAccessible = (userPlan: string, featurePlan: string): boolean => {
+    const userLevel =
+      PLAN_HIERARCHY[userPlan as keyof typeof PLAN_HIERARCHY] ?? 0;
+    const featureLevel =
+      PLAN_HIERARCHY[featurePlan as keyof typeof PLAN_HIERARCHY] ?? 0;
+    return userLevel >= featureLevel;
+  };
+
+  // Static quick actions with plan types (only free and premium)
+  const staticActions = [
+    {
+      title: 'Sell',
+      icon: 'cart-plus',
+      screen: 'Invoice',
+      planType: 'free',
+    },
+    { title: 'Receipt', icon: 'receipt', screen: 'Receipt', planType: 'free' },
+    {
+      title: 'Payment',
+      icon: 'currency-inr',
+      screen: 'Payment',
+      planType: 'free', // Based on API response - Payment is free
+    },
+    {
+      title: 'Purchase',
+      icon: 'cart-outline',
+      screen: 'Purchase',
+      planType: 'free', // Based on API response - Purchase is free
+    },
+  ];
+
+  // Get user's plan type
+  const userPlan = fullUserData?.planType || 'free';
+
+  // Show all static actions with plan badges (for visibility)
+  const allStaticActions = staticActions;
+
+  // Dynamic quick actions - show all folders
+  const dynamicActions = [...folders]
+    .filter(
+      f =>
+        f.parentId === null && // ✅ Changed from 28 to null to match AddFolderScreen
+        f.isCustom === true && // ✅ Only show custom user folders
+        f.isVisible &&
+        !['sell', 'receipt', 'payment', 'purchase', 'add folder'].includes(
+          f.title?.toLowerCase(),
+        ),
+    )
+    .sort((a, b) => Number(a.id) - Number(b.id));
+  const visibleDynamic = dynamicActions.slice(0, 2);
+  const overflowDynamic = dynamicActions.slice(2);
+  const quickActions = [...allStaticActions, ...visibleDynamic];
+
+  // Removed console.log to prevent render loops
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -348,7 +863,12 @@ const Dashboard: React.FC = () => {
       <ScrollView
         ref={scrollRef}
         contentContainerStyle={styles.scrollContainer}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+        }
       >
+        {/* Demo: EntryForm at the top of Dashboard */}
+
         {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
@@ -384,19 +904,26 @@ const Dashboard: React.FC = () => {
           <View style={styles.profileInfo}>
             <Image source={{ uri: PROFILE_ICON }} style={styles.profileIcon} />
             <View style={styles.profileDetails}>
-              {fullUserData && fullUserData.ownerName ? (
+              {fullUserData?.ownerName ? (
                 <Text style={styles.profileName}>{fullUserData.ownerName}</Text>
               ) : null}
-              {fullUserData && fullUserData.mobileNumber ? (
+              {fullUserData?.mobileNumber ? (
                 <Text style={styles.profilePhone}>
                   {fullUserData.mobileNumber}
                 </Text>
               ) : null}
-              {fullUserData && fullUserData.businessType ? (
+              {fullUserData?.businessType ? (
                 <Text style={styles.profileBusiness}>
                   {fullUserData.businessType}
                 </Text>
               ) : null}
+              {/* Welcome message for new users with default values */}
+              {fullUserData?.ownerName === 'User' &&
+                fullUserData?.businessName === 'My Business' && (
+                  <Text style={styles.welcomeMessage}>
+                    🎉 Welcome! Click "View Profile" to customize your details
+                  </Text>
+                )}
             </View>
           </View>
           <TouchableOpacity
@@ -411,6 +938,7 @@ const Dashboard: React.FC = () => {
             <Text style={styles.profileButtonText}>View Profile</Text>
           </TouchableOpacity>
         </LinearGradient>
+
         {/* Profile Modal */}
         <Modal
           visible={profileModalVisible}
@@ -485,10 +1013,10 @@ const Dashboard: React.FC = () => {
                     {fullUserData.currentAccountingSoftware || '-'}
                   </Text>
                   <Text style={{ color: '#666', marginBottom: 6 }}>
-                    Team Size: {fullUserData.teamSize}
+                    Team Size: {fullUserData.teamSize || '-'}
                   </Text>
                   <Text style={{ color: '#666', marginBottom: 6 }}>
-                    Preferred Language: {fullUserData.preferredLanguage}
+                    Preferred Language: {fullUserData.preferredLanguage || '-'}
                   </Text>
                   <Text style={{ color: '#666', marginBottom: 6 }}>
                     Features:{' '}
@@ -497,16 +1025,16 @@ const Dashboard: React.FC = () => {
                       : '-'}
                   </Text>
                   <Text style={{ color: '#666', marginBottom: 6 }}>
-                    Bank Name: {fullUserData.bankName}
+                    Bank Name: {fullUserData.bankName || '-'}
                   </Text>
                   <Text style={{ color: '#666', marginBottom: 6 }}>
-                    Account Number: {fullUserData.accountNumber}
+                    Account Number: {fullUserData.accountNumber || '-'}
                   </Text>
                   <Text style={{ color: '#666', marginBottom: 6 }}>
                     IFSC Code: {fullUserData.ifscCode || '-'}
                   </Text>
                   <Text style={{ color: '#666', marginBottom: 6 }}>
-                    Primary Goal: {fullUserData.primaryGoal}
+                    Primary Goal: {fullUserData.primaryGoal || '-'}
                   </Text>
                   <Text style={{ color: '#666', marginBottom: 6 }}>
                     Current Challenges: {fullUserData.currentChallenges || '-'}
@@ -571,66 +1099,157 @@ const Dashboard: React.FC = () => {
 
         {/* Quick Actions */}
         <View style={styles.quickActionsCard}>
-          <Text style={styles.sectionTitle}>Quick Actions</Text>
-          <View style={styles.quickActionsGrid}>
-            {/* Default Quick Actions */}
-            <TouchableOpacity
-              style={styles.actionButton}
-              onPress={() => navigation.navigate('Invoice')}
-            >
-              <MaterialCommunityIcons
-                name="file-document-outline"
-                size={24}
-                color="#222"
-              />
-              <Text style={styles.actionText}>Invoice</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.actionButton}
-              onPress={() => navigation.navigate('Receipt')}
-            >
-              <MaterialCommunityIcons name="receipt" size={24} color="#222" />
-              <Text style={styles.actionText}>Receipt</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.actionButton}
-              onPress={() => navigation.navigate('Payment')}
-            >
-              <MaterialCommunityIcons
-                name="currency-inr"
-                size={24}
-                color="#222"
-              />
-              <Text style={styles.actionText}>Payment</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.actionButton}
-              onPress={() => navigation.navigate('Purchase')}
-            >
-              <MaterialCommunityIcons
-                name="cart-outline"
-                size={24}
-                color="#222"
-              />
-              <Text style={styles.actionText}>Purchase</Text>
-            </TouchableOpacity>
-            {/* User-created folders as Quick Actions */}
-            {folders.map(folder => (
+          <View
+            style={{
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}
+          >
+            <Text style={styles.sectionTitle}>Quick Actions</Text>
+            {overflowDynamic.length > 0 && (
               <TouchableOpacity
-                key={folder.id}
-                style={styles.actionButton}
-                onPress={() => navigation.navigate('FolderScreen', { folder })}
+                style={{
+                  backgroundColor: '#e6f0ff',
+                  borderRadius: 20,
+                  paddingHorizontal: 18,
+                  paddingVertical: 4,
+                  marginLeft: 8,
+                }}
+                onPress={() =>
+                  navigation.navigate('AllQuickActionsScreen', {
+                    actions: overflowDynamic,
+                  })
+                }
               >
-                <MaterialCommunityIcons
-                  name={
-                    FOLDER_TYPE_ICONS[folder.icon?.toLowerCase()] ||
-                    'folder-outline'
-                  }
-                  size={24}
-                  color="#222"
-                />
-                <Text style={styles.actionText}>{folder.title}</Text>
+                <Text
+                  style={{ color: '#4f8cff', fontWeight: 'bold', fontSize: 15 }}
+                >
+                  More
+                </Text>
               </TouchableOpacity>
+            )}
+          </View>
+          <View
+            style={{
+              flexDirection: 'row',
+              flexWrap: 'wrap',
+              justifyContent: 'space-between',
+              alignItems: 'flex-start',
+              padding: 0,
+              margin: 0,
+              height:
+                quickActions.length <= 2
+                  ? 100 + 16
+                  : quickActions.length <= 4
+                  ? 2 * 100 + 16
+                  : 3 * 100 + 2 * 16, // Dynamic height based on number of actions
+            }}
+          >
+            {quickActions.map((action, idx) => {
+              const isUserFolder = !action.screen;
+              return (
+                <View
+                  key={action.title || action.id}
+                  style={{
+                    position: 'relative',
+                    width: '48%',
+                    height: 100,
+                    marginBottom: 16,
+                  }}
+                >
+                  <TouchableOpacity
+                    style={{
+                      flex: 1,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexDirection: 'column',
+                      height: '100%',
+                      paddingVertical: 10,
+                      opacity: isPlanAccessible(
+                        userPlan,
+                        action.planType || 'free',
+                      )
+                        ? 1
+                        : 0.6,
+                    }}
+                    onPress={() => {
+                      console.log('Action pressed:', action);
+                      if (action.screen) {
+                        console.log('Navigating to screen:', action.screen);
+                        navigation.navigate(action.screen);
+                      } else {
+                        console.log('Navigating to folder:', action);
+                        navigation.navigate('FolderScreen', { folder: action });
+                      }
+                    }}
+                    activeOpacity={0.7}
+                    disabled={
+                      !isPlanAccessible(userPlan, action.planType || 'free')
+                    }
+                  >
+                    <MaterialCommunityIcons
+                      name={getFolderIcon(action.icon, action.title)}
+                      size={28}
+                      color="#222"
+                      style={{ marginBottom: 8 }}
+                    />
+                    <Text style={styles.actionText}>{action.title}</Text>
+                    {/* Plan badge for non-free actions only - but not for user-created custom folders */}
+                    {action.planType &&
+                      action.planType !== 'free' &&
+                      !action.isCustom && (
+                        <PremiumBadge
+                          size="small"
+                          text={
+                            action.planType.charAt(0).toUpperCase() +
+                            action.planType.slice(1)
+                          }
+                          disabled={
+                            !isPlanAccessible(
+                              userPlan,
+                              action.planType || 'free',
+                            )
+                          }
+                        />
+                      )}
+                  </TouchableOpacity>
+                  {/* Delete button */}
+                  {isUserFolder && (
+                    <TouchableOpacity
+                      style={{
+                        position: 'absolute',
+                        top: 8,
+                        right: 8,
+                        zIndex: 2,
+                        backgroundColor: '#fff',
+                        borderRadius: 12,
+                        padding: 2,
+                        elevation: 2,
+                      }}
+                      onPress={() => showDeleteModal(action)}
+                    >
+                      <MaterialCommunityIcons
+                        name="trash-can-outline"
+                        size={18}
+                        color="#dc3545"
+                      />
+                    </TouchableOpacity>
+                  )}
+                </View>
+              );
+            })}
+            {/* Fill empty slots if less than 6 actions */}
+            {Array.from({ length: 6 - quickActions.length }).map((_, idx) => (
+              <View
+                key={`empty-${idx}`}
+                style={{
+                  width: '48%',
+                  height: 100,
+                  marginBottom: 16,
+                  backgroundColor: 'transparent',
+                }}
+              />
             ))}
           </View>
         </View>
@@ -695,80 +1314,111 @@ const Dashboard: React.FC = () => {
               nestedScrollEnabled={true}
               contentContainerStyle={{ flexGrow: 1 }}
             >
-              {recentTransactions.map((transaction, idx) => (
-                <View key={transaction.id}>
-                  <View
-                    style={[styles.transactionItem, { paddingVertical: 14 }]}
-                  >
-                    {' '}
-                    {/* more vertical padding */}
-                    <View style={styles.transactionLeft}>
-                      <View style={styles.transactionTypeContainer}>
-                        <Text style={styles.transactionTypeText}>
-                          {transaction.type.charAt(0).toUpperCase() +
-                            transaction.type.slice(1)}
-                        </Text>
-                      </View>
-                      <View style={styles.transactionDetails}>
-                        <Text style={styles.transactionParty}>
-                          {transaction.partyName}
-                        </Text>
-                        <Text style={styles.transactionDate}>
-                          {transaction.date
-                            ? new Date(transaction.date)
-                                .toISOString()
-                                .split('T')[0]
-                            : ''}
-                        </Text>
-                      </View>
-                    </View>
-                    <View style={styles.transactionRight}>
-                      <Text
-                        style={[
-                          styles.transactionAmount,
-                          { fontSize: 17, fontWeight: 'bold' },
-                        ]}
-                      >
-                        {' '}
-                        {/* larger amount */}₹
-                        {Number(transaction.amount).toLocaleString('en-IN')}
-                      </Text>
-                      <View
-                        style={[
-                          styles.statusBadge,
-                          transaction.status === 'complete'
-                            ? { backgroundColor: '#1ecb81', marginLeft: 8 }
-                            : transaction.status === 'draft'
-                            ? { backgroundColor: '#F4B400', marginLeft: 8 }
-                            : { backgroundColor: '#888', marginLeft: 8 },
-                        ]}
-                      >
-                        <Text
-                          style={{
-                            color: '#fff',
-                            fontWeight: 'bold',
-                            fontSize: 13,
-                          }}
-                        >
-                          {transaction.status.charAt(0).toUpperCase() +
-                            transaction.status.slice(1)}
-                        </Text>
-                      </View>
-                    </View>
-                  </View>
-                  {/* Divider except after last item */}
-                  {idx < recentTransactions.length - 1 && (
+              {recentTransactions.length > 0 ? (
+                recentTransactions.map((transaction, idx) => (
+                  <View key={transaction.id}>
                     <View
-                      style={{
-                        height: 1,
-                        backgroundColor: '#f0f0f0',
-                        marginLeft: 8,
-                        marginRight: 8,
-                      }}
-                    />
-                  )}
+                      style={[styles.transactionItem, { paddingVertical: 14 }]}
+                    >
+                      {/* more vertical padding */}
+                      <View style={styles.transactionLeft}>
+                        <View style={styles.transactionTypeContainer}>
+                          <Text style={styles.transactionTypeText}>
+                            {(transaction.type === 'Invoice'
+                              ? 'Sell'
+                              : transaction.type || 'Unknown'
+                            )
+                              .charAt(0)
+                              .toUpperCase() +
+                              (transaction.type === 'Invoice'
+                                ? 'Sell'
+                                : transaction.type || 'Unknown'
+                              ).slice(1)}
+                          </Text>
+                        </View>
+                        <View style={styles.transactionDetails}>
+                          <Text style={styles.transactionParty}>
+                            {transaction.partyName ||
+                              transaction.party ||
+                              'Unknown'}
+                          </Text>
+                          <Text style={styles.transactionDate}>
+                            {transaction.date
+                              ? new Date(transaction.date)
+                                  .toISOString()
+                                  .split('T')[0]
+                              : 'No date'}
+                          </Text>
+                        </View>
+                      </View>
+                      <View style={styles.transactionRight}>
+                        <Text
+                          style={[
+                            styles.transactionAmount,
+                            { fontSize: 17, fontWeight: 'bold' },
+                          ]}
+                        >
+                          {' '}
+                          {/* larger amount */}₹
+                          {Number(transaction.amount || 0).toLocaleString(
+                            'en-IN',
+                          )}
+                        </Text>
+                        <View
+                          style={[
+                            styles.statusBadge,
+                            (transaction.status || '') === 'complete'
+                              ? { backgroundColor: '#1ecb81', marginLeft: 8 }
+                              : (transaction.status || '') === 'draft'
+                              ? { backgroundColor: '#F4B400', marginLeft: 8 }
+                              : { backgroundColor: '#888', marginLeft: 8 },
+                          ]}
+                        >
+                          <Text
+                            style={{
+                              color: '#fff',
+                              fontWeight: 'bold',
+                              fontSize: 13,
+                            }}
+                          >
+                            {(transaction.status || 'Unknown')
+                              .charAt(0)
+                              .toUpperCase() +
+                              (transaction.status || 'Unknown').slice(1)}
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+                    {/* Divider except after last item */}
+                    {idx < recentTransactions.length - 1 && (
+                      <View
+                        style={{
+                          height: 1,
+                          backgroundColor: '#f0f0f0',
+                          marginLeft: 8,
+                          marginRight: 8,
+                        }}
+                      />
+                    )}
+                  </View>
+                ))
+              ) : (
+                <View style={styles.emptyTransactionsContainer}>
+                  <MaterialCommunityIcons
+                    name="file-document-outline"
+                    size={48}
+                    color="#ccc"
+                    style={{ marginBottom: 16 }}
+                  />
+                  <Text style={styles.emptyTransactionsTitle}>
+                    No Recent Transactions
+                  </Text>
+                  <Text style={styles.emptyTransactionsSubtitle}>
+                    Your recent transactions will appear here once you start
+                    creating invoices, receipts, payments, or purchases.
+                  </Text>
                 </View>
-              ))}
+              )}
             </ScrollView>
           </View>
         </View>
@@ -832,12 +1482,113 @@ const Dashboard: React.FC = () => {
             <Text style={styles.tabText}>Suppliers</Text>
           </TouchableOpacity>
         </View> */}
-
-        {/* Logout Button */}
-        <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
-          <Text style={styles.logoutText}>Logout</Text>
-        </TouchableOpacity>
       </ScrollView>
+      {/* Custom Delete Modal */}
+      <Modal
+        visible={deleteModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={hideDeleteModal}
+      >
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: 'rgba(0,0,0,0.18)',
+            justifyContent: 'center',
+            alignItems: 'center',
+          }}
+        >
+          <View
+            style={{
+              backgroundColor: '#fff',
+              borderRadius: 16,
+              padding: 28,
+              width: 320,
+              alignItems: 'center',
+              shadowColor: '#000',
+              shadowOpacity: 0.15,
+              shadowRadius: 12,
+              shadowOffset: { width: 0, height: 4 },
+              elevation: 8,
+            }}
+          >
+            <MaterialCommunityIcons
+              name="alert-circle"
+              size={44}
+              color="#dc3545"
+              style={{ marginBottom: 10 }}
+            />
+            <Text
+              style={{
+                fontSize: 20,
+                fontWeight: 'bold',
+                color: '#222',
+                marginBottom: 10,
+              }}
+            >
+              Delete Folder
+            </Text>
+            <Text
+              style={{
+                fontSize: 16,
+                color: '#444',
+                textAlign: 'center',
+                marginBottom: 24,
+              }}
+            >
+              Are you sure you want to delete the folder
+              <Text style={{ fontWeight: 'bold', color: '#dc3545' }}>
+                {' '}
+                "{folderToDelete?.title || 'Unknown'}"
+              </Text>
+              ?{'\n'}This action cannot be undone.
+            </Text>
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'center',
+                alignItems: 'center',
+                width: '100%',
+                gap: 12,
+              }}
+            >
+              <TouchableOpacity
+                style={{
+                  paddingVertical: 10,
+                  paddingHorizontal: 24,
+                  borderRadius: 8,
+                  borderWidth: 1,
+                  borderColor: '#bbb',
+                  backgroundColor: '#fff',
+                  marginRight: 0,
+                }}
+                onPress={hideDeleteModal}
+              >
+                <Text
+                  style={{ color: '#444', fontWeight: 'bold', fontSize: 16 }}
+                >
+                  Cancel
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{
+                  paddingVertical: 10,
+                  paddingHorizontal: 24,
+                  borderRadius: 8,
+                  backgroundColor: '#dc3545',
+                }}
+                onPress={confirmDeleteFolder}
+              >
+                <Text
+                  style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}
+                >
+                  Delete
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -851,22 +1602,7 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     paddingBottom: 24,
   },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#f6fafc',
-  },
-  logo: {
-    width: 80,
-    height: 80,
-    marginBottom: 16,
-  },
-  loadingText: {
-    fontSize: 16,
-    color: '#4f8cff',
-    fontWeight: '600',
-  },
+
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -898,6 +1634,7 @@ const styles = StyleSheet.create({
     padding: 8,
   },
   profileCard: {
+    marginTop: 10,
     marginHorizontal: 16,
     borderRadius: 16,
     padding: 16,
@@ -934,6 +1671,13 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#fff',
     opacity: 0.9,
+  },
+  welcomeMessage: {
+    fontSize: 12,
+    color: '#fff',
+    opacity: 0.8,
+    fontStyle: 'italic',
+    marginTop: 4,
   },
   profileButton: {
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
@@ -1145,19 +1889,7 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     marginLeft: 8,
   },
-  logoutButton: {
-    backgroundColor: '#f0f0f0',
-    borderRadius: 8,
-    padding: 12,
-    alignItems: 'center',
-    marginHorizontal: 16,
-    marginBottom: 16,
-  },
-  logoutText: {
-    fontSize: 14,
-    color: '#222',
-    fontWeight: '500',
-  },
+
   card: {
     backgroundColor: '#fff',
     borderRadius: 12,
@@ -1204,6 +1936,60 @@ const styles = StyleSheet.create({
     marginTop: 18,
     marginBottom: 8,
     paddingHorizontal: 8,
+  },
+  emptyTransactionsContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingVertical: 40,
+    paddingHorizontal: 20,
+  },
+  emptyTransactionsTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#666',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  emptyTransactionsSubtitle: {
+    fontSize: 14,
+    color: '#999',
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  errorContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+    backgroundColor: '#f6fafc',
+  },
+  errorIcon: {
+    marginBottom: 15,
+  },
+  errorTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#dc3545',
+    marginBottom: 10,
+  },
+  errorMessage: {
+    fontSize: 16,
+    color: '#666',
+    textAlign: 'center',
+    marginBottom: 25,
+    lineHeight: 22,
+  },
+  retryButton: {
+    backgroundColor: '#4f8cff',
+    paddingVertical: 12,
+    paddingHorizontal: 30,
+    borderRadius: 8,
+  },
+  retryButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
   },
 });
 

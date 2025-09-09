@@ -12,8 +12,20 @@ import Ionicons from 'react-native-vector-icons/Ionicons';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
-import { verifyOtpApi, registerUser } from '../../api';
+import { verifyOtpApi, registerUser, BASE_URL } from '../../api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import messaging from '@react-native-firebase/messaging';
+import ProperSystemNotificationService from '../../services/properSystemNotificationService';
+import notifee, { AndroidImportance } from '@notifee/react-native';
+import {
+  showAccountCreatedNotification,
+  showTestNotification,
+} from '../../utils/notificationHelper';
+// import {
+//   testSimpleNotification,
+//   testNotificationWithChannel,
+//   testNotificationPermissions,
+// } from '../../utils/simpleNotificationTest';
 
 // Use any for now, or import the correct AuthStackParamList if available
 const OtpVerificationScreen = () => {
@@ -25,6 +37,7 @@ const OtpVerificationScreen = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showOtp, setShowOtp] = useState(true);
+
   const inputRefs = useRef<Array<TextInput | null>>([]);
 
   useEffect(() => {
@@ -47,11 +60,34 @@ const OtpVerificationScreen = () => {
       const newOtp = [...otp];
       newOtp[idx] = value;
       setOtp(newOtp);
+
+      // Move to next input if digit entered
       if (value && idx < 5) {
-        inputRefs.current[idx + 1]?.focus();
+        setTimeout(() => {
+          inputRefs.current[idx + 1]?.focus();
+        }, 50);
       }
-      if (!value && idx > 0) {
-        inputRefs.current[idx - 1]?.focus();
+    }
+  };
+
+  const handleOtpKeyPress = (e: any, idx: number) => {
+    // Handle backspace
+    if (e.nativeEvent.key === 'Backspace') {
+      if (otp[idx] === '') {
+        // If current field is empty, go to previous field and clear it
+        if (idx > 0) {
+          const newOtp = [...otp];
+          newOtp[idx - 1] = '';
+          setOtp(newOtp);
+          setTimeout(() => {
+            inputRefs.current[idx - 1]?.focus();
+          }, 50);
+        }
+      } else {
+        // If current field has value, clear it
+        const newOtp = [...otp];
+        newOtp[idx] = '';
+        setOtp(newOtp);
       }
     }
   };
@@ -66,19 +102,72 @@ const OtpVerificationScreen = () => {
   const handleVerify = async () => {
     setLoading(true);
     setError(null);
+
     try {
       const verifyResponse = await verifyOtpApi({
         mobileNumber: phone,
         otp: otp.join(''),
       });
+
       if (verifyResponse?.code === 200) {
         try {
           await AsyncStorage.setItem('userMobileNumber', phone);
         } catch (storageError) {}
+        // Try to register user (but don't block the flow if it fails)
+        let registrationSuccess = false;
         try {
           await registerUser(registrationData);
-        } catch (registerError) {}
-        navigation.navigate('SetupWizard');
+          registrationSuccess = true;
+        } catch (registerError) {
+          // Registration failed, but continue with the flow
+          console.log('Note: User registration API unavailable, continuing...');
+          registrationSuccess = false;
+        }
+
+        // Show success notification after OTP verification
+        try {
+          await showAccountCreatedNotification();
+        } catch (notificationError) {
+          // Fallback to basic notification if custom one fails
+          try {
+            await notifee.displayNotification({
+              title: 'Account Created Successfully! 🎉',
+              body: 'Welcome to the app!',
+            });
+          } catch (fallbackError) {
+            // Silent fail - notification is not critical
+          }
+        }
+
+        // Register FCM token if registration was successful
+        if (registrationSuccess) {
+          try {
+            const fcmToken = await messaging().getToken();
+            if (fcmToken) {
+              const accessToken = await AsyncStorage.getItem('accessToken');
+              if (accessToken) {
+                await fetch(`${BASE_URL}/notifications/register-token`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${accessToken}`,
+                  },
+                  body: JSON.stringify({
+                    token: fcmToken,
+                    deviceType: Platform.OS,
+                  }),
+                });
+              }
+            }
+          } catch (fcmError) {
+            console.error('Failed to register FCM token:', fcmError);
+          }
+        }
+
+        // Small delay to let notification show before navigating
+        setTimeout(() => {
+          navigation.navigate('SetupWizard');
+        }, 1500);
       } else {
         setError(verifyResponse?.message || 'Invalid OTP');
       }
@@ -103,15 +192,21 @@ const OtpVerificationScreen = () => {
         </TouchableOpacity>
       </View>
       <View style={styles.content}>
-        <Ionicons
-          name="chatbox-ellipses-outline"
-          size={44}
-          color="#4f8cff"
-          style={{ marginBottom: 8 }}
-        />
+        <View style={styles.iconContainer}>
+          <LinearGradient
+            colors={['#4f8cff', '#1ecb81']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={styles.iconGradient}
+          >
+            <Ionicons name="chatbox-ellipses-outline" size={32} color="#fff" />
+          </LinearGradient>
+        </View>
+
         <Text style={styles.title}>Enter verification code</Text>
         <Text style={styles.subtitle}>
-          A 6-digit verification code has been sent on {maskedPhone}
+          A 6-digit verification code has been sent on{' '}
+          <Text style={styles.phoneHighlight}>{maskedPhone}</Text>
         </Text>
         <View style={styles.otpRow}>
           {otp.map((digit, idx) => (
@@ -123,27 +218,61 @@ const OtpVerificationScreen = () => {
               style={[styles.otpInput, digit ? styles.otpInputFilled : null]}
               value={digit}
               onChangeText={val => handleOtpChange(val, idx)}
+              onKeyPress={e => handleOtpKeyPress(e, idx)}
               keyboardType="number-pad"
               maxLength={1}
               autoFocus={idx === 0}
               returnKeyType="next"
+              selectTextOnFocus={true}
+              selectionColor="#4f8cff"
             />
           ))}
         </View>
-        <Text style={styles.timerText}>
-          <Ionicons name="time-outline" size={18} color="#222" />{' '}
-          {timer > 0 ? `0:${timer.toString().padStart(2, '0')}` : '0:00'}
-        </Text>
+        <View style={styles.timerContainer}>
+          <Ionicons
+            name="time-outline"
+            size={20}
+            color={timer > 0 ? '#666' : '#999'}
+          />
+          <Text style={[styles.timerText, timer === 0 && styles.timerExpired]}>
+            {timer > 0 ? `0:${timer.toString().padStart(2, '0')}` : '0:00'}
+          </Text>
+        </View>
+
         {timer === 0 && (
-          <TouchableOpacity onPress={handleResend}>
+          <TouchableOpacity
+            style={styles.resendButton}
+            onPress={handleResend}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="refresh-outline" size={18} color="#4f8cff" />
             <Text style={styles.resendText}>Resend OTP</Text>
           </TouchableOpacity>
         )}
+
         {showOtp && backendOtp && (
-          <Text style={styles.backendOtp}>[Backend OTP: {backendOtp}]</Text>
+          <View style={styles.debugContainer}>
+            <Text style={styles.debugText}>[Backend OTP: {backendOtp}]</Text>
+          </View>
         )}
-        {error && <Text style={styles.errorText}>{error}</Text>}
-        {loading && <Text style={styles.loadingText}>Verifying...</Text>}
+
+        {error && (
+          <View style={styles.errorContainer}>
+            <Ionicons name="alert-circle-outline" size={20} color="#dc3545" />
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        )}
+
+        {loading && (
+          <View style={styles.loadingContainer}>
+            <Ionicons
+              name="checkmark-circle-outline"
+              size={20}
+              color="#4f8cff"
+            />
+            <Text style={styles.loadingText}>Verifying...</Text>
+          </View>
+        )}
       </View>
     </SafeAreaView>
   );
@@ -195,43 +324,150 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     marginHorizontal: 6,
     fontSize: 22,
-    color: '#222',
+    color: '#000',
     textAlign: 'center',
     backgroundColor: '#f8fafc',
+    fontWeight: '600',
   },
   otpInputFilled: {
     borderColor: '#4f8cff',
     backgroundColor: '#f0f6ff',
+    shadowColor: '#4f8cff',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  iconContainer: {
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  iconGradient: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#4f8cff',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  phoneHighlight: {
+    color: '#4f8cff',
+    fontWeight: '600',
+  },
+  timerContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    backgroundColor: '#f8f9fa',
+    borderRadius: 25,
+    borderWidth: 1,
+    borderColor: '#e9ecef',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 4,
+    elevation: 2,
   },
   timerText: {
     fontSize: 16,
-    color: '#222',
-    marginBottom: 8,
-    textAlign: 'center',
+    color: '#333',
+    marginLeft: 8,
+    fontWeight: '600',
+  },
+  timerExpired: {
+    color: '#999',
+  },
+  resendButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#4f8cff',
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 28,
+    marginBottom: 20,
+    shadowColor: '#4f8cff',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
   },
   resendText: {
-    color: '#4f8cff',
-    fontWeight: 'bold',
-    textDecorationLine: 'underline',
-    fontSize: 15,
-    marginBottom: 8,
+    color: '#fff',
+    fontWeight: '600',
+    fontSize: 16,
+    marginLeft: 8,
+  },
+  debugContainer: {
+    backgroundColor: '#fff3cd',
+    borderWidth: 1,
+    borderColor: '#ffeaa7',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 16,
+  },
+  debugText: {
+    color: '#856404',
+    fontWeight: '500',
+    fontSize: 13,
     textAlign: 'center',
   },
-  backendOtp: {
-    color: 'red',
-    fontWeight: 'bold',
-    marginTop: 8,
-    textAlign: 'center',
+  errorContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    backgroundColor: '#fef2f2',
+    borderWidth: 1,
+    borderColor: '#fecaca',
+    borderRadius: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    marginBottom: 20,
+    shadowColor: '#dc3545',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
+    elevation: 3,
   },
   errorText: {
-    color: 'red',
-    marginTop: 8,
-    textAlign: 'center',
+    color: '#dc2626',
+    fontWeight: '500',
+    fontSize: 14,
+    marginLeft: 12,
+    textAlign: 'left',
+    flex: 1,
+    lineHeight: 20,
+  },
+  loadingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f0f9ff',
+    borderWidth: 1,
+    borderColor: '#bae6fd',
+    borderRadius: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    marginBottom: 20,
+    shadowColor: '#4f8cff',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 6,
+    elevation: 3,
   },
   loadingText: {
-    color: '#4f8cff',
-    marginTop: 8,
-    textAlign: 'center',
+    color: '#0369a1',
+    fontWeight: '500',
+    fontSize: 14,
+    marginLeft: 12,
   },
 });
 

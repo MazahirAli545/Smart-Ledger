@@ -1,368 +1,351 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   TextInput,
-  TouchableOpacity,
-  Text,
-  FlatList,
-  ActivityIndicator,
   StyleSheet,
-  Keyboard,
-  Platform,
-  Dimensions,
-  Modal,
-  findNodeHandle,
-  UIManager,
+  Text,
+  TouchableOpacity,
+  ScrollView,
 } from 'react-native';
-import Ionicons from 'react-native-vector-icons/Ionicons';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useCustomerContext } from '../context/CustomerContext';
 import type { Customer } from '../api/customers';
 
 interface CustomerSelectorProps {
   value: string;
-  onChange: (customerName: string, customerObj?: Customer) => void;
+  onChange: (name: string, customer?: Customer) => void;
   placeholder?: string;
-  style?: any;
-  /**
-   * Pass the parent KeyboardAwareScrollView ref to ensure dropdown is visible above keyboard.
-   */
-  scrollRef?: React.RefObject<any>;
+  onCustomerSelect?: (customer: Customer) => void;
 }
 
 const CustomerSelector: React.FC<CustomerSelectorProps> = ({
   value,
   onChange,
   placeholder = 'Type or search customer',
-  style,
-  scrollRef,
+  onCustomerSelect,
 }) => {
-  const { customers, loading, fetchAll, add, update, remove } =
-    useCustomerContext();
-  const [input, setInput] = useState(value);
+  const { customers, fetchAll } = useCustomerContext();
+  const [isFocus, setIsFocus] = useState(false);
+  const [inputValue, setInputValue] = useState(value);
   const [showDropdown, setShowDropdown] = useState(false);
-  const [searching, setSearching] = useState(false);
-  const [localError, setLocalError] = useState<string | null>(null);
-  const [inputRowHeight, setInputRowHeight] = useState(0);
-  const inputRef = useRef<View>(null);
-  // Keyboard height state
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
-  const [inputLayout, setInputLayout] = useState({
-    x: 0,
-    y: 0,
-    width: 0,
-    height: 0,
-  });
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [editValue, setEditValue] = useState('');
-  const [deletingId, setDeletingId] = useState<number | null>(null);
-  const [isFocused, setIsFocused] = useState(false);
+  const [isScrolling, setIsScrolling] = useState(false);
 
   useEffect(() => {
-    setInput(value);
+    fetchAll();
+  }, [fetchAll]);
+
+  useEffect(() => {
+    setInputValue(value);
   }, [value]);
 
-  useEffect(() => {
-    if (showDropdown && input.length > 0) {
-      setSearching(true);
-      fetchAll(input).finally(() => setSearching(false));
-    }
-  }, [input, showDropdown]);
+  const handleCustomerSelect = (customer: Customer) => {
+    console.log('🔍 CustomerSelector: Customer selected:', customer);
+    console.log('🔍 CustomerSelector: partyName:', customer.partyName);
+    console.log('🔍 CustomerSelector: phoneNumber:', customer.phoneNumber);
+    console.log('🔍 CustomerSelector: address:', customer.address);
 
+    // Call the optional callback first to populate fields
+    if (onCustomerSelect) {
+      console.log('🔍 CustomerSelector: Calling onCustomerSelect callback');
+      onCustomerSelect(customer);
+    } else {
+      console.log('🔍 CustomerSelector: No onCustomerSelect callback provided');
+    }
+
+    // Then update the input value
+    onChange(customer.partyName || '', customer);
+    setInputValue(customer.partyName || '');
+    setShowDropdown(false);
+    setIsFocus(false);
+  };
+
+  const closeDropdown = () => {
+    // Don't close dropdown if user is actively scrolling
+    if (isScrolling) {
+      return;
+    }
+
+    // Add a small delay to allow user interaction
+    setTimeout(() => {
+      if (!isScrolling) {
+        setShowDropdown(false);
+        setIsFocus(false);
+      }
+    }, 100);
+  };
+
+  // Safe cleanup to prevent memory leaks and errors
   useEffect(() => {
-    const showSub = Keyboard.addListener(
-      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
-      e => setKeyboardHeight(e.endCoordinates.height),
-    );
-    const hideSub = Keyboard.addListener(
-      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
-      () => setKeyboardHeight(0),
-    );
     return () => {
-      showSub.remove();
-      hideSub.remove();
+      // Cleanup on unmount
+      setShowDropdown(false);
+      setIsFocus(false);
+      setIsScrolling(false);
     };
   }, []);
 
-  const filtered = customers.filter(c =>
-    c.name.toLowerCase().includes(input.toLowerCase()),
-  );
+  const handleInputChange = (text: string) => {
+    console.log('🔍 CustomerSelector: Input changed to:', text);
+    setInputValue(text);
+    onChange(text); // Always update parent with current text
 
-  const handleSelect = (customer: Customer) => {
-    setInput(customer.name);
-    setShowDropdown(false);
-    onChange(customer.name, customer);
-  };
-
-  const handleDelete = async (id: number) => {
-    setDeletingId(id);
-    await remove(id);
-    setDeletingId(null);
-    await fetchAll(''); // Refresh the full list after delete
-  };
-
-  // Handle update on blur or enter
-  const handleUpdate = async (customer: Customer) => {
-    if (editValue.trim() && editValue.trim() !== customer.name) {
-      await update(customer.id, { name: editValue.trim() });
-      setEditingId(null);
-      setEditValue('');
-      await fetchAll(''); // Refresh the full list after update
-    } else {
-      setEditingId(null);
-      setEditValue('');
+    // Always show dropdown when typing, filter customers based on input
+    if (customers.length > 0) {
+      setShowDropdown(true);
     }
   };
 
-  // When dropdown is opened, always fetch the full list
-  const showDropdownInline = () => {
-    setShowDropdown(true);
-    fetchAll(''); // Always fetch full list on open
-    // Scroll input into view above keyboard
-    if (scrollRef && scrollRef.current && inputRef.current) {
-      // extraOffset: inputRowHeight + 16 for dropdown
-      scrollRef.current.scrollToFocusedInput(
-        inputRef.current,
-        inputRowHeight + 16,
+  const handleInputFocus = () => {
+    setIsFocus(true);
+
+    // Always show dropdown when focused if there are customers
+    if (customers.length > 0) {
+      setShowDropdown(true);
+      console.log(
+        '✅ CustomerSelector: Focused, showing dropdown with',
+        customers.length,
+        'customers',
       );
-    }
-    // Measure input position for dropdown placement (fallback to measureInWindow)
-    if (inputRef.current) {
-      const handle = findNodeHandle(inputRef.current);
-      if (handle) {
-        UIManager.measureInWindow(handle, (x, y, width, height) => {
-          setInputLayout({ x, y, width: width || 240, height });
-        });
-      }
+    } else {
+      console.log('❌ CustomerSelector: No customers available on focus');
     }
   };
+
+  const handleInputBlur = () => {
+    // Don't immediately hide dropdown - let user interact with it
+    // The dropdown will be hidden when a customer is selected or when clicking outside
+    // We'll handle closing through the closeDropdown function
+  };
+
+  // Clean customer data to remove any "Phone" prefix from partyName
+  const cleanCustomerData = (customer: Customer) => {
+    if (customer.partyName) {
+      // Remove "Phone" prefix and any leading/trailing whitespace
+      let cleanName = customer.partyName;
+
+      // Remove "Phone " prefix (with space)
+      if (cleanName.startsWith('Phone ')) {
+        cleanName = cleanName.replace(/^Phone\s+/, '');
+      }
+
+      // Remove "Phone" prefix (without space)
+      if (cleanName.startsWith('Phone')) {
+        cleanName = cleanName.replace(/^Phone/, '');
+      }
+
+      // Clean up any remaining whitespace
+      cleanName = cleanName.trim();
+
+      console.log('🧹 Cleaning customer data:', {
+        original: customer.partyName,
+        cleaned: cleanName,
+      });
+
+      return {
+        ...customer,
+        partyName: cleanName || customer.partyName, // Fallback to original if cleaning results in empty string
+      };
+    }
+    return customer;
+  };
+
+  // Filter customers based on input
+  const filteredCustomers = inputValue.trim()
+    ? customers.filter(customer =>
+        customer.partyName?.toLowerCase().includes(inputValue.toLowerCase()),
+      )
+    : customers;
 
   return (
-    <View style={[styles.wrapper, style]}>
-      <View
-        ref={inputRef}
-        style={styles.inputRow}
-        onLayout={e => setInputRowHeight(e.nativeEvent.layout.height)}
-      >
-        <Ionicons
-          name="person"
-          size={20}
-          color="#000"
-          style={{ marginRight: 10 }}
-        />
-        <TextInput
-          style={styles.input}
-          value={input}
-          onChangeText={text => {
-            setInput(text);
-            onChange(text);
-          }}
-          placeholder={placeholder}
-          autoCorrect={false}
-          autoCapitalize="words"
-          onFocus={() => {
-            setIsFocused(true);
-            showDropdownInline();
-          }}
-          onBlur={() => setIsFocused(false)}
-        />
-        {searching && (
-          <ActivityIndicator
-            size="small"
-            color="#4f8cff"
-            style={{ marginLeft: 8 }}
+    <View style={styles.container}>
+      {/* TextInput for typing customer names */}
+      <TextInput
+        style={[styles.textInput, isFocus && styles.textInputFocused]}
+        value={inputValue}
+        onChangeText={handleInputChange}
+        onFocus={handleInputFocus}
+        onBlur={handleInputBlur}
+        placeholder={placeholder}
+        placeholderTextColor="#8a94a6"
+      />
+
+      {/* Dropdown for existing customers - only show when there are matches */}
+      {(() => {
+        console.log('🔍 CustomerSelector: Dropdown visibility check:', {
+          showDropdown,
+          filteredCustomersLength: filteredCustomers.length,
+          totalCustomers: customers.length,
+          inputValue: inputValue.trim(),
+        });
+        return null;
+      })()}
+      {showDropdown && filteredCustomers.length > 0 && (
+        <>
+          {/* Background overlay to ensure dropdown appears above everything */}
+          <TouchableOpacity
+            style={styles.dropdownOverlay}
+            activeOpacity={1}
+            onPress={closeDropdown}
           />
-        )}
-      </View>
-      <Modal
-        visible={showDropdown && inputLayout.width > 0}
-        transparent
-        animationType="none"
-        onRequestClose={() => setShowDropdown(false)}
-      >
-        <TouchableOpacity
-          style={styles.modalOverlay}
-          activeOpacity={1}
-          onPress={() => setShowDropdown(false)}
-        >
-          <View
-            style={[
-              styles.dropdown,
-              {
-                position: 'absolute',
-                top: inputLayout.y + inputLayout.height,
-                left: inputLayout.x,
-                width: inputLayout.width,
-                marginTop: 0, // ensure flush
-                maxHeight: Math.max(
-                  100,
-                  Dimensions.get('window').height -
-                    (inputLayout.y + inputLayout.height) -
-                    keyboardHeight -
-                    16,
-                ),
-                shadowColor: '#000',
-                shadowOpacity: 0.12,
-                shadowRadius: 8,
-                shadowOffset: { width: 0, height: 4 },
-                elevation: 8,
-                borderRadius: 10,
-                borderWidth: 1,
-                borderColor: '#e0e0e0',
-                zIndex: 9999,
-              },
-            ]}
-          >
-            <FlatList
-              data={filtered}
-              keyExtractor={item => item.id.toString()}
-              renderItem={({ item }) => (
-                <View style={styles.dropdownItemRow}>
-                  {editingId === item.id ? (
-                    <TextInput
-                      style={[
-                        styles.dropdownItemText,
-                        {
-                          flex: 1,
-                          borderBottomWidth: 1,
-                          borderColor: '#e0e0e0',
-                        },
-                      ]}
-                      value={editValue}
-                      autoFocus
-                      onChangeText={setEditValue}
-                      onBlur={() => handleUpdate(item)}
-                      onSubmitEditing={() => handleUpdate(item)}
-                      returnKeyType="done"
-                    />
-                  ) : (
-                    <TouchableOpacity
-                      style={[styles.dropdownItem, { flex: 1 }]}
-                      onPress={() => handleSelect(item)}
-                      onLongPress={() => {
-                        setEditingId(item.id);
-                        setEditValue(item.name);
-                      }}
-                    >
-                      <Text style={styles.dropdownItemText}>{item.name}</Text>
-                      {input.toLowerCase() === item.name.toLowerCase() && (
-                        <Ionicons name="checkmark" size={18} color="#4f8cff" />
-                      )}
-                    </TouchableOpacity>
-                  )}
-                  <TouchableOpacity
-                    style={styles.deleteIcon}
-                    onPress={() => handleDelete(item.id)}
-                    disabled={deletingId === item.id}
-                  >
-                    {deletingId === item.id ? (
-                      <ActivityIndicator size="small" color="#dc3545" />
-                    ) : (
-                      <MaterialCommunityIcons
-                        name="close"
-                        size={20}
-                        color="#dc3545"
-                      />
-                    )}
-                  </TouchableOpacity>
-                </View>
-              )}
-              style={{
-                maxHeight: Math.max(
-                  100,
-                  Dimensions.get('window').height -
-                    (inputLayout.y + inputLayout.height) -
-                    keyboardHeight -
-                    16,
-                ),
-              }}
-              ListFooterComponent={null}
+          <View style={styles.dropdownContainer}>
+            <ScrollView
+              style={styles.dropdownScrollView}
+              nestedScrollEnabled={false}
               showsVerticalScrollIndicator={true}
-            />
-            {filtered.length === 0 &&
-              !(
-                input.trim() &&
-                !customers.some(
-                  c =>
-                    c.name.trim().toLowerCase() === input.trim().toLowerCase(),
-                )
-              ) && (
-                <Text
-                  style={{ color: '#888', padding: 12, textAlign: 'center' }}
-                >
-                  No customers found
-                </Text>
-              )}
-            {localError && (
-              <Text style={{ color: 'red', padding: 8 }}>{localError}</Text>
-            )}
+              keyboardShouldPersistTaps="handled"
+              scrollEventThrottle={16}
+              bounces={false}
+              alwaysBounceVertical={false}
+              contentContainerStyle={styles.dropdownScrollContent}
+              onScrollBeginDrag={() => setIsScrolling(true)}
+              onScrollEndDrag={() => setIsScrolling(false)}
+              onMomentumScrollBegin={() => setIsScrolling(true)}
+              onMomentumScrollEnd={() => setIsScrolling(false)}
+            >
+              {filteredCustomers.map((customer, index) => {
+                const cleanCustomer = cleanCustomerData(customer);
+                return (
+                  <TouchableOpacity
+                    key={customer.id}
+                    style={[
+                      styles.dropdownItem,
+                      index === filteredCustomers.length - 1 &&
+                        styles.dropdownItemLast,
+                    ]}
+                    onPress={() => handleCustomerSelect(cleanCustomer)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.dropdownItemContent}>
+                      <MaterialCommunityIcons
+                        name="account"
+                        size={20}
+                        color="#4f8cff"
+                        style={styles.dropdownIcon}
+                      />
+                      <Text style={styles.dropdownItemText} numberOfLines={1}>
+                        {cleanCustomer.partyName || 'No Name'}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
           </View>
-        </TouchableOpacity>
-      </Modal>
+        </>
+      )}
+
+      {/* Show indicator for new customer */}
+      {/* {inputValue && !customers.find(c => c.partyName === inputValue) && (
+        <View style={styles.newCustomerIndicator}>
+          <MaterialCommunityIcons
+            name="account-plus"
+            size={16}
+            color="#4f8cff"
+          />
+          <Text style={styles.newCustomerText}>New customer: {inputValue}</Text>
+        </View>
+      )} */}
     </View>
   );
 };
 
 const styles = StyleSheet.create({
-  wrapper: {
+  container: {
     position: 'relative',
-    width: '100%',
+    zIndex: 1000,
   },
-  inputRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  textInput: {
+    height: 52,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+    backgroundColor: '#f9f9f9',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 16,
+    color: '#222',
+  },
+  textInputFocused: {
+    borderColor: '#4f8cff',
+    backgroundColor: '#f0f6ff',
+  },
+  dropdownOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: -1000,
+    right: -1000,
+    bottom: -1000,
+    backgroundColor: 'transparent',
+    zIndex: 999,
+  },
+  dropdownContainer: {
+    position: 'absolute',
+    top: '100%',
+    left: 0,
+    right: 0,
     backgroundColor: '#fff',
     borderRadius: 8,
     borderWidth: 1,
     borderColor: '#e0e0e0',
-    paddingHorizontal: 10,
-    // Remove shadow and elevation for a clean, attached look
-  },
-  input: {
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 4,
+    },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+    elevation: 10,
+    zIndex: 1001,
+    marginTop: 4,
+    maxHeight: 200,
+    overflow: 'hidden',
+    // Ensure proper nested scrolling
     flex: 1,
-    height: 44,
-    fontSize: 16,
-    color: '#222',
-    backgroundColor: 'transparent',
   },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'transparent',
+  dropdownScrollView: {
+    maxHeight: 200,
   },
-  dropdown: {
-    backgroundColor: '#fff',
-    borderRadius: 0, // Remove rounding for seamless attachment
-    borderWidth: 1,
-    borderColor: '#e0e0e0',
-    zIndex: 10,
-    // Remove shadow and elevation for a clean, attached look
-    maxHeight: 180,
-    borderTopWidth: 0, // Attach to input
+  dropdownScrollContent: {
+    flexGrow: 1,
   },
   dropdownItem: {
-    padding: 14,
-    flexDirection: 'row',
-    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
     borderBottomWidth: 1,
     borderBottomColor: '#f0f0f0',
+    backgroundColor: '#fff',
+  },
+  dropdownItemLast: {
+    borderBottomWidth: 0,
+  },
+  dropdownItemContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  dropdownIcon: {
+    marginRight: 12,
   },
   dropdownItemText: {
-    color: '#222',
     fontSize: 16,
+    color: '#222',
+    fontWeight: '500',
     flex: 1,
   },
-  dropdownItemRow: {
+  newCustomerIndicator: {
     flexDirection: 'row',
     alignItems: 'center',
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
-    paddingRight: 4,
-  },
-  deleteIcon: {
+    marginTop: 8,
     padding: 8,
+    backgroundColor: '#f0f6ff',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#4f8cff',
+  },
+  newCustomerText: {
+    fontSize: 12,
+    color: '#4f8cff',
+    fontStyle: 'italic',
     marginLeft: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
 });
 

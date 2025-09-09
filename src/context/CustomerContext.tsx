@@ -44,6 +44,8 @@ export const CustomerProvider = ({ children }: { children: ReactNode }) => {
     setError(null);
     try {
       const data = await fetchCustomers(query);
+      console.log('🔍 CustomerContext: Fetched customers:', data);
+      console.log('🔍 CustomerContext: First customer sample:', data[0]);
       setCustomers(data);
     } catch (e: any) {
       setError(e.message || 'Failed to fetch customers');

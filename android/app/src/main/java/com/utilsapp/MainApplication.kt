@@ -9,7 +9,6 @@ import com.facebook.react.ReactNativeHost
 import com.facebook.react.ReactPackage
 import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 import com.facebook.react.defaults.DefaultReactNativeHost
-import com.oblador.vectoricons.VectorIconsPackage
 
 class MainApplication : Application(), ReactApplication {
 
@@ -19,7 +18,7 @@ class MainApplication : Application(), ReactApplication {
             PackageList(this).packages.apply {
               // Packages that cannot be autolinked yet can be added manually here, for example:
               // add(MyReactNativePackage())
-              add(VectorIconsPackage())
+              // VectorIconsPackage is auto-linked, so we don't need to add it manually
             }
 
         override fun getJSMainModuleName(): String = "index"

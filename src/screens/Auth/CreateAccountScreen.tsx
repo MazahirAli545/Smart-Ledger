@@ -1,4 +1,4 @@
-import React, { useState, useRef, MutableRefObject } from 'react';
+import React, { useState, useRef, MutableRefObject, useEffect } from 'react';
 import {
   View,
   Text,
@@ -14,7 +14,7 @@ import {
 import { Dropdown } from 'react-native-element-dropdown';
 import CheckBox from '@react-native-community/checkbox';
 import LinearGradient from 'react-native-linear-gradient';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useRoute } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import {
   registerUser,
@@ -29,6 +29,11 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import CountryPicker from 'react-native-country-picker-modal';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
+import TestCredentialsPanel from '../../components/TestCredentialsPanel';
+import {
+  getTestCredentials,
+  TestCredentials,
+} from '../../config/testCredentials';
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
 
@@ -43,6 +48,7 @@ const businessTypes = [
 
 const CreateAccountScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<any>>();
+  const route = useRoute();
   const { setData } = useOnboarding();
   const [businessName, setBusinessName] = useState('');
   const [ownerName, setOwnerName] = useState('');
@@ -62,6 +68,7 @@ const CreateAccountScreen: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showMobileExistsModal, setShowMobileExistsModal] = useState(false);
+  const [showTestCredentials, setShowTestCredentials] = useState(false);
 
   const onSelectCountry = (selectedCountry: any) => {
     setCountryCode(selectedCountry.cca2);
@@ -80,6 +87,25 @@ const CreateAccountScreen: React.FC = () => {
       .map(char => 127397 + char.charCodeAt(0));
     return String.fromCodePoint(...codePoints);
   };
+
+  // Handle pre-filled mobile number from SignInScreen
+  useEffect(() => {
+    const params = route.params as any;
+    if (params?.prefillMobile) {
+      setMobileNumber(params.prefillMobile);
+      if (params.prefillCallingCode) {
+        setCallingCode(params.prefillCallingCode);
+      }
+      if (params.prefillCountryCode) {
+        setCountryCode(params.prefillCountryCode);
+        setCountry({
+          cca2: params.prefillCountryCode,
+          callingCode: [params.prefillCallingCode || '91'],
+          flag: getFlagEmoji(params.prefillCountryCode),
+        });
+      }
+    }
+  }, [route.params]);
 
   // const handleDropdownFocus = () => {
   //   setActiveField('businessType');
@@ -139,6 +165,18 @@ const CreateAccountScreen: React.FC = () => {
   const canSendOtp =
     businessName && ownerName && mobileNumber && businessType && agree;
 
+  // Handle test credentials selection
+  const handleTestCredentialsSelect = (credentials: TestCredentials) => {
+    setBusinessName(credentials.businessName);
+    setOwnerName(credentials.ownerName);
+    setMobileNumber(credentials.mobileNumber);
+    setBusinessType(credentials.businessType);
+    if (credentials.gstNumber) {
+      setGstNumber(credentials.gstNumber);
+    }
+    setError(null);
+  };
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <KeyboardAwareScrollView
@@ -163,9 +201,11 @@ const CreateAccountScreen: React.FC = () => {
           </TouchableOpacity>
         </View>
         {/* Title and Subtitle */}
-        <Text style={styles.title}>Create Your Account</Text>
+        <Text style={styles.title}>Complete Your Account</Text>
         <Text style={styles.subtitle}>
-          Start your journey to smarter accounting
+          {mobileNumber
+            ? `Setting up account for ${mobileNumber}`
+            : 'Start your journey to smarter accounting'}
         </Text>
         {/* Card Container */}
         <View style={styles.card}>
@@ -366,6 +406,19 @@ const CreateAccountScreen: React.FC = () => {
               </Text>
             </TouchableOpacity>
           </LinearGradient>
+
+          {/* Test Credentials Button - Development Only */}
+          {__DEV__ && (
+            <TouchableOpacity
+              style={styles.testCredentialsButton}
+              onPress={() => setShowTestCredentials(true)}
+            >
+              <Text style={styles.testCredentialsButtonText}>
+                🧪 Use Test Credentials
+              </Text>
+            </TouchableOpacity>
+          )}
+
           {/* Footer */}
           <View style={styles.footerRow}>
             <Text style={styles.footerText}>Already have an account? </Text>
@@ -374,6 +427,15 @@ const CreateAccountScreen: React.FC = () => {
             </TouchableOpacity>
           </View>
         </View>
+
+        {/* Test Credentials Panel */}
+        <TestCredentialsPanel
+          visible={showTestCredentials}
+          onClose={() => setShowTestCredentials(false)}
+          onSelectCredentials={handleTestCredentialsSelect}
+          mode="registration"
+        />
+
         {/* Mobile Exists Modal */}
         <Modal
           visible={showMobileExistsModal}
@@ -800,6 +862,27 @@ const styles = StyleSheet.create({
     color: '#222',
     paddingVertical: 0,
     marginTop: Platform.OS === 'android' ? -2 : 0,
+  },
+  testCredentialsButton: {
+    backgroundColor: '#f8f9fa',
+    borderWidth: 2,
+    borderColor: '#4f8cff',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    marginTop: 12,
+    marginBottom: 8,
+    alignItems: 'center',
+    shadowColor: '#4f8cff',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  testCredentialsButtonText: {
+    color: '#4f8cff',
+    fontSize: 14,
+    fontWeight: '600',
   },
 });
 
