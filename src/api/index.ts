@@ -6,12 +6,10 @@ import {
   checkNetworkStatus,
   isRealDevice,
 } from '../config/network';
+import { getBaseUrl as getEnvBaseUrl } from '../config/env';
 
-// Development vs Production URLs - Updated to be dynamic
-export const BASE_URL =
-  __DEV__ && !isRealDevice()
-    ? 'http://192.168.57.107:5000' // Only for emulator/development machine
-    : 'https://utility-apis-49wa.onrender.com'; // Production/real device URL
+// Development vs Production URLs - Updated to use environment variables
+export const BASE_URL = getEnvBaseUrl();
 
 // Log the BASE_URL being used for debugging
 console.log('🌐 API Configuration:', {

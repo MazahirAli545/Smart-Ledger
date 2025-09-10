@@ -1,17 +1,29 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { useTransactionLimit } from '../context/TransactionLimitContext';
+import { useAlert } from '../context/AlertContext';
 
 const TransactionLimitTestPanel: React.FC = () => {
   const { forceTriggerNotification, getServiceStatus } = useTransactionLimit();
+  const { showAlert } = useAlert();
   const [status, setStatus] = useState<any>(null);
 
   const handleTestPopup = async () => {
     try {
       await forceTriggerNotification();
-      Alert.alert('Test', 'Transaction limit popup triggered');
+      showAlert({
+        title: 'Test',
+        message: 'Transaction limit popup triggered',
+        type: 'success',
+        confirmText: 'OK',
+      });
     } catch (error) {
-      Alert.alert('Error', 'Failed to trigger popup');
+      showAlert({
+        title: 'Error',
+        message: 'Failed to trigger popup',
+        type: 'error',
+        confirmText: 'OK',
+      });
     }
   };
 
@@ -19,18 +31,25 @@ const TransactionLimitTestPanel: React.FC = () => {
     try {
       const serviceStatus = await getServiceStatus();
       setStatus(serviceStatus);
-      Alert.alert(
-        'Service Status',
-        `Active: ${serviceStatus.serviceActive}\nPopup Shown: ${
+      showAlert({
+        title: 'Service Status',
+        message: `Active: ${serviceStatus.serviceActive}\nPopup Shown: ${
           serviceStatus.popupShown
         }\nLast Notification: ${
           serviceStatus.lastNotificationTime
             ? new Date(serviceStatus.lastNotificationTime).toLocaleString()
             : 'Never'
         }\nHours Since: ${serviceStatus.hoursSinceLastNotification || 'N/A'}`,
-      );
+        type: 'info',
+        confirmText: 'OK',
+      });
     } catch (error) {
-      Alert.alert('Error', 'Failed to get service status');
+      showAlert({
+        title: 'Error',
+        message: 'Failed to get service status',
+        type: 'error',
+        confirmText: 'OK',
+      });
     }
   };
 

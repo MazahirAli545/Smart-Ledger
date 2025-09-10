@@ -26,6 +26,7 @@ import { useSubscription } from '../../context/SubscriptionContext';
 import { AppStackParamList } from '../../types/navigation';
 import LoadingScreen from '../../components/LoadingScreen';
 import { showFolderCreatedNotification } from '../../utils/notificationHelper';
+import { useAlert } from '../../context/AlertContext';
 
 // Global cache for AddFolderScreen
 let globalFolderCache: any[] = [];
@@ -66,6 +67,7 @@ const FOLDER_TYPES = [
 const AddFolderScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<AppStackParamList>>();
   const { currentSubscription, getPlanAccess } = useSubscription();
+  const { showAlert } = useAlert();
   const [folderName, setFolderName] = useState('');
   const [selectedType, setSelectedType] = useState<string>('');
   const [saving, setSaving] = useState(false);
@@ -382,17 +384,14 @@ const AddFolderScreen: React.FC = () => {
       selectedFolderType &&
       !isPlanAccessible(userPlan, selectedFolderType.planRequired)
     ) {
-      Alert.alert(
-        'Plan Restriction',
-        `This folder type requires ${selectedFolderType.planRequired} plan or above.`,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Upgrade Plan',
-            onPress: () => navigation.navigate('SubscriptionPlan'),
-          },
-        ],
-      );
+      showAlert({
+        title: 'Plan Restriction',
+        message: `This folder type requires ${selectedFolderType.planRequired} plan or above.`,
+        type: 'confirm',
+        confirmText: 'Upgrade Plan',
+        cancelText: 'Cancel',
+        onConfirm: () => navigation.navigate('SubscriptionPlan'),
+      });
       return;
     }
     setSelectedType(type);

@@ -14,6 +14,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../../api';
+import { useAlert } from '../../context/AlertContext';
 
 const FOLDER_TYPE_ICONS: Record<string, string> = {
   purchase: 'cart-outline',
@@ -72,6 +73,7 @@ const getFolderIcon = (icon: string | undefined, title?: string) => {
 const AllQuickActionsScreen = () => {
   const navigation = useNavigation();
   const route = useRoute();
+  const { showAlert } = useAlert();
   const actions = (route.params as any)?.actions || [];
 
   const [deleteModalVisible, setDeleteModalVisible] = React.useState(false);
@@ -98,7 +100,12 @@ const AllQuickActionsScreen = () => {
       });
       navigation.goBack(); // After delete, go back to Dashboard (which will refresh)
     } catch (err) {
-      Alert.alert('Error', 'Failed to delete folder.');
+      showAlert({
+        title: 'Error',
+        message: 'Failed to delete folder.',
+        type: 'error',
+        confirmText: 'OK',
+      });
     }
   };
 
@@ -147,10 +154,12 @@ const AllQuickActionsScreen = () => {
 
     // If still no match, show an alert
     if (!targetScreen) {
-      Alert.alert(
-        'Navigation Error',
-        `Screen for "${action.title}" is not available. This might be a test action or an action that needs to be configured.`,
-      );
+      showAlert({
+        title: 'Navigation Error',
+        message: `Screen for "${action.title}" is not available. This might be a test action or an action that needs to be configured.`,
+        type: 'warning',
+        confirmText: 'OK',
+      });
       return;
     }
 
@@ -164,7 +173,12 @@ const AllQuickActionsScreen = () => {
       }
     } catch (error) {
       console.log(`Navigation error: ${error}`);
-      Alert.alert('Error', `Unable to navigate to ${action.title}`);
+      showAlert({
+        title: 'Error',
+        message: `Unable to navigate to ${action.title}`,
+        type: 'error',
+        confirmText: 'OK',
+      });
     }
   };
 

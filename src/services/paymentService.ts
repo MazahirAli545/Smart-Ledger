@@ -7,12 +7,10 @@ import PaymentApiService, {
   ApiResponse,
 } from '../api/payments';
 import { getBaseUrl } from '../config/network';
+import { getRazorpayConfig } from '../config/env';
 
-// Razorpay configuration
-const RAZORPAY_CONFIG = {
-  key: 'rzp_test_R7rnkgNnXtBN0W', // Updated to match backend
-  secret: 'bdCjXy50Ld7XQ2RGZJeg8CGy', // Updated to match backend
-};
+// Razorpay configuration - now using environment variables
+const RAZORPAY_CONFIG = getRazorpayConfig();
 
 // Debug mode - set to true to get detailed logging
 const DEBUG_MODE = true;

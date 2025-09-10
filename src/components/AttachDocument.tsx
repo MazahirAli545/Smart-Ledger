@@ -19,6 +19,7 @@ import {
   isErrorWithCode,
   errorCodes,
 } from '@react-native-documents/picker';
+import { useAlert } from '../context/AlertContext';
 
 interface AttachedDocument {
   name: string;
@@ -42,6 +43,7 @@ const AttachDocument: React.FC<AttachDocumentProps> = ({
   label = 'Attach Document (Optional)',
   required = false,
 }) => {
+  const { showAlert } = useAlert();
   const [showDocumentModal, setShowDocumentModal] = useState(false);
 
   const requestCameraPermission = async (): Promise<boolean> => {
@@ -112,14 +114,15 @@ const AttachDocument: React.FC<AttachDocumentProps> = ({
     try {
       const granted = await requestCameraPermission();
       if (!granted) {
-        Alert.alert(
-          'Permission Required',
-          'Camera permission is needed to take photos. Please grant camera permission in your device settings.',
-          [
-            { text: 'Cancel', style: 'cancel' },
-            { text: 'Open Settings', onPress: () => openAppSettings() },
-          ],
-        );
+        showAlert({
+          title: 'Permission Required',
+          message:
+            'Camera permission is needed to take photos. Please grant camera permission in your device settings.',
+          type: 'confirm',
+          confirmText: 'Open Settings',
+          cancelText: 'Cancel',
+          onConfirm: () => openAppSettings(),
+        });
         return;
       }
 
@@ -143,7 +146,12 @@ const AttachDocument: React.FC<AttachDocumentProps> = ({
     } catch (error: any) {
       console.error('Camera error:', error);
       if (error.code !== 'E_PICKER_CANCELLED') {
-        Alert.alert('Error', 'Failed to capture photo. Please try again.');
+        showAlert({
+          title: 'Error',
+          message: 'Failed to capture photo. Please try again.',
+          type: 'error',
+          confirmText: 'OK',
+        });
       }
     }
   };
@@ -159,27 +167,35 @@ const AttachDocument: React.FC<AttachDocumentProps> = ({
       if (permissionStatus === PermissionsAndroid.RESULTS.GRANTED) {
         await launchImageLibraryAndSetDocument();
       } else if (permissionStatus === PermissionsAndroid.RESULTS.DENIED) {
-        Alert.alert(
-          'Permission Denied',
-          'Storage permission is needed to access your gallery. Please grant it in your app settings to proceed.',
-          [{ text: 'OK', onPress: () => Linking.openSettings() }],
-        );
+        showAlert({
+          title: 'Permission Denied',
+          message:
+            'Storage permission is needed to access your gallery. Please grant it in your app settings to proceed.',
+          type: 'error',
+          confirmText: 'OK',
+          onConfirm: () => Linking.openSettings(),
+        });
       } else if (
         permissionStatus === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN
       ) {
-        Alert.alert(
-          'Permission Denied',
-          'You have previously denied storage permission with "Don\'t ask again". Please go to your app settings to grant it manually.',
-          [{ text: 'OK', onPress: () => Linking.openSettings() }],
-        );
+        showAlert({
+          title: 'Permission Denied',
+          message:
+            'You have previously denied storage permission with "Don\'t ask again". Please go to your app settings to grant it manually.',
+          type: 'error',
+          confirmText: 'OK',
+          onConfirm: () => Linking.openSettings(),
+        });
       }
     } catch (error: any) {
       console.error('Gallery error:', error);
       if (error.code !== 'E_PICKER_CANCELLED') {
-        Alert.alert(
-          'Error',
-          'Failed to pick image from gallery. Please try again.',
-        );
+        showAlert({
+          title: 'Error',
+          message: 'Failed to pick image from gallery. Please try again.',
+          type: 'error',
+          confirmText: 'OK',
+        });
       }
     }
   };
@@ -231,7 +247,12 @@ const AttachDocument: React.FC<AttachDocumentProps> = ({
       ) {
         return;
       }
-      Alert.alert('Error', 'Failed to pick PDF document. Please try again.');
+      showAlert({
+        title: 'Error',
+        message: 'Failed to pick PDF document. Please try again.',
+        type: 'error',
+        confirmText: 'OK',
+      });
     }
   };
 

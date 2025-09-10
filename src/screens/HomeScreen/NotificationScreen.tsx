@@ -14,6 +14,7 @@ import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityI
 import LinearGradient from 'react-native-linear-gradient';
 import { useNotifications } from '../../context/NotificationContext';
 import NotificationSettings from '../../components/NotificationSettings';
+import { useAlert } from '../../context/AlertContext';
 
 interface NotificationItem {
   id: string;
@@ -28,6 +29,7 @@ const NotificationScreen: React.FC = () => {
   const navigation = useNavigation();
   const { pendingNotifications, clearPendingNotifications } =
     useNotifications();
+  const { showAlert } = useAlert();
   const [refreshing, setRefreshing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
@@ -38,20 +40,16 @@ const NotificationScreen: React.FC = () => {
   };
 
   const handleClearAll = () => {
-    Alert.alert(
-      'Clear All Notifications',
-      'Are you sure you want to clear all notifications?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Clear All',
-          style: 'destructive',
-          onPress: async () => {
-            await clearPendingNotifications();
-          },
-        },
-      ],
-    );
+    showAlert({
+      title: 'Clear All Notifications',
+      message: 'Are you sure you want to clear all notifications?',
+      type: 'confirm',
+      confirmText: 'Clear All',
+      cancelText: 'Cancel',
+      onConfirm: async () => {
+        await clearPendingNotifications();
+      },
+    });
   };
 
   const handleNotificationPress = (notification: any) => {

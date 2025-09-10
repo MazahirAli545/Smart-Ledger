@@ -26,6 +26,7 @@ import { AppStackParamList } from '../../types/navigation';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import axios from 'axios';
 import { getUserIdFromToken } from '../../utils/storage';
+import { useAlert } from '../../context/AlertContext';
 
 const { width } = Dimensions.get('window');
 
@@ -52,6 +53,7 @@ interface SummaryCard {
 
 const DailyLedgerScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<AppStackParamList>>();
+  const { showAlert } = useAlert();
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [filteredTransactions, setFilteredTransactions] = useState<
     Transaction[]
@@ -178,7 +180,12 @@ const DailyLedgerScreen: React.FC = () => {
       setTransactions(mockTransactions);
     } catch (error) {
       console.error('Error fetching transactions:', error);
-      Alert.alert('Error', 'Failed to load transactions');
+      showAlert({
+        title: 'Error',
+        message: 'Failed to load transactions',
+        type: 'error',
+        confirmText: 'OK',
+      });
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -275,15 +282,30 @@ const DailyLedgerScreen: React.FC = () => {
   };
 
   const handleTransactionPress = (transaction: Transaction) => {
-    Alert.alert('Transaction', `View details for: ${transaction.title}`);
+    showAlert({
+      title: 'Transaction',
+      message: `View details for: ${transaction.title}`,
+      type: 'info',
+      confirmText: 'OK',
+    });
   };
 
   const handleAddEntry = () => {
-    Alert.alert('Add Entry', 'Navigate to add entry form');
+    showAlert({
+      title: 'Add Entry',
+      message: 'Navigate to add entry form',
+      type: 'info',
+      confirmText: 'OK',
+    });
   };
 
   const handleExport = () => {
-    Alert.alert('Export', 'Export transactions to PDF/Excel');
+    showAlert({
+      title: 'Export',
+      message: 'Export transactions to PDF/Excel',
+      type: 'info',
+      confirmText: 'OK',
+    });
   };
 
   const renderSummaryCard = (card: SummaryCard) => (

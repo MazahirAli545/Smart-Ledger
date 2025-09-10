@@ -28,11 +28,10 @@ import {
 import { useTransactionLimit } from '../context/TransactionLimitContext';
 import { useAlert } from '../context/AlertContext';
 
-// Razorpay Configuration
-const RAZORPAY_CONFIG = {
-  key: 'rzp_test_R7rnkgNnXtBN0W', // Your test key
-  secret: 'bdCjXy50Ld7XQ2RGZJeg8CGy', // Your test secret
-};
+// Razorpay Configuration - now using environment variables
+import { getRazorpayConfig } from '../config/env';
+
+const RAZORPAY_CONFIG = getRazorpayConfig();
 
 /**
  * SubscriptionPlanScreen - Updated with Direct Razorpay Integration
@@ -1265,15 +1264,15 @@ const SubscriptionPlanScreen: React.FC = () => {
       }
 
       setPaymentError(errorMessage);
-      Alert.alert('Payment Error', errorMessage, [
-        { text: 'OK' },
-        {
-          text: 'Contact Support',
-          onPress: () => {
-            console.log('User chose to contact support');
-          },
+      showAlert({
+        title: 'Payment Error',
+        message: errorMessage,
+        type: 'error',
+        confirmText: 'OK',
+        onConfirm: () => {
+          console.log('User acknowledged payment error');
         },
-      ]);
+      });
     }
   };
   // ... existing code ...
@@ -1301,11 +1300,12 @@ const SubscriptionPlanScreen: React.FC = () => {
       if (!RAZORPAY_CONFIG.key || !RAZORPAY_CONFIG.secret) {
         console.error('❌ Razorpay configuration missing:', RAZORPAY_CONFIG);
         setPaymentError('Payment configuration error. Please contact support.');
-        Alert.alert(
-          'Configuration Error',
-          'Payment configuration error. Please contact support.',
-          [{ text: 'OK' }],
-        );
+        showAlert({
+          title: 'Configuration Error',
+          message: 'Payment configuration error. Please contact support.',
+          type: 'error',
+          confirmText: 'OK',
+        });
         return;
       }
 
@@ -1313,11 +1313,12 @@ const SubscriptionPlanScreen: React.FC = () => {
       if (!plan.id || isNaN(parseInt(plan.id.toString()))) {
         console.error('❌ Invalid plan data:', plan);
         setPaymentError('Invalid plan data. Plan ID must be a valid number.');
-        Alert.alert(
-          'Error',
-          'Invalid plan data. Plan ID must be a valid number.',
-          [{ text: 'OK' }],
-        );
+        showAlert({
+          title: 'Error',
+          message: 'Invalid plan data. Plan ID must be a valid number.',
+          type: 'error',
+          confirmText: 'OK',
+        });
         return;
       }
 
@@ -1325,18 +1326,24 @@ const SubscriptionPlanScreen: React.FC = () => {
       const token = await AsyncStorage.getItem('accessToken');
       if (!token) {
         setPaymentError('Please log in to upgrade your plan');
-        Alert.alert('Error', 'Please log in to upgrade your plan', [
-          { text: 'OK' },
-        ]);
+        showAlert({
+          title: 'Error',
+          message: 'Please log in to upgrade your plan',
+          type: 'error',
+          confirmText: 'OK',
+        });
         return;
       }
 
       const userId = await getUserIdFromToken();
       if (!userId || userId <= 0) {
         setPaymentError('Invalid user ID. Please log in again.');
-        Alert.alert('Error', 'Invalid user ID. Please log in again.', [
-          { text: 'OK' },
-        ]);
+        showAlert({
+          title: 'Error',
+          message: 'Invalid user ID. Please log in again.',
+          type: 'error',
+          confirmText: 'OK',
+        });
         return;
       }
 
@@ -1363,11 +1370,21 @@ const SubscriptionPlanScreen: React.FC = () => {
             fetchSubscriptionData();
           } else {
             setPaymentError('Failed to upgrade plan');
-            Alert.alert('Error', 'Failed to upgrade plan');
+            showAlert({
+              title: 'Error',
+              message: 'Failed to upgrade plan',
+              type: 'error',
+              confirmText: 'OK',
+            });
           }
         } catch (error) {
           setPaymentError('Failed to upgrade plan');
-          Alert.alert('Error', 'Failed to upgrade plan');
+          showAlert({
+            title: 'Error',
+            message: 'Failed to upgrade plan',
+            type: 'error',
+            confirmText: 'OK',
+          });
         }
         return;
       }
@@ -1496,21 +1513,25 @@ const SubscriptionPlanScreen: React.FC = () => {
         }
 
         setPaymentError(errorMessage);
-        Alert.alert('Payment Error', errorMessage, [
-          { text: 'OK' },
-          {
-            text: 'Try Again',
-            onPress: () => {
-              console.log('🔄 User chose to retry payment');
-              upgradePlan(plan);
-            },
+        showAlert({
+          title: 'Payment Error',
+          message: errorMessage,
+          type: 'error',
+          confirmText: 'OK',
+          onConfirm: () => {
+            console.log('User acknowledged payment error');
           },
-        ]);
+        });
       }
     } catch (error) {
       console.error('Plan upgrade error:', error);
       setPaymentError('Failed to upgrade plan. Please try again.');
-      Alert.alert('Error', 'Failed to upgrade plan. Please try again.');
+      showAlert({
+        title: 'Error',
+        message: 'Failed to upgrade plan. Please try again.',
+        type: 'error',
+        confirmText: 'OK',
+      });
 
       // 🎯 FIXED: Restart transaction limit monitoring if payment fails
       console.log(
@@ -1556,57 +1577,70 @@ const SubscriptionPlanScreen: React.FC = () => {
         fetchSubscriptionData();
       } else {
         setPaymentError('Failed to downgrade plan');
-        Alert.alert('Error', 'Failed to downgrade plan');
+        showAlert({
+          title: 'Error',
+          message: 'Failed to downgrade plan',
+          type: 'error',
+          confirmText: 'OK',
+        });
       }
     } catch (error) {
       setPaymentError('Failed to downgrade plan');
-      Alert.alert('Error', 'Failed to downgrade plan');
+      showAlert({
+        title: 'Error',
+        message: 'Failed to downgrade plan',
+        type: 'error',
+        confirmText: 'OK',
+      });
     } finally {
       setPlanActionLoading(null);
     }
   };
 
   const handleCancelSubscription = () => {
-    Alert.alert(
-      'Cancel Subscription',
-      'Are you sure you want to cancel your subscription? This action cannot be undone.',
-      [
-        { text: 'Keep Subscription', style: 'cancel' },
-        {
-          text: 'Cancel Subscription',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              const success = await cancelSubscription();
-              if (success) {
-                setSuccessMessage(
-                  'Your subscription has been cancelled successfully.',
-                );
-                setShowSuccessModal(true);
-                fetchSubscriptionData();
-              } else {
-                Alert.alert(
-                  'Error',
-                  'Failed to cancel subscription. Please try again.',
-                );
-              }
-            } catch (error) {
-              Alert.alert(
-                'Error',
-                'Failed to cancel subscription. Please try again.',
-              );
-            }
-          },
-        },
-      ],
-    );
+    showAlert({
+      title: 'Cancel Subscription',
+      message:
+        'Are you sure you want to cancel your subscription? This action cannot be undone.',
+      type: 'confirm',
+      confirmText: 'Cancel Subscription',
+      cancelText: 'Keep Subscription',
+      onConfirm: async () => {
+        try {
+          const success = await cancelSubscription();
+          if (success) {
+            setSuccessMessage(
+              'Your subscription has been cancelled successfully.',
+            );
+            setShowSuccessModal(true);
+            fetchSubscriptionData();
+          } else {
+            showAlert({
+              title: 'Error',
+              message: 'Failed to cancel subscription. Please try again.',
+              type: 'error',
+              confirmText: 'OK',
+            });
+          }
+        } catch (error) {
+          showAlert({
+            title: 'Error',
+            message: 'Failed to cancel subscription. Please try again.',
+            type: 'error',
+            confirmText: 'OK',
+          });
+        }
+      },
+    });
   };
 
   const contactSales = () => {
-    Alert.alert(
-      'Contact Sales',
-      'Please contact our sales team for assistance.',
-    );
+    showAlert({
+      title: 'Contact Sales',
+      message: 'Please contact our sales team for assistance.',
+      type: 'info',
+      confirmText: 'OK',
+    });
   };
 
   const getPlanIcon = (planName: string) => {

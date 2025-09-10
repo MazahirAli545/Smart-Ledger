@@ -27,6 +27,7 @@ import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityI
 import { PieChart, BarChart } from 'react-native-chart-kit';
 import { AppStackParamList } from '../../types/navigation';
 import { useAuth } from '../../context/AuthContext';
+import { useAlert } from '../../context/AlertContext';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import axios from 'axios';
 import { getUserIdFromToken } from '../../utils/storage';
@@ -214,6 +215,7 @@ const Dashboard: React.FC = () => {
   const { isAuthenticated, logout } = useAuth();
   const { vouchers, setAllVouchers } = useVouchers();
   const { notificationService } = useNotifications();
+  const { showAlert } = useAlert();
 
   const [userData, setUserData] = useState<UserData | null>(
     globalDashboardCache.userData,
@@ -633,22 +635,20 @@ const Dashboard: React.FC = () => {
     .slice(0, 10);
 
   const handleLogout = async () => {
-    Alert.alert('Logout', 'Are you sure you want to logout?', [
-      {
-        text: 'Cancel',
-        style: 'cancel',
+    showAlert({
+      title: 'Logout',
+      message: 'Are you sure you want to logout?',
+      type: 'confirm',
+      confirmText: 'Logout',
+      cancelText: 'Cancel',
+      onConfirm: async () => {
+        try {
+          await logout(); // Only use context logout
+        } catch (error) {
+          console.error('Logout error:', error);
+        }
       },
-      {
-        text: 'Logout',
-        onPress: async () => {
-          try {
-            await logout(); // Only use context logout
-          } catch (error) {
-            console.error('Logout error:', error);
-          }
-        },
-      },
-    ]);
+    });
   };
 
   const onRefresh = async () => {
@@ -696,10 +696,12 @@ const Dashboard: React.FC = () => {
     try {
       const token = await AsyncStorage.getItem('accessToken');
       if (!token) {
-        Alert.alert(
-          'Error',
-          'Authentication token not found. Please login again.',
-        );
+        showAlert({
+          title: 'Error',
+          message: 'Authentication token not found. Please login again.',
+          type: 'error',
+          confirmText: 'OK',
+        });
         return;
       }
 
@@ -731,7 +733,12 @@ const Dashboard: React.FC = () => {
         errorMessage = `Delete failed: ${err.message}`;
       }
 
-      Alert.alert('Error', errorMessage);
+      showAlert({
+        title: 'Error',
+        message: errorMessage,
+        type: 'error',
+        confirmText: 'OK',
+      });
     }
   };
 
@@ -747,7 +754,12 @@ const Dashboard: React.FC = () => {
 
   const confirmDeleteFolder = async () => {
     if (!folderToDelete || !folderToDelete.id) {
-      Alert.alert('Error', 'Invalid folder selected for deletion.');
+      showAlert({
+        title: 'Error',
+        message: 'Invalid folder selected for deletion.',
+        type: 'error',
+        confirmText: 'OK',
+      });
       hideDeleteModal();
       return;
     }

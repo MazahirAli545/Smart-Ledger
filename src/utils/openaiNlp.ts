@@ -1,5 +1,7 @@
 // src/utils/openaiNlp.ts
 
+import { envConfig } from '../config/env';
+
 /**
  * Sends a transcript to OpenAI GPT for sell document data extraction.
  * Returns parsed JSON with keys: invoiceNumber, invoiceDate, customer, gstPct, items (array of {description, quantity, rate, amount}).
@@ -11,7 +13,7 @@ export async function extractInvoiceDataWithNLP(
   transcript: string,
 ): Promise<any> {
   // Check if we have a valid API key configured
-  const apiKey = process.env.OPENAI_API_KEY || 'YOUR_OPENAI_API_KEY';
+  const apiKey = envConfig.OPENAI_API_KEY;
 
   if (!apiKey || apiKey === 'YOUR_OPENAI_API_KEY') {
     throw new Error(
@@ -118,6 +120,6 @@ Text: """${transcript}"""
  * Check if NLP extraction is available (has valid API key)
  */
 export function isNLPAvailable(): boolean {
-  const apiKey = process.env.OPENAI_API_KEY || 'YOUR_OPENAI_API_KEY';
+  const apiKey = envConfig.OPENAI_API_KEY;
   return Boolean(apiKey && apiKey !== 'YOUR_OPENAI_API_KEY');
 }
