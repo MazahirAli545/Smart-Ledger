@@ -6,12 +6,15 @@ import {
   ScrollView,
   TouchableOpacity,
   TextInput,
-  StatusBar,
   Dimensions,
   ActivityIndicator,
   Modal,
   Animated,
   RefreshControl,
+  StatusBar,
+  Alert,
+  Platform,
+  DeviceEventEmitter,
 } from 'react-native';
 import {
   useNavigation,
@@ -25,11 +28,21 @@ import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityI
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { AppStackParamList } from '../../types/navigation';
 import { useAuth } from '../../context/AuthContext';
+import { useNotifications } from '../../context/NotificationContext';
+import { useSubscription } from '../../context/SubscriptionContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
+import { unifiedApi } from '../../api/unifiedApiService';
 import { BASE_URL } from '../../api';
 import { getUserIdFromToken } from '../../utils/storage';
 import { useScreenTracking } from '../../hooks/useScreenTracking';
+import { profileUpdateManager } from '../../utils/profileUpdateManager';
+import { useStatusBarWithGradient } from '../../hooks/useStatusBar';
+import { getStatusBarHeight } from 'react-native-status-bar-height';
+import {
+  HEADER_CONTENT_HEIGHT,
+  getSolidHeaderStyle,
+} from '../../utils/headerLayout';
 import { Dropdown } from 'react-native-element-dropdown';
 import {
   businessTypes,
@@ -37,6 +50,8 @@ import {
   industries,
   transactionVolumes,
 } from '../../utils/dropdownOptions';
+import TopTabs from '../../components/TopTabs';
+import PartyList, { PartyItem } from '../../components/PartyList';
 
 const { width } = Dimensions.get('window');
 
@@ -53,6 +68,11 @@ let globalCustomerCache: any = {
   lastNavigationTime: 0, // Track when user navigated away
 };
 let globalCustomerCacheChecked = false;
+
+// 🎯 FIXED: Rate limiting protection to prevent 429 errors
+let isFetchingCustomers = false;
+let lastFetchTime = 0;
+const MIN_FETCH_INTERVAL = 2000; // Minimum 2 seconds between API calls
 
 // Cache TTL: 30 seconds (30,000 ms) - reduced for more responsive updates
 const CACHE_TTL = 30 * 1000;
@@ -71,6 +91,21 @@ export const clearCustomerCache = () => {
     lastNavigationTime: 0,
   };
   globalCustomerCacheChecked = false;
+};
+
+export const clearVoucherCache = () => {
+  console.log('🧹 Clearing voucher cache...');
+  globalCustomerCache.vouchers = [];
+  globalCustomerCache.lastUpdated = 0;
+  console.log('✅ Voucher cache cleared');
+};
+
+// Function to mark cache as stale so it will be refetched
+export const markCacheStale = () => {
+  console.log('⏰ Marking cache as stale...');
+  globalCustomerCache.lastUpdated = 0;
+  globalCustomerCache.isRefreshing = false;
+  console.log('✅ Cache marked as stale');
 };
 
 // Function to force refresh customer data
@@ -96,12 +131,24 @@ export const refreshCustomerData = async (
     if (!accessToken) return false;
 
     if (dataType === 'customers' || dataType === 'all') {
-      const customersResult = await fetch(`${BASE_URL}/customers`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }).then(res => res.json());
+      // Use unified API with caching
+      const customersResult = (await unifiedApi.getCustomers('', 1, 50)) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
 
       if (customersResult) {
-        globalCustomerCache.customers = customersResult;
+        // Backend returns a paginated shape { data, total, page, limit }
+        const resultData = customersResult?.data || customersResult || {};
+        const list = Array.isArray(resultData?.data)
+          ? resultData.data
+          : Array.isArray(resultData)
+          ? resultData
+          : Array.isArray(customersResult?.data)
+          ? customersResult.data
+          : [];
+        globalCustomerCache.customers = list;
         globalCustomerCache.lastUpdated = Date.now();
       }
     }
@@ -109,9 +156,12 @@ export const refreshCustomerData = async (
     if (dataType === 'userData' || dataType === 'all') {
       const userId = await getUserIdFromToken();
       if (userId) {
-        const userDataResult = await fetch(`${BASE_URL}/user/${userId}`, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        }).then(res => res.json());
+        // Use unified API with caching
+        const userDataResult = (await unifiedApi.getUserProfile()) as {
+          data: any;
+          status: number;
+          headers: Headers;
+        };
 
         if (userDataResult?.data) {
           globalCustomerCache.userData = userDataResult.data;
@@ -152,6 +202,28 @@ interface Customer {
   partyType?: string; // 'customer' or 'supplier'
 }
 
+// Utility: De-duplicate customers by stable identity
+// Key uses id when available, otherwise falls back to name + partyType
+const dedupeCustomers = (list: Customer[]): Customer[] => {
+  try {
+    const seen = new Set<string>();
+    const result: Customer[] = [];
+    for (const item of list) {
+      if (!item) continue;
+      const key = `${item.id || ''}|${(item as any).partyType || ''}|${
+        item.name || ''
+      }`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(item);
+    }
+    return result;
+  } catch (e) {
+    console.warn('Deduplication error:', e);
+    return Array.isArray(list) ? list : [];
+  }
+};
+
 // Enhanced FilterOptions interface
 interface FilterOptions {
   sortBy: 'name' | 'amount' | 'date' | 'location';
@@ -167,6 +239,16 @@ const CustomerScreen: React.FC = () => {
   // Screen tracking hook
   useScreenTracking();
 
+  // Configure StatusBar like ProfileScreen: translucent with spacer for colored header
+  const { statusBarSpacer } = useStatusBarWithGradient('Customer', [
+    '#4f8cff',
+    '#4f8cff',
+  ]);
+  const preciseStatusBarHeight = getStatusBarHeight(true);
+
+  // Notification service for FCM token management
+  const { notificationService } = useNotifications();
+
   // Error boundary state
   const [hasError, setHasError] = useState(false);
   const [errorDetails, setErrorDetails] = useState<string>('');
@@ -178,22 +260,51 @@ const CustomerScreen: React.FC = () => {
     setErrorDetails(error?.message || 'Unknown error occurred');
   };
 
-  // Set up global error handling
+  // Set up global error handling (limit to RN text-render errors; downgrade API errors)
   useEffect(() => {
     const originalConsoleError = console.error;
     console.error = (...args) => {
-      // Check if it's a React Native rendering error
-      if (
-        args[0] &&
-        typeof args[0] === 'string' &&
-        args[0].includes(
-          'Text strings must be rendered within a <Text> component',
-        )
-      ) {
-        handleError(new Error('Text rendering error detected'));
+      try {
+        const first = args[0];
+        // Only trigger error UI for the specific RN render error
+        if (
+          first &&
+          typeof first === 'string' &&
+          first.includes(
+            "Text strings must be rendered within a <Text style={{ fontFamily: 'Roboto-Medium',  }}> component",
+          )
+        ) {
+          handleError(new Error('Text rendering error detected'));
+          originalConsoleError.apply(console, args);
+          return;
+        }
+
+        // Downgrade common API/axios errors so LogBox doesn't point to this override
+        const looksLikeAxiosError =
+          (typeof first === 'string' &&
+            (first.includes('AxiosError') ||
+              first.includes('Request failed with status code') ||
+              first.includes('Network Error'))) ||
+          args.some(
+            a =>
+              a &&
+              typeof a === 'object' &&
+              (a as any)?.response &&
+              (a as any)?.response?.status,
+          );
+
+        if (looksLikeAxiosError) {
+          // Use log instead of error to avoid red LogBox overlay
+          console.log(...args);
+          return;
+        }
+
+        // Fallback to original behavior for other errors
+        originalConsoleError.apply(console, args);
+      } catch (e) {
+        // If anything goes wrong, avoid crashing the app
+        originalConsoleError.apply(console, args);
       }
-      // Call original console.error
-      originalConsoleError.apply(console, args);
     };
 
     return () => {
@@ -315,6 +426,7 @@ const CustomerScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<AppStackParamList>>();
   const route = useRoute<RouteProp<AppStackParamList, 'Customer'>>();
   const { isAuthenticated, logout } = useAuth();
+  const { currentSubscription, fetchSubscriptionData } = useSubscription();
 
   const [activeTab, setActiveTab] = useState<'customers' | 'suppliers'>(
     'customers',
@@ -322,11 +434,91 @@ const CustomerScreen: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [allVouchers, setAllVouchers] = useState<any[]>([]);
+  const [userRoles, setUserRoles] = useState<any[] | null>(null);
+  const [userPermissions, setUserPermissions] = useState<string[] | null>(null);
+  const [rbacBlocked, setRbacBlocked] = useState<boolean>(false);
 
   const [error, setError] = useState<string | null>(null);
-  const [businessName, setBusinessName] = useState<string>('Loading...');
+  const [businessName, setBusinessName] = useState<string>('');
   const [userData, setUserData] = useState<any>(null);
+  const [headerKey, setHeaderKey] = useState<number>(0);
   const [showFilterModal, setShowFilterModal] = useState(false);
+  const headerFetchAttemptedRef = useRef<boolean>(false);
+
+  // Minimal fallback fetch that bypasses axios interceptors
+  const forceFetchProfileForHeader = async () => {
+    try {
+      const token = await AsyncStorage.getItem('accessToken');
+      if (!token) return;
+      // Use unified API - try primary endpoint first
+      try {
+        const body = (await unifiedApi.getUserProfile()) as {
+          data: any;
+          status: number;
+          headers: Headers;
+        };
+        const p = body?.data ?? body ?? {};
+        const name =
+          p.businessName ||
+          p.business_name ||
+          p.companyName ||
+          p.company_name ||
+          (p.business && (p.business.name || p.business.title)) ||
+          (p.profile && p.profile.businessName) ||
+          '';
+        if (name && String(name).trim().length > 0) {
+          updateBusinessNameIfPresent(String(name));
+          // also persist a lightweight cache for next launch
+          try {
+            await AsyncStorage.setItem(
+              'cachedUserData',
+              JSON.stringify({ ...(p || {}), businessName: String(name) }),
+            );
+          } catch {}
+          return;
+        }
+      } catch {}
+    } catch {}
+  };
+
+  // Prevent overwriting a valid business name with an empty value during
+  // background refreshes, cache loads, or transient fetch failures.
+  const updateBusinessNameIfPresent = (maybeName?: string | null) => {
+    const trimmed = (maybeName ?? '').trim();
+    if (trimmed.length > 0) {
+      setBusinessName(trimmed);
+      setHeaderKey(prev => prev + 1);
+    }
+  };
+
+  // Resolve the header title: show "My Business" while loading/unavailable, else real name
+  const getHeaderDisplayName = (): string => {
+    try {
+      const fromUserData =
+        (userData &&
+          ((userData as any).businessName ||
+            (userData as any).business_name ||
+            (userData as any).companyName ||
+            (userData as any).company_name ||
+            ((userData as any).business &&
+              (((userData as any).business as any).name ||
+                ((userData as any).business as any).title)) ||
+            ((userData as any).profile &&
+              ((userData as any).profile as any).businessName))) ||
+        '';
+
+      const candidate = String(fromUserData || businessName || '').trim();
+
+      const isLoading =
+        globalCustomerCache.isInitializing ||
+        (globalCustomerCache.isRefreshing && candidate.length === 0) ||
+        (!userData && candidate.length === 0);
+
+      return isLoading ? 'My Business' : candidate || 'My Business';
+    } catch {
+      return 'My Business';
+    }
+  };
 
   // Custom Alert State
   const [customAlert, setCustomAlert] = useState<{
@@ -378,30 +570,31 @@ const CustomerScreen: React.FC = () => {
   const businessNameRef = useRef<TextInput>(null);
   const accountingSoftwareRef = useRef<TextInput>(null);
 
-  // CSRF token state
-  const [csrfToken, setCsrfToken] = useState<string | null>(null);
-
-  // Fetch CSRF token
+  // Optional CSRF support: try common endpoints; proceed without if unavailable
+  const [csrfToken] = useState<string | null>(null);
   const fetchCSRFToken = async (): Promise<string | null> => {
     try {
-      console.log('🔄 Fetching CSRF token...');
-      const response = await axios.get(`${BASE_URL}/api/csrf-token`, {
-        withCredentials: true, // Important for session cookies
-      });
-
-      if (response.data?.token) {
-        const token = response.data.token;
-        setCsrfToken(token);
-        console.log('✅ CSRF token fetched:', token.substring(0, 8) + '...');
-        return token;
-      } else {
-        console.error('❌ No CSRF token in response:', response.data);
-        return null;
+      const endpoints = ['/csrf-token', '/auth/csrf', '/user/csrf'];
+      for (const endpoint of endpoints) {
+        try {
+          const res = (await unifiedApi.get(endpoint, {
+            skipAuth: true, // CSRF token might not require auth
+          })) as { data: any; status: number; headers: Headers };
+          // unifiedApi returns { data, status, headers } structure
+          if (res.status < 200 || res.status >= 300) continue;
+          const headerTok = res.headers.get('x-csrf-token');
+          if (headerTok && String(headerTok).trim()) return headerTok;
+          const body = res.data || res;
+          const tok =
+            body?.csrfToken ||
+            body?._csrf ||
+            body?.token ||
+            body?.data?.csrfToken;
+          if (tok && String(tok).trim()) return String(tok);
+        } catch {}
       }
-    } catch (error: any) {
-      console.error('❌ Error fetching CSRF token:', error);
-      return null;
-    }
+    } catch {}
+    return null;
   };
 
   // Focus management functions
@@ -487,17 +680,19 @@ const CustomerScreen: React.FC = () => {
 
       console.log('🔄 Refreshing access token...');
 
-      const response = await axios.post(`${BASE_URL}/user/auth/refresh`, {
+      const response = (await unifiedApi.post('/user/auth/refresh', {
         refreshToken: refreshToken,
-      });
+      })) as { data: any; status: number; headers: Headers };
 
-      if (response.data?.success && response.data?.accessToken) {
-        const newAccessToken = response.data.accessToken;
+      // unifiedApi returns { data, status, headers } structure
+      const responseData = response.data || response;
+      if (responseData?.success && responseData?.accessToken) {
+        const newAccessToken = responseData.accessToken;
         await AsyncStorage.setItem('accessToken', newAccessToken);
         console.log('✅ Access token refreshed successfully');
         return newAccessToken;
       } else {
-        console.log('❌ Failed to refresh token:', response.data);
+        console.log('❌ Failed to refresh token:', responseData);
         return null;
       }
     } catch (error: any) {
@@ -584,20 +779,15 @@ const CustomerScreen: React.FC = () => {
         throw new Error('Failed to obtain CSRF token for test');
       }
 
-      const response = await axios.patch(
-        `${BASE_URL}/user/edit-profile`,
-        testBody,
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-            'X-CSRF-Token': testCsrfToken,
-          },
-          withCredentials: true,
+      const response = (await unifiedApi.patch('/user/edit-profile', testBody, {
+        headers: {
+          'X-CSRF-Token': testCsrfToken,
         },
-      );
+      })) as { data: any; status: number; headers: Headers };
 
-      console.log('✅ API test successful:', response.data);
+      // unifiedApi returns { data, status, headers } structure
+      const responseData = response.data || response;
+      console.log('✅ API test successful:', responseData);
       showCustomAlert('Success', 'API test successful!', 'success');
     } catch (error: any) {
       console.error('❌ API test failed:', error);
@@ -627,6 +817,122 @@ const CustomerScreen: React.FC = () => {
   useEffect(() => {
     fetchCSRFToken();
   }, []);
+
+  // Load roles on mount for RBAC-aware UI/requests
+  useEffect(() => {
+    (async () => {
+      try {
+        const rolesJson = await AsyncStorage.getItem('userRoles');
+        if (rolesJson) {
+          const roles = JSON.parse(rolesJson);
+          setUserRoles(roles);
+          console.log(
+            '🔐 CustomerScreen roles:',
+            Array.isArray(roles) ? roles.map((r: any) => r?.name || r) : roles,
+          );
+        }
+        const permsJson = await AsyncStorage.getItem('userPermissions');
+        if (permsJson) {
+          const perms = JSON.parse(permsJson);
+          setUserPermissions(perms);
+          console.log('🔐 CustomerScreen permissions:', perms);
+        }
+      } catch (e) {
+        console.warn('Failed to load userRoles:', e);
+      }
+    })();
+  }, []);
+
+  // FCM Token Refresh - Refresh token when screen is focused
+  useEffect(() => {
+    const refreshFCMToken = async () => {
+      try {
+        console.log('🔄 CustomerScreen: Refreshing FCM token...');
+
+        // First check if user is authenticated
+        const accessToken = await AsyncStorage.getItem('accessToken');
+        if (!accessToken) {
+          console.warn(
+            '⚠️ CustomerScreen: No access token available - user not authenticated',
+          );
+          return;
+        }
+
+        console.log(
+          '✅ CustomerScreen: User is authenticated, proceeding with FCM token refresh',
+        );
+
+        // Check if user has declined notification permission
+        const neverAsk = await AsyncStorage.getItem('notificationsNeverAsk');
+        if (neverAsk === 'true') {
+          console.log(
+            '⚠️ CustomerScreen: Notification permission declined - skipping all notification work',
+          );
+          return; // hard stop: do not init or refresh token
+        } else {
+          // Ensure notifications are initialized
+          if (!notificationService.isServiceInitialized()) {
+            console.log(
+              '🔧 CustomerScreen: Initializing notification service...',
+            );
+            const initResult =
+              await notificationService.initializeNotifications();
+            console.log(
+              '🔧 CustomerScreen: Notification service init result:',
+              initResult,
+            );
+          }
+        }
+
+        // Refresh FCM token (will not run if neverAsk is true above)
+        console.log('🔧 CustomerScreen: Calling refreshFCMToken...');
+        const token = await notificationService.refreshFCMToken();
+        console.log(
+          '🔧 CustomerScreen: Token received:',
+          token ? `${token.substring(0, 20)}...` : 'null',
+        );
+
+        if (token) {
+          console.log('✅ CustomerScreen: FCM token refreshed successfully');
+          console.log('🔧 CustomerScreen: Full token length:', token.length);
+
+          // Send token to backend using notification service
+          try {
+            console.log('🔧 CustomerScreen: Sending FCM token to backend...');
+            const success = await notificationService.sendTokenToBackend(token);
+            if (success) {
+              console.log(
+                '✅ CustomerScreen: FCM token sent to backend successfully',
+              );
+            } else {
+              console.warn(
+                '⚠️ CustomerScreen: Failed to send FCM token to backend',
+              );
+            }
+          } catch (error) {
+            console.error(
+              '❌ CustomerScreen: Error sending FCM token to backend:',
+              error,
+            );
+          }
+
+          // Check if token was sent to backend by checking the notification service
+          const currentToken = notificationService.getCurrentFCMToken();
+          console.log(
+            '🔧 CustomerScreen: Current cached token:',
+            currentToken ? `${currentToken.substring(0, 20)}...` : 'null',
+          );
+        } else {
+          console.warn('⚠️ CustomerScreen: No FCM token available');
+        }
+      } catch (error) {
+        console.warn('❌ CustomerScreen: Error refreshing FCM token:', error);
+        console.error('❌ CustomerScreen: Full error details:', error);
+      }
+    };
+
+    refreshFCMToken();
+  }, [notificationService]);
 
   // Custom Alert Helper Function
   const showCustomAlert = (
@@ -687,11 +993,10 @@ const CustomerScreen: React.FC = () => {
           await Promise.all([
             fetchUserData(accessToken),
             fetchCustomersData(accessToken),
-            fetch(`${BASE_URL}/vouchers`, {
-              headers: { Authorization: `Bearer ${accessToken}` },
-            })
-              .then(res => res.json())
-              .then(data => data?.data || [])
+            // Use unified API with caching
+            unifiedApi
+              .getTransactions({ limit: 50 })
+              .then((data: any) => (data?.data || data || []) as any[])
               .catch(err => {
                 console.warn('Vouchers fetch failed:', err);
                 return [];
@@ -712,11 +1017,13 @@ const CustomerScreen: React.FC = () => {
 
         // Update state
         setCustomers(customersResult);
+        console.log('🔍 DEBUG: Setting allVouchers:', {
+          vouchersResponseLength: vouchersResponse.length,
+          vouchersResponse: vouchersResponse.slice(0, 3), // Show first 3 vouchers
+        });
         setAllVouchers(vouchersResponse);
         setUserData(userDataResult);
-        setBusinessName(
-          userDataResult?.businessName || userDataResult?.ownerName || 'User',
-        );
+        updateBusinessNameIfPresent(userDataResult?.businessName);
 
         console.log('✅ CustomerScreen: Initial data fetch completed');
       } catch (error) {
@@ -759,11 +1066,7 @@ const CustomerScreen: React.FC = () => {
       setCustomers(globalCustomerCache.customers);
       setAllVouchers(globalCustomerCache.vouchers);
       setUserData(globalCustomerCache.userData);
-      setBusinessName(
-        globalCustomerCache.userData?.businessName ||
-          globalCustomerCache.userData?.ownerName ||
-          'User',
-      );
+      updateBusinessNameIfPresent(globalCustomerCache.userData?.businessName);
       globalCustomerCacheChecked = true;
 
       // Only refresh in background if not already refreshing
@@ -814,7 +1117,7 @@ const CustomerScreen: React.FC = () => {
         await Promise.all([
           fetchUserData(accessToken),
           fetchCustomersData(accessToken),
-          fetch(`${BASE_URL}/vouchers`, {
+          fetch(`${BASE_URL}/transactions`, {
             headers: { Authorization: `Bearer ${accessToken}` },
           })
             .then(res => res.json())
@@ -861,9 +1164,7 @@ const CustomerScreen: React.FC = () => {
       setCustomers(customersResult);
       setAllVouchers(vouchersResponse);
       setUserData(userDataResult);
-      setBusinessName(
-        userDataResult?.businessName || userDataResult?.ownerName || 'User',
-      );
+      updateBusinessNameIfPresent(userDataResult?.businessName);
 
       console.log('✅ CustomerScreen: fetchAllData completed');
     } catch (err: any) {
@@ -909,6 +1210,11 @@ const CustomerScreen: React.FC = () => {
     const unsubscribe = navigation.addListener('focus', () => {
       console.log('🎯 CustomerScreen: Focus event triggered');
 
+      // Always trigger a lightweight background refresh to keep data fresh
+      setTimeout(() => {
+        handleManualRefresh();
+      }, 50);
+
       // Check if user just returned from Add Customer screen (within last 30 seconds)
       const timeSinceNavigation =
         Date.now() - globalCustomerCache.lastNavigationTime;
@@ -949,6 +1255,27 @@ const CustomerScreen: React.FC = () => {
       } else {
         console.log('✅ Data is fresh, skipping focus refresh');
       }
+
+      // Always refresh user data when screen comes into focus (e.g., after profile update)
+      const refreshUserDataOnFocus = async () => {
+        try {
+          const accessToken = await AsyncStorage.getItem('accessToken');
+          if (accessToken) {
+            console.log('🔄 CustomerScreen: Refreshing user data on focus...');
+            await fetchUserData(accessToken);
+          }
+        } catch (error) {
+          console.warn(
+            '⚠️ CustomerScreen: Failed to refresh user data on focus:',
+            error,
+          );
+        }
+      };
+
+      // Refresh user data with a small delay to avoid conflicts
+      setTimeout(() => {
+        refreshUserDataOnFocus();
+      }, 200);
     });
 
     return unsubscribe;
@@ -975,6 +1302,175 @@ const CustomerScreen: React.FC = () => {
       setError(null);
     };
   }, []);
+
+  // Listen for profile update events
+  useEffect(() => {
+    const handleProfileUpdate = async () => {
+      try {
+        console.log(
+          '📢 CustomerScreen: Profile update event received, refreshing user data...',
+        );
+
+        // First, check cached data for immediate updates
+        const cachedUserData = await AsyncStorage.getItem('cachedUserData');
+        if (cachedUserData) {
+          const userData = JSON.parse(cachedUserData);
+          if (userData && (userData.businessName || userData.ownerName)) {
+            console.log(
+              '🔄 CustomerScreen: Updating from cached data after profile update:',
+              {
+                businessName: userData.businessName,
+                ownerName: userData.ownerName,
+              },
+            );
+            updateBusinessNameIfPresent(userData.businessName || '');
+            setUserData(userData);
+
+            // Update global cache as well
+            globalCustomerCache.userData = userData;
+            globalCustomerCache.lastUpdated = Date.now();
+          }
+        }
+
+        // Then fetch fresh data in background
+        const accessToken = await AsyncStorage.getItem('accessToken');
+        if (accessToken) {
+          setTimeout(async () => {
+            try {
+              console.log(
+                '🔄 CustomerScreen: Refreshing all data after profile update...',
+              );
+              await fetchUserData(accessToken);
+              await fetchCustomersData(accessToken);
+              console.log('✅ CustomerScreen: Data refresh completed');
+            } catch (error) {
+              console.warn(
+                '⚠️ CustomerScreen: Background refresh failed:',
+                error,
+              );
+            }
+          }, 1000); // Small delay to allow cache to be written
+        }
+      } catch (error) {
+        console.warn(
+          '⚠️ CustomerScreen: Failed to refresh user data on profile update:',
+          error,
+        );
+      }
+    };
+
+    // Listen for profile update events
+    profileUpdateManager.onProfileUpdate(handleProfileUpdate);
+
+    // Cleanup listener on unmount
+    return () => {
+      profileUpdateManager.offProfileUpdate(handleProfileUpdate);
+    };
+  }, []);
+
+  // Ensure business name is always up to date when userData changes
+  useEffect(() => {
+    if (userData) {
+      const displayName = userData.businessName || '';
+      if (businessName !== displayName) {
+        console.log(
+          '🔄 CustomerScreen: Updating business name from userData change:',
+          {
+            old: businessName,
+            new: displayName,
+          },
+        );
+        updateBusinessNameIfPresent(displayName);
+      }
+    }
+  }, [userData, businessName]);
+
+  // 🎯 ADDED: Initialize with cached user data on mount
+  useEffect(() => {
+    const initializeWithCachedData = async () => {
+      try {
+        const cachedUserData = await AsyncStorage.getItem('cachedUserData');
+        if (cachedUserData) {
+          const userData = JSON.parse(cachedUserData);
+          if (userData && (userData.businessName || userData.ownerName)) {
+            console.log(
+              '🔄 CustomerScreen: Initializing with cached user data:',
+              {
+                businessName: userData.businessName,
+                ownerName: userData.ownerName,
+              },
+            );
+            updateBusinessNameIfPresent(
+              userData.businessName ||
+                userData.companyName ||
+                userData.company_name ||
+                (userData.business &&
+                  (userData.business.name || userData.business.title)) ||
+                (userData.profile && userData.profile.businessName) ||
+                '',
+            );
+            setUserData(userData);
+          }
+        }
+      } catch (error) {
+        console.warn('⚠️ Error initializing with cached user data:', error);
+      }
+    };
+
+    initializeWithCachedData();
+  }, []);
+
+  // Ensure business name shows on first visit without navigating to Profile
+  useEffect(() => {
+    (async () => {
+      try {
+        if (headerFetchAttemptedRef.current) return;
+        // If header is blank, proactively fetch profile once
+        const isBlank = !businessName || String(businessName).trim() === '';
+        if (isBlank) {
+          headerFetchAttemptedRef.current = true;
+          await fetchUserData();
+          // If still blank after a short delay, attempt a minimal fetch bypass
+          setTimeout(async () => {
+            if (!businessName || String(businessName).trim() === '') {
+              await forceFetchProfileForHeader();
+            }
+          }, 400);
+        }
+      } catch (e) {
+        // no-op; avoid blocking UI
+      }
+    })();
+  }, [businessName]);
+
+  // 🎯 ADDED: Check for cached user data changes on focus
+  useFocusEffect(
+    React.useCallback(() => {
+      const checkCachedUserData = async () => {
+        try {
+          const cachedUserData = await AsyncStorage.getItem('cachedUserData');
+          if (cachedUserData) {
+            const userData = JSON.parse(cachedUserData);
+            if (userData && (userData.businessName || userData.ownerName)) {
+              console.log(
+                '🔄 CustomerScreen: Updating from cached user data:',
+                {
+                  businessName: userData.businessName,
+                  ownerName: userData.ownerName,
+                },
+              );
+              updateBusinessNameIfPresent(userData.businessName || '');
+              setUserData(userData);
+            }
+          }
+        } catch (error) {
+          console.warn('⚠️ Error checking cached user data:', error);
+        }
+      };
+
+      checkCachedUserData();
+    }, []),
+  );
 
   // 🎯 FIXED: Tab change handling with proper data filtering (NO API calls)
   useLayoutEffect(() => {
@@ -1036,9 +1532,8 @@ const CustomerScreen: React.FC = () => {
     // If we should refresh (e.g., after adding a new customer/supplier)
     if (shouldRefresh) {
       console.log(
-        '🔄 Route params indicate refresh needed, clearing cache and refreshing...',
+        '🔄 Route params indicate refresh needed, refreshing in background without clearing UI...',
       );
-      clearCustomerCache();
       setTimeout(() => {
         handleManualRefresh();
       }, 100);
@@ -1050,26 +1545,136 @@ const CustomerScreen: React.FC = () => {
     React.useCallback(() => {
       console.log('🎯 CustomerScreen: useFocusEffect triggered');
 
+      // Refresh FCM token when screen is focused
+      const refreshFCMTokenOnFocus = async () => {
+        try {
+          console.log('🔄 CustomerScreen: Refreshing FCM token on focus...');
+
+          // First check if user is authenticated
+          const accessToken = await AsyncStorage.getItem('accessToken');
+          if (!accessToken) {
+            console.warn(
+              '⚠️ CustomerScreen: No access token available on focus - user not authenticated',
+            );
+            return;
+          }
+
+          console.log(
+            '✅ CustomerScreen: User is authenticated on focus, proceeding with FCM token refresh',
+          );
+
+          // Check if user has declined notification permission
+          const neverAskOnFocus = await AsyncStorage.getItem(
+            'notificationsNeverAsk',
+          );
+          if (neverAskOnFocus === 'true') {
+            console.log(
+              '⚠️ CustomerScreen: Notification permission declined on focus - skipping all notification work',
+            );
+            return; // hard stop on focus as well
+          } else {
+            // Ensure notifications are initialized
+            if (!notificationService.isServiceInitialized()) {
+              console.log(
+                '🔧 CustomerScreen: Initializing notification service on focus...',
+              );
+              const initResult =
+                await notificationService.initializeNotifications();
+              console.log(
+                '🔧 CustomerScreen: Notification service init result on focus:',
+                initResult,
+              );
+            }
+          }
+
+          // Refresh FCM token (will not run if neverAskOnFocus is true above)
+          console.log('🔧 CustomerScreen: Calling refreshFCMToken on focus...');
+          const token = await notificationService.refreshFCMToken();
+          console.log(
+            '🔧 CustomerScreen: Token received on focus:',
+            token ? `${token.substring(0, 20)}...` : 'null',
+          );
+
+          if (token) {
+            console.log('✅ CustomerScreen: FCM token refreshed on focus');
+            console.log(
+              '🔧 CustomerScreen: Full token length on focus:',
+              token.length,
+            );
+
+            // Send token to backend using notification service
+            try {
+              console.log('🔧 CustomerScreen: Sending FCM token to backend...');
+              const success = await notificationService.sendTokenToBackend(
+                token,
+              );
+              if (success) {
+                console.log(
+                  '✅ CustomerScreen: FCM token sent to backend successfully',
+                );
+              } else {
+                console.warn(
+                  '⚠️ CustomerScreen: Failed to send FCM token to backend',
+                );
+              }
+            } catch (error) {
+              console.error(
+                '❌ CustomerScreen: Error sending FCM token to backend:',
+                error,
+              );
+            }
+
+            // Check if token was sent to backend by checking the notification service
+            const currentToken = notificationService.getCurrentFCMToken();
+            console.log(
+              '🔧 CustomerScreen: Current cached token on focus:',
+              currentToken ? `${currentToken.substring(0, 20)}...` : 'null',
+            );
+          } else {
+            console.warn('⚠️ CustomerScreen: No FCM token available on focus');
+          }
+        } catch (error) {
+          console.warn(
+            '❌ CustomerScreen: Error refreshing FCM token on focus:',
+            error,
+          );
+          console.error(
+            '❌ CustomerScreen: Full error details on focus:',
+            error,
+          );
+        }
+      };
+
+      // Refresh FCM token
+      refreshFCMTokenOnFocus();
+
       // Check if we need to refresh (e.g., after adding a customer)
       const shouldRefresh = route.params?.shouldRefresh;
       const isDataStale = Date.now() - globalCustomerCache.lastUpdated > 30000; // 30 seconds
+      const isCacheForcedStale = globalCustomerCache.lastUpdated === 0; // Force refresh if cache cleared
 
-      if (shouldRefresh) {
+      if (shouldRefresh || isCacheForcedStale) {
         console.log(
-          '🔄 useFocusEffect: shouldRefresh=true, forcing immediate refresh...',
+          '🔄 useFocusEffect: Forcing refresh (shouldRefresh or cache cleared)...',
+          {
+            shouldRefresh,
+            isCacheForcedStale,
+            lastUpdated: globalCustomerCache.lastUpdated,
+          },
         );
+        // Clear cache to ensure fresh data including new vouchers
         clearCustomerCache();
+        clearVoucherCache();
         setTimeout(() => {
           handleManualRefresh();
         }, 100);
       } else if (isDataStale) {
-        console.log('🔄 useFocusEffect: Data is stale, refreshing...');
-        clearCustomerCache();
+        console.log('🔄 useFocusEffect: Data is stale, background refresh...');
         setTimeout(() => {
           handleManualRefresh();
         }, 200);
       }
-    }, [route.params?.shouldRefresh]),
+    }, [route.params?.shouldRefresh, notificationService]),
   );
 
   // 🎯 RESTORED: Animation effect for smooth data loading
@@ -1094,24 +1699,150 @@ const CustomerScreen: React.FC = () => {
   const fetchUserData = async (accessToken?: string) => {
     try {
       const token = accessToken || (await AsyncStorage.getItem('accessToken'));
-      const userId = await getUserIdFromToken();
-      if (!userId) {
-        setBusinessName('User');
+      // Do NOT require decoding user ID before calling profile API.
+      // Some environments may not support atob/decoding; always hit the API.
+
+      // Try unified API's getUserProfile method first (most reliable)
+      let res: any = null;
+      try {
+        res = await unifiedApi.getUserProfile();
+        if (res?.data || res) {
+          console.log('🔍 Loaded profile from getUserProfile()');
+        }
+      } catch (e) {
+        console.warn(
+          '⚠️ getUserProfile() failed, trying fallback endpoints...',
+          e,
+        );
+      }
+
+      // Fallback: Try multiple profile endpoints for robustness
+      if (!res) {
+        const endpoints = ['/user/profile', '/users/profile', '/profile'];
+        for (const endpoint of endpoints) {
+          try {
+            const r = (await unifiedApi.get(endpoint)) as {
+              data: any;
+              status: number;
+              headers: Headers;
+            };
+            // unifiedApi returns { data, status, headers } structure
+            if (r?.data || r?.status >= 200) {
+              res = r;
+              console.log('🔍 Loaded profile from', endpoint);
+              break;
+            }
+          } catch (e) {
+            // try next
+            console.warn(`⚠️ Profile endpoint ${endpoint} failed:`, e);
+          }
+        }
+      }
+
+      // If all endpoints failed, log warning but don't throw error
+      if (!res) {
+        console.warn(
+          '⚠️ Profile request failed on all endpoints - using cached data if available',
+        );
+        // Try to use cached data as fallback
+        try {
+          const cachedData = await AsyncStorage.getItem('cachedUserData');
+          if (cachedData) {
+            const parsed = JSON.parse(cachedData);
+            if (parsed && typeof parsed === 'object') {
+              console.log('🔄 Using cached user data as fallback');
+              setUserData(parsed);
+              updateBusinessNameIfPresent(parsed.businessName || '');
+              return parsed;
+            }
+          }
+        } catch (cacheErr) {
+          console.warn('⚠️ Failed to load cached user data:', cacheErr);
+        }
+        // Return null gracefully instead of throwing
         return null;
       }
 
-      const res = await axios.get(`${BASE_URL}/user/${userId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      // Safely handle various response shapes
+      const apiPayload: any = res?.data ?? null;
+      // Robust extraction: support many shapes
+      const rawUser: any =
+        apiPayload?.data?.user ??
+        apiPayload?.data?.data?.user ??
+        apiPayload?.data?.data ??
+        apiPayload?.user ??
+        apiPayload?.data ??
+        null;
 
-      const user = res.data.data;
+      if (!rawUser || typeof rawUser !== 'object') {
+        console.warn(
+          '⚠️ fetchUserData: No user object in response. Payload:',
+          apiPayload,
+        );
+        // Keep existing header/business name; do not clear on malformed payload
+        return null;
+      }
+
+      // Normalize user data strictly for Business Name from profile GET API
+      const normalizedBusinessName =
+        rawUser.businessName ||
+        rawUser.business_name ||
+        rawUser.companyName ||
+        rawUser.company_name ||
+        (rawUser.business &&
+          (rawUser.business.name || rawUser.business.title)) ||
+        (rawUser.profile && rawUser.profile.businessName) ||
+        '';
+
+      const user = {
+        ownerName:
+          rawUser.ownerName || rawUser.name || rawUser.fullName || 'User',
+        businessName: normalizedBusinessName || '',
+        mobileNumber:
+          rawUser.mobileNumber || rawUser.phone || rawUser.mobile || '',
+        planType:
+          rawUser.planType ||
+          rawUser.plan ||
+          rawUser.subscription?.planName ||
+          'free',
+        ...rawUser,
+      };
+
       setUserData(user);
-      setBusinessName(user.businessName || user.ownerName || 'User');
+      // Show Business Name only (profile GET API)
+      updateBusinessNameIfPresent(
+        user?.businessName ||
+          (user as any)?.business_name ||
+          (user as any)?.companyName ||
+          (user as any)?.company_name ||
+          ((user as any)?.business &&
+            (((user as any).business as any).name ||
+              ((user as any).business as any).title)) ||
+          ((user as any)?.profile &&
+            ((user as any).profile as any).businessName) ||
+          '',
+      );
+      console.log(
+        '🔄 CustomerScreen: Updated business name to:',
+        user?.businessName || '',
+      );
+
+      // Update global cache
+      globalCustomerCache.userData = user;
+      globalCustomerCache.lastUpdated = Date.now();
+
+      // Persist a lightweight cache for other screens
+      try {
+        await AsyncStorage.setItem('cachedUserData', JSON.stringify(user));
+      } catch (cacheErr) {
+        console.warn('⚠️ Unable to cache user profile:', cacheErr);
+      }
 
       return user;
     } catch (err) {
       console.error('Error fetching user data:', err);
-      setBusinessName('User');
+      // Do not clear a previously shown valid name on error
+      // Simply skip update
       return null;
     }
   };
@@ -1119,7 +1850,66 @@ const CustomerScreen: React.FC = () => {
   const fetchCustomersData = async (
     accessToken?: string,
   ): Promise<Customer[]> => {
+    // 🎯 FIXED: Rate limiting protection to prevent 429 errors
+    const now = Date.now();
+    const timeSinceLastFetch = now - lastFetchTime;
+
+    // Prevent rapid successive calls
+    if (isFetchingCustomers) {
+      console.log('⏸️ CustomerScreen: Fetch already in progress, skipping...');
+      // Return cached data if available
+      if (globalCustomerCache.customers.length > 0) {
+        return globalCustomerCache.customers;
+      }
+      // Wait for current fetch to complete
+      while (isFetchingCustomers) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      return globalCustomerCache.customers || [];
+    }
+
+    // Enforce minimum interval between API calls
+    if (timeSinceLastFetch < MIN_FETCH_INTERVAL) {
+      const waitTime = MIN_FETCH_INTERVAL - timeSinceLastFetch;
+      console.log(
+        `⏳ CustomerScreen: Rate limiting - waiting ${waitTime}ms before fetch...`,
+      );
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+
+    isFetchingCustomers = true;
+    lastFetchTime = Date.now();
+
     try {
+      // RBAC: Be lenient — normalize and attempt fetch; don't hard-block UI
+      let perms: string[] | null = null;
+      try {
+        if (Array.isArray(userPermissions)) {
+          perms = userPermissions as string[];
+        } else {
+          const permsJson = await AsyncStorage.getItem('userPermissions');
+          perms = permsJson ? JSON.parse(permsJson) : null;
+          if (perms) setUserPermissions(perms);
+        }
+      } catch (e) {
+        console.warn('RBAC permissions load error:', e);
+      }
+
+      if (perms && Array.isArray(perms)) {
+        const normalizedPerms = perms.map(p =>
+          String(p).toLowerCase().replace(/_/g, ':'),
+        );
+        const required =
+          activeTab === 'suppliers' ? 'supplier:read' : 'customer:read';
+        if (!normalizedPerms.includes(required)) {
+          console.warn(
+            `🚫 Missing permission ${required}; proceeding anyway to let backend decide`,
+          );
+          setRbacBlocked(true);
+          // Do NOT early-return; attempt the call and let backend return 403 if truly forbidden
+        }
+      }
+
       console.log('📡 Fetching data for tab:', activeTab);
       console.log('📡 Current state before fetch:', {
         customersCount: customers.length,
@@ -1143,46 +1933,71 @@ const CustomerScreen: React.FC = () => {
       console.log('🔑 Using token:', token.substring(0, 20) + '...');
       console.log('🌐 Making API calls to:', BASE_URL);
 
-      // Test API connectivity first
-      try {
-        console.log('🔍 Testing API connectivity...');
-        const healthResponse = await axios.get(`${BASE_URL}/health`, {
-          timeout: 5000,
-        });
-        console.log('✅ API health check passed:', healthResponse.status);
-      } catch (healthError: any) {
-        console.warn(
-          '⚠️ API health check failed, but continuing with main calls:',
-          healthError.message,
-        );
-      }
+      // Skip health check (endpoint not available)
 
       // 🚨 REMOVED: API timeout wrapper
 
       console.log('🚀 Starting API calls...');
-      console.log('📞 Calling customers endpoint:', `${BASE_URL}/customers`);
-      console.log('💰 Calling vouchers endpoint:', `${BASE_URL}/vouchers`);
+      // New approach: single endpoint then split per tab
+      const customersUrl = `${BASE_URL}/customers`;
+      const suppliersUrl = `${BASE_URL}/customers/suppliers`;
+      console.log('📞 Calling customers endpoint (single):', customersUrl);
+      console.log('💼 Calling suppliers endpoint:', suppliersUrl);
+      console.log('💰 Calling vouchers endpoint:', `${BASE_URL}/transactions`);
+
+      // Skip server health check (endpoint not available)
 
       // Debug: Test customers API first
       try {
-        const debugResponse = await axios.get(`${BASE_URL}/customers`, {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 5000,
-        });
+        const debugResponse = (await unifiedApi.get(
+          '/customers?page=1&limit=50',
+        )) as { data: any; status: number; headers: Headers };
+        // unifiedApi returns { data, status, headers } structure
+        const debugData = debugResponse.data || debugResponse;
         console.log('🔍 DEBUG - Raw customers API response:', {
           status: debugResponse.status,
-          data: debugResponse.data,
-          isArray: Array.isArray(debugResponse.data),
+          data: debugData,
+          isArray: Array.isArray(debugData),
           hasDataField: !!debugResponse.data?.data,
         });
       } catch (debugError: any) {
-        console.log('🔍 DEBUG - Customers API error:', debugError.message);
+        console.log('🔍 DEBUG - Customers API error:', {
+          status: debugError.response?.status,
+          statusText: debugError.response?.statusText,
+          message: debugError.message,
+          url: debugError.config?.url,
+        });
+
+        // Try alternative endpoints
+        console.log('🔄 Trying alternative customers endpoints...');
+        const alternatives: string[] = [];
+        for (const altEndpoint of alternatives) {
+          try {
+            const altResponse = (await unifiedApi.get(altEndpoint)) as {
+              data: any;
+              status: number;
+              headers: Headers;
+            };
+            // unifiedApi returns { data, status, headers } structure
+            console.log(
+              `✅ Alternative endpoint ${altEndpoint} works:`,
+              altResponse.status,
+            );
+          } catch (altError: any) {
+            console.log(
+              `❌ Alternative endpoint ${altEndpoint} failed:`,
+              altError.response?.status,
+            );
+          }
+        }
       }
 
-      // Retry mechanism with exponential backoff
+      // 🎯 FIXED: Retry mechanism with exponential backoff and 429-specific handling
       let retryCount = 0;
-      const maxRetries = 2; // Reduced retries for faster failure
-      let customersResponse: any;
+      const maxRetries = 2; // Allow 2 retries for 429 errors
+      let customersResponseCustomers: any; // deprecated, keep var names for minimal diff
+      let customersResponseSuppliers: any; // deprecated, keep var names for minimal diff
+      let customersResponseAll: any;
       let vouchersResponse: any;
 
       while (retryCount <= maxRetries) {
@@ -1190,61 +2005,184 @@ const CustomerScreen: React.FC = () => {
           console.log(`🔄 Attempt ${retryCount + 1} of ${maxRetries + 1}`);
 
           // Fetch both customers and vouchers in parallel
-          [customersResponse, vouchersResponse] = await Promise.all([
-            axios.get(`${BASE_URL}/customers`, {
-              headers: {
-                Authorization: `Bearer ${token}`,
-                'Content-Type': 'application/json',
-              },
-              timeout: 8000, // Reduced timeout
-            }),
-            axios.get(`${BASE_URL}/vouchers`, {
-              headers: {
-                Authorization: `Bearer ${token}`,
-                'Content-Type': 'application/json',
-              },
-              timeout: 8000, // Reduced timeout
-            }),
+          [customersResponseAll, vouchersResponse] = await Promise.all([
+            axios
+              .get(customersUrl, {
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  'Content-Type': 'application/json',
+                },
+                params: {
+                  page: 1,
+                  limit: 100,
+                },
+                timeout: 8000,
+              })
+              .catch(err => {
+                console.warn(
+                  'Customers fetch failed, using empty list',
+                  err?.response?.status,
+                );
+                return { data: [] } as any;
+              })
+              .then(async customersRes => {
+                // Also attempt suppliers in parallel and merge into a single shape
+                try {
+                  const suppliersRes = (await unifiedApi.get(
+                    suppliersUrl.includes('?')
+                      ? suppliersUrl
+                      : `${suppliersUrl}?page=1&limit=100`,
+                  )) as { data: any; status: number; headers: Headers };
+                  // unifiedApi returns { data, status, headers } structure
+                  // Merge logic: normalize both to arrays then concat
+                  const cRaw: any = customersRes?.data;
+                  const sRaw: any = suppliersRes?.data || suppliersRes;
+                  const cList: any[] = Array.isArray(cRaw?.data)
+                    ? cRaw.data
+                    : Array.isArray(cRaw)
+                    ? cRaw
+                    : Array.isArray(cRaw?.data?.data)
+                    ? cRaw.data.data
+                    : [];
+                  const sList: any[] = Array.isArray(sRaw?.data)
+                    ? sRaw.data
+                    : Array.isArray(sRaw)
+                    ? sRaw
+                    : Array.isArray(sRaw?.data?.data)
+                    ? sRaw.data.data
+                    : [];
+                  return { data: [...cList, ...sList] } as any;
+                } catch (supErr: any) {
+                  if (
+                    supErr?.response?.status === 403 ||
+                    supErr?.response?.status === 404
+                  ) {
+                    console.warn(
+                      'Suppliers fetch unavailable; proceeding with customers only',
+                    );
+                    return customersRes;
+                  }
+                  console.warn(
+                    'Suppliers fetch failed (non-fatal):',
+                    supErr?.response?.status,
+                  );
+                  return customersRes;
+                }
+              }),
+            axios
+              .get(`${BASE_URL}/transactions`, {
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  'Content-Type': 'application/json',
+                },
+                params: {
+                  page: 1,
+                  limit: 100,
+                },
+                timeout: 8000, // Reduced timeout
+              })
+              .catch(err => {
+                if (err?.response?.status === 404) {
+                  console.warn(
+                    'ℹ️ /transactions not available; using empty vouchers list',
+                  );
+                  return { data: [] } as any;
+                }
+                throw err;
+              }),
           ]);
 
           console.log('✅ API calls completed successfully!');
-          console.log('📊 Customers API Response:', customersResponse.data);
+          console.log(
+            '📊 Customers API Response (all):',
+            customersResponseAll?.data,
+          );
           console.log('💰 Vouchers API Response:', vouchersResponse.data);
 
           // If we get here, the calls succeeded, so break out of retry loop
           break;
         } catch (apiError: any) {
           retryCount++;
+          const statusCode = apiError?.response?.status;
+          const isRateLimitError = statusCode === 429;
+
           console.error(
             `❌ API call attempt ${retryCount} failed:`,
             apiError.message,
+            statusCode ? `(Status: ${statusCode})` : '',
           );
 
+          // 🎯 FIXED: Handle 429 errors with longer wait times
+          if (isRateLimitError) {
+            console.warn(
+              '⚠️ Rate limit error (429) detected - using extended backoff',
+            );
+
+            if (retryCount > maxRetries) {
+              console.error(
+                '❌ Max retries reached for rate limit error, giving up',
+              );
+              setError(
+                'Too many requests. Please wait a moment before trying again.',
+              );
+              isFetchingCustomers = false;
+              // Return cached data if available
+              if (globalCustomerCache.customers.length > 0) {
+                return globalCustomerCache.customers;
+              }
+              throw apiError;
+            }
+
+            // For 429 errors, use longer exponential backoff: 5s, 10s, 20s
+            const waitTime = Math.pow(2, retryCount) * 5000; // 5s, 10s, 20s
+            console.log(
+              `⏳ Rate limit detected - waiting ${waitTime}ms before retry...`,
+            );
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+
+            // Update last fetch time to prevent immediate retry
+            lastFetchTime = Date.now();
+            continue; // Retry the request
+          }
+
+          // For other errors, check if we should retry
           if (retryCount > maxRetries) {
             console.error('❌ Max retries reached, giving up');
+            setError(
+              'Unable to connect to server. Please check your internet connection and try again.',
+            );
+            isFetchingCustomers = false;
             throw apiError;
           }
 
-          // Wait before retrying with exponential backoff
+          // Wait before retrying with exponential backoff for non-429 errors
           const waitTime = Math.pow(2, retryCount) * 1000; // 2s, 4s
           console.log(`⏳ Waiting ${waitTime}ms before retry...`);
           await new Promise(resolve => setTimeout(resolve, waitTime));
         }
       }
 
+      // 🎯 FIXED: Ensure isFetchingCustomers is reset even if we break out of loop
+      isFetchingCustomers = false;
+
       // Transform API response to our local format
-      // Handle both direct array response and wrapped response
-      const apiData =
-        customersResponse.data?.data || customersResponse.data || [];
-      const vouchersData = vouchersResponse.data?.data || [];
-      console.log('📊 Raw customers data:', apiData.length, 'items');
+      const rawCustomers = customersResponseAll?.data;
+      const apiData: any[] = Array.isArray(rawCustomers?.data)
+        ? rawCustomers.data
+        : Array.isArray(rawCustomers)
+        ? rawCustomers
+        : rawCustomers?.data?.data && Array.isArray(rawCustomers?.data?.data)
+        ? rawCustomers.data.data
+        : [];
+      const rawVouchers = vouchersResponse?.data;
+      const vouchersData: any[] = Array.isArray(rawVouchers)
+        ? rawVouchers
+        : Array.isArray(rawVouchers?.data)
+        ? rawVouchers.data
+        : [];
+      console.log('📊 Raw customers data (merged):', apiData.length, 'items');
       console.log('💰 Raw vouchers data:', vouchersData.length, 'items');
-      console.log('📊 Customers API response structure:', {
-        hasData: !!customersResponse.data,
-        isArray: Array.isArray(customersResponse.data),
-        hasDataField: !!customersResponse.data?.data,
-        responseKeys: Object.keys(customersResponse.data || {}),
-      });
+      console.log('📊 Customers API response structure (merged sources)');
 
       // Store all vouchers for summary calculation
       setAllVouchers(vouchersData);
@@ -1260,20 +2198,45 @@ const CustomerScreen: React.FC = () => {
             name: apiData[0].name,
             voucherType: apiData[0].voucherType,
             phoneNumber: apiData[0].phoneNumber,
+            phone: apiData[0].phone,
+            phone_number: apiData[0].phone_number,
+            mobile: apiData[0].mobile,
+            partyPhone: apiData[0].partyPhone,
             address: apiData[0].address,
             gstNumber: apiData[0].gstNumber,
           },
           allKeys: Object.keys(apiData[0] || {}),
+          FULL_ITEM: apiData[0], // Show the complete item
         });
       } else {
         console.log('⚠️ No customers data received from API');
-        console.log('📊 Full customers response:', customersResponse.data);
+        console.log('📊 Full customers response:', customersResponseAll?.data);
+      }
+
+      // Debug: Log sample voucher data structure
+      if (vouchersData.length > 0) {
+        console.log('🔍 Sample vouchers data structure:', {
+          firstVoucher: {
+            id: vouchersData[0].id,
+            type: vouchersData[0].type,
+            voucherType: vouchersData[0].voucherType,
+            amount: vouchersData[0].amount,
+            partyName: vouchersData[0].partyName,
+            customerId: vouchersData[0].customerId,
+            partyType: vouchersData[0].partyType,
+          },
+          allKeys: Object.keys(vouchersData[0] || {}),
+          totalVouchers: vouchersData.length,
+        });
+      } else {
+        console.log('⚠️ No vouchers data received from API');
+        console.log('💰 Full vouchers response:', vouchersResponse?.data);
       }
 
       // If no customers data received, try to create customer data from vouchers as fallback
       if (apiData.length === 0) {
         console.log('ℹ️ No customers data received from API');
-        console.log('📊 Customers API response:', customersResponse.data);
+        // removed stale log referencing previous variable name
 
         // Fallback: Create customer data from vouchers if available
         if (vouchersData.length > 0) {
@@ -1348,9 +2311,12 @@ const CustomerScreen: React.FC = () => {
           );
           apiData.push(...fallbackCustomers);
         } else {
-          console.log('ℹ️ No vouchers data either, showing empty state');
-          setCustomers([]);
-          return [];
+          console.log('ℹ️ No vouchers data available, showing empty state');
+          // Show empty state when no data is available
+          const emptyCustomers: Customer[] = [];
+          console.log('🔄 No data available, showing empty list');
+          setCustomers(emptyCustomers);
+          return emptyCustomers;
         }
       }
 
@@ -1362,56 +2328,518 @@ const CustomerScreen: React.FC = () => {
           amount: vouchersData[0].amount,
           partyName: vouchersData[0].partyName,
           customerId: vouchersData[0].customerId,
+          customer_id: vouchersData[0].customer_id,
+          party_id: vouchersData[0].party_id,
           date: vouchersData[0].date,
         });
+
+        // Log voucher distribution by type
+        const voucherTypes = vouchersData.reduce((acc: any, v: any) => {
+          const type = v.type || 'unknown';
+          acc[type] = (acc[type] || 0) + 1;
+          return acc;
+        }, {});
+        console.log('💰 Voucher types distribution:', voucherTypes);
+
+        // Log voucher distribution by customer_id
+        const customerIds = vouchersData.reduce((acc: any, v: any) => {
+          const id = v.customer_id || v.customerId || 'no_id';
+          acc[id] = (acc[id] || 0) + 1;
+          return acc;
+        }, {});
+        console.log('💰 Voucher customer_id distribution:', customerIds);
+
+        // Log all vouchers to see the complete data structure
+        console.log(
+          '📋 All vouchers data:',
+          vouchersData.map(v => ({
+            id: v.id,
+            type: v.type,
+            amount: v.amount,
+            partyName: v.partyName,
+            customer_id: v.customer_id,
+            customerId: v.customerId,
+            party_id: v.party_id,
+            party_name: v.party_name,
+            partyPhone: v.partyPhone,
+            phone: v.phone,
+          })),
+        );
+      } else {
+        console.log('⚠️ No voucher data available for amount calculation');
       }
 
       // Calculate customer amounts from vouchers instead of static opening balance
       // This provides real-time balance based on actual transactions
       const calculateCustomerAmount = (customer: any) => {
         try {
+          console.log(
+            `🔍 Calculating amount for customer: ${
+              customer.partyName || customer.party_name
+            } (ID: ${customer.id})`,
+          );
+          console.log(`📊 Total vouchers available: ${vouchersData.length}`);
+          console.log(
+            `🏷️ Customer partyType: ${
+              customer.partyType || customer.type || 'unknown'
+            }`,
+          );
+          console.log(`🔍 Customer data structure:`, {
+            id: customer.id,
+            partyName: customer.partyName,
+            party_name: customer.party_name,
+            name: customer.name,
+            partyType: customer.partyType,
+            type: customer.type,
+            openingBalance: customer.openingBalance,
+          });
+
           // Find all vouchers for this customer
           const customerVouchers = vouchersData.filter((voucher: any) => {
-            // Match by customerId if available, otherwise by partyName
-            if (voucher.customerId && customer.id) {
-              return voucher.customerId === customer.id;
+            let isMatch = false;
+            let matchReason = '';
+
+            // Primary match: customer_id (most reliable)
+            if (
+              voucher.customer_id &&
+              customer.id &&
+              (voucher.customer_id.toString() === customer.id.toString() ||
+                voucher.customer_id === parseInt(customer.id) ||
+                parseInt(voucher.customer_id) === parseInt(customer.id))
+            ) {
+              isMatch = true;
+              matchReason = `customer_id: ${voucher.customer_id} === ${customer.id}`;
             }
-            return voucher.partyName === customer.partyName;
+            if (
+              !isMatch &&
+              voucher.customerId &&
+              customer.id &&
+              (voucher.customerId.toString() === customer.id.toString() ||
+                voucher.customerId === parseInt(customer.id) ||
+                parseInt(voucher.customerId) === parseInt(customer.id))
+            ) {
+              isMatch = true;
+              matchReason = `customerId: ${voucher.customerId} === ${customer.id}`;
+            }
+
+            // Secondary match: partyName (fallback)
+            if (!isMatch) {
+              const customerName =
+                customer.partyName || customer.party_name || customer.name;
+              const voucherPartyName = voucher.partyName || voucher.party_name;
+
+              if (
+                customerName &&
+                voucherPartyName &&
+                customerName.toString().trim() ===
+                  voucherPartyName.toString().trim()
+              ) {
+                isMatch = true;
+                matchReason = `name: "${customerName}" === "${voucherPartyName}"`;
+              }
+            }
+
+            // Additional fallback: Check if voucher has party_id that matches customer id
+            if (
+              !isMatch &&
+              voucher.party_id &&
+              customer.id &&
+              (voucher.party_id.toString() === customer.id.toString() ||
+                voucher.party_id === parseInt(customer.id) ||
+                parseInt(voucher.party_id) === parseInt(customer.id))
+            ) {
+              isMatch = true;
+              matchReason = `party_id: ${voucher.party_id} === ${customer.id}`;
+            }
+
+            // Log the matching result for debugging
+            if (isMatch) {
+              console.log(`✅ Voucher matched: ${matchReason}`, {
+                voucherId: voucher.id,
+                voucherType: voucher.type,
+                voucherAmount: voucher.amount,
+                voucherPartyName: voucher.partyName,
+              });
+            }
+
+            return isMatch;
           });
 
           console.log(
-            `💰 Customer ${customer.partyName} has ${customerVouchers.length} vouchers`,
+            `💰 Customer ${customer.partyName || customer.party_name} (ID: ${
+              customer.id
+            }) has ${customerVouchers.length} vouchers`,
           );
+
+          // Debug: Check if vouchers are being filtered by party type
+          if (customerVouchers.length === 0) {
+            console.log(
+              `❌ No vouchers found for customer ${
+                customer.partyName || customer.party_name
+              }`,
+            );
+            console.log(
+              `🔍 Checking if vouchers are being filtered by party type...`,
+            );
+
+            // Check if there are any vouchers that might match but are being filtered out
+            const allMatchingVouchers = vouchersData.filter((voucher: any) => {
+              // Check all possible matching criteria without party type filtering
+              const customerName =
+                customer.partyName || customer.party_name || customer.name;
+              const voucherPartyName = voucher.partyName || voucher.party_name;
+
+              return (
+                (voucher.customer_id &&
+                  customer.id &&
+                  voucher.customer_id.toString() === customer.id.toString()) ||
+                (voucher.customerId &&
+                  customer.id &&
+                  voucher.customerId.toString() === customer.id.toString()) ||
+                (voucher.party_id &&
+                  customer.id &&
+                  voucher.party_id.toString() === customer.id.toString()) ||
+                (customerName &&
+                  voucherPartyName &&
+                  customerName.toString().trim() ===
+                    voucherPartyName.toString().trim())
+              );
+            });
+
+            console.log(
+              `🔍 Found ${allMatchingVouchers.length} vouchers that match by ID/name but might be filtered by party type`,
+            );
+            if (allMatchingVouchers.length > 0) {
+              console.log(`🔍 Sample matching voucher:`, {
+                id: allMatchingVouchers[0].id,
+                type: allMatchingVouchers[0].type,
+                amount: allMatchingVouchers[0].amount,
+                partyName: allMatchingVouchers[0].partyName,
+                customer_id: allMatchingVouchers[0].customer_id,
+                partyType: allMatchingVouchers[0].partyType,
+              });
+            }
+          }
+
+          // Enhanced debugging for voucher matching
+          if (customerVouchers.length === 0) {
+            console.log(
+              `❌ No vouchers found for customer ${
+                customer.partyName || customer.party_name
+              }`,
+            );
+            console.log(`🔍 Customer details:`, {
+              id: customer.id,
+              partyName: customer.partyName,
+              party_name: customer.party_name,
+              name: customer.name,
+            });
+
+            // Log sample vouchers to understand the data structure
+            if (vouchersData.length > 0) {
+              console.log(`📋 Sample voucher structure:`, {
+                id: vouchersData[0].id,
+                customer_id: vouchersData[0].customer_id,
+                customerId: vouchersData[0].customerId,
+                party_id: vouchersData[0].party_id,
+                partyName: vouchersData[0].partyName,
+                party_name: vouchersData[0].party_name,
+                type: vouchersData[0].type,
+                amount: vouchersData[0].amount,
+              });
+            }
+          } else {
+            console.log(
+              `✅ Found vouchers for customer:`,
+              customerVouchers.map(v => ({
+                id: v.id,
+                type: v.type,
+                amount: v.amount,
+                customer_id: v.customer_id,
+                partyName: v.partyName,
+              })),
+            );
+          }
+
+          // Debug: Log customer and voucher details for troubleshooting
+          console.log(`🔍 Customer details:`, {
+            id: customer.id,
+            partyName: customer.partyName,
+            party_name: customer.party_name,
+            name: customer.name,
+            partyType: customer.partyType,
+          });
+
+          if (customerVouchers.length > 0) {
+            console.log(`🔍 Sample voucher details:`, {
+              id: customerVouchers[0].id,
+              customer_id: customerVouchers[0].customer_id,
+              customerId: customerVouchers[0].customerId,
+              party_id: customerVouchers[0].party_id,
+              partyName: customerVouchers[0].partyName,
+              party_name: customerVouchers[0].party_name,
+              type: customerVouchers[0].type,
+              amount: customerVouchers[0].amount,
+            });
+          } else {
+            console.log(
+              `⚠️ No vouchers found for customer ${
+                customer.partyName || customer.party_name
+              } (ID: ${customer.id})`,
+            );
+            console.log(
+              `🔍 Available vouchers sample:`,
+              vouchersData.slice(0, 5).map(v => ({
+                id: v.id,
+                customer_id: v.customer_id,
+                customerId: v.customerId,
+                party_id: v.party_id,
+                partyName: v.partyName,
+                party_name: v.party_name,
+                type: v.type,
+                amount: v.amount,
+              })),
+            );
+
+            // Additional debugging: Check if any vouchers have matching party names
+            const matchingByName = vouchersData.filter((v: any) => {
+              const customerName =
+                customer.partyName || customer.party_name || customer.name;
+              const voucherPartyName = v.partyName || v.party_name;
+              return (
+                customerName &&
+                voucherPartyName &&
+                customerName.toString().trim() ===
+                  voucherPartyName.toString().trim()
+              );
+            });
+
+            if (matchingByName.length > 0) {
+              console.log(
+                `🔍 Found ${matchingByName.length} vouchers by name match:`,
+                matchingByName.map(v => ({
+                  id: v.id,
+                  partyName: v.partyName,
+                  party_name: v.party_name,
+                  type: v.type,
+                  amount: v.amount,
+                })),
+              );
+            }
+          }
 
           let totalAmount = 0;
           let paymentTotal = 0;
           let receiptTotal = 0;
 
-          customerVouchers.forEach((voucher: any) => {
+          // If no vouchers found by ID, try to find by name as fallback
+          let finalCustomerVouchers = customerVouchers;
+          if (customerVouchers.length === 0) {
+            const customerName =
+              customer.partyName || customer.party_name || customer.name;
+            const nameMatchedVouchers = vouchersData.filter((voucher: any) => {
+              const voucherPartyName = voucher.partyName || voucher.party_name;
+              return (
+                customerName &&
+                voucherPartyName &&
+                customerName.toString().trim().toLowerCase() ===
+                  voucherPartyName.toString().trim().toLowerCase()
+              );
+            });
+
+            if (nameMatchedVouchers.length > 0) {
+              console.log(
+                `🔄 Fallback: Found ${nameMatchedVouchers.length} vouchers by name match for ${customerName}`,
+              );
+              finalCustomerVouchers = nameMatchedVouchers;
+            }
+          }
+
+          // If still no vouchers found, check if customer has opening balance
+          if (
+            finalCustomerVouchers.length === 0 &&
+            customer.openingBalance &&
+            customer.openingBalance !== 0
+          ) {
+            console.log(
+              `🔄 Using opening balance fallback for ${
+                customer.partyName || customer.party_name
+              }: ${customer.openingBalance}`,
+            );
+            // Create a virtual voucher entry for opening balance
+            const virtualVoucher = {
+              id: `opening_${customer.id}`,
+              type: customer.openingBalance > 0 ? 'credit' : 'debit',
+              amount: Math.abs(customer.openingBalance),
+              customer_id: customer.id,
+              partyName: customer.partyName || customer.party_name,
+              description: 'Opening Balance',
+              isVirtual: true,
+            };
+            finalCustomerVouchers = [virtualVoucher];
+            console.log(
+              `✅ Created virtual voucher for opening balance:`,
+              virtualVoucher,
+            );
+          }
+
+          // CRITICAL FIX: If still no vouchers found, check if this is a newly created customer
+          // and use the opening balance directly from the customer data
+          if (finalCustomerVouchers.length === 0) {
+            console.log(
+              `🔍 No vouchers found, checking for opening balance in customer data...`,
+            );
+            console.log(
+              `🔍 Customer opening balance: ${customer.openingBalance}`,
+            );
+            console.log(
+              `🔍 Customer opening_balance: ${customer.opening_balance}`,
+            );
+
+            // Check multiple possible opening balance fields
+            const openingBalance =
+              customer.openingBalance || customer.opening_balance || 0;
+            if (openingBalance !== 0) {
+              console.log(`🔄 Using direct opening balance: ${openingBalance}`);
+              // Create a virtual voucher from the opening balance
+              const virtualVoucher = {
+                id: `direct_opening_${customer.id}`,
+                type: openingBalance > 0 ? 'credit' : 'debit',
+                amount: Math.abs(openingBalance),
+                customer_id: customer.id,
+                customerId: customer.id,
+                party_id: customer.id,
+                partyName:
+                  customer.partyName || customer.party_name || customer.name,
+                party_name:
+                  customer.partyName || customer.party_name || customer.name,
+                description: 'Opening Balance (Direct)',
+                isVirtual: true,
+              };
+              finalCustomerVouchers = [virtualVoucher];
+              console.log(
+                `✅ Created direct opening balance voucher:`,
+                virtualVoucher,
+              );
+            }
+          }
+
+          // Remove duplicates based on voucher ID to avoid double counting
+          const uniqueVouchers = finalCustomerVouchers.filter(
+            (voucher, index, self) =>
+              index === self.findIndex(v => v.id === voucher.id),
+          );
+
+          if (uniqueVouchers.length !== finalCustomerVouchers.length) {
+            console.log(
+              `🔄 Removed ${
+                finalCustomerVouchers.length - uniqueVouchers.length
+              } duplicate vouchers`,
+            );
+            finalCustomerVouchers = uniqueVouchers;
+          }
+
+          finalCustomerVouchers.forEach((voucher: any) => {
             const amount = Math.abs(parseFloat(voucher.amount) || 0);
-            if (voucher.type === 'payment' || voucher.type === 'Purchase') {
-              paymentTotal += amount; // Money going out (you give)
-            } else if (voucher.type === 'receipt' || voucher.type === 'Sell') {
-              receiptTotal += amount; // Money coming in (you get)
+            const voucherType = (
+              voucher.type ||
+              voucher.voucherType ||
+              ''
+            ).toLowerCase();
+
+            console.log(
+              `🔍 Processing voucher for ${
+                customer.partyName || customer.party_name
+              }:`,
+              {
+                voucherId: voucher.id,
+                type: voucherType,
+                amount: amount,
+                customerId: voucher.customer_id,
+                partyName: voucher.partyName,
+                fullVoucher: voucher, // Debug: show full voucher structure
+              },
+            );
+
+            // Use the backend transaction types: 'credit' and 'debit'
+            // CREDIT = Money coming in (you receive) = Receipt
+            // DEBIT = Money going out (you give) = Payment
+            if (voucherType === 'debit') {
+              paymentTotal += amount; // Money going out (you give) = Payment
+              console.log(`✅ Added to payments: ${amount} (DEBIT = Payment)`);
+            } else if (voucherType === 'credit') {
+              receiptTotal += amount; // Money coming in (you get) = Receipt
+              console.log(`✅ Added to receipts: ${amount} (CREDIT = Receipt)`);
+            } else {
+              // Fallback for other type names (legacy support)
+              if (voucherType === 'payment' || voucherType === 'purchase') {
+                paymentTotal += amount; // Money going out (you give) = Payment
+                console.log(
+                  `✅ Added to payments: ${amount} (fallback PAYMENT/PURCHASE)`,
+                );
+              } else if (voucherType === 'receipt' || voucherType === 'sell') {
+                receiptTotal += amount; // Money coming in (you get) = Receipt
+                console.log(
+                  `✅ Added to receipts: ${amount} (fallback RECEIPT/SELL)`,
+                );
+              } else {
+                console.log(
+                  `⚠️ Unknown voucher type: ${voucherType}, skipping`,
+                );
+              }
             }
           });
 
           // Calculate net balance: receipts - payments
           totalAmount = receiptTotal - paymentTotal;
 
-          console.log(`💰 Customer ${customer.partyName} balance:`, {
-            receipts: receiptTotal,
-            payments: paymentTotal,
-            netBalance: totalAmount,
-            balanceType: totalAmount > 0 ? 'receipt' : 'payment',
-          });
+          // Determine the display type based on the net balance
+          // If totalAmount > 0: receipts > payments = you're getting money (Receipt)
+          // If totalAmount < 0: payments > receipts = you're giving money (Payment)
+          const displayType = totalAmount > 0 ? 'get' : 'give';
+          const displayLabel = totalAmount > 0 ? 'Receipt' : 'Payment';
+
+          console.log(
+            `💰 Customer ${customer.partyName || customer.party_name} balance:`,
+            {
+              receipts: receiptTotal,
+              payments: paymentTotal,
+              netBalance: totalAmount,
+              displayType,
+              displayLabel,
+              explanation:
+                totalAmount > 0
+                  ? 'Receipts > Payments = You are getting money (Receipt)'
+                  : 'Payments > Receipts = You are giving money (Payment)',
+              voucherCount: customerVouchers.length,
+            },
+          );
+
+          // Additional debugging for the specific issue
+          console.log(
+            `🎯 FINAL CALCULATION for ${
+              customer.partyName || customer.party_name
+            }:`,
+            {
+              receiptTotal,
+              paymentTotal,
+              netBalance: totalAmount,
+              displayType,
+              displayLabel,
+              voucherCount: finalCustomerVouchers.length,
+              explanation:
+                totalAmount > 0
+                  ? 'Receipts > Payments = You are getting money (Receipt)'
+                  : 'Payments > Receipts = You are giving money (Payment)',
+            },
+          );
 
           return {
             totalAmount: Math.abs(totalAmount),
-            type: totalAmount > 0 ? 'get' : 'give', // Simplified logic to match CustomerDetailScreen
+            type: displayType,
             paymentTotal,
             receiptTotal,
-            voucherCount: customerVouchers.length,
+            voucherCount: finalCustomerVouchers.length,
           };
         } catch (error) {
           console.error('Error calculating customer amount:', error);
@@ -1433,167 +2861,581 @@ const CustomerScreen: React.FC = () => {
       // - ID 130 (Kunal) = 2025-08-12T13:04:15.050Z (oldest)
       // We preserve this order - newest entries appear at the top
       // Don't filter here - let fetchAllData handle tab-specific filtering
-      const transformedCustomers: Customer[] = apiData
-        .map((item: any, index: number) => {
-          try {
-            // Calculate real-time amount from vouchers
-            const voucherAmounts = calculateCustomerAmount(item);
-
-            // Use voucher amounts instead of opening balance
-            const amount = voucherAmounts.totalAmount;
-            const type = voucherAmounts.type;
-
-            console.log(`💰 Customer ${item.partyName} final amounts:`, {
-              amount,
-              type,
-              voucherCount: voucherAmounts.voucherCount,
-              receipts: voucherAmounts.receiptTotal,
-              payments: voucherAmounts.paymentTotal,
-            });
-
-            // Safely handle name and create avatar
-            let partyName: string;
+      const transformedCustomers: (Customer | null)[] = await Promise.all(
+        apiData
+          .filter((item: any) => {
+            // Filter out invalid items
+            return item && (item.id || item.partyName || item.party_name);
+          })
+          .map(async (item: any, index: number) => {
             try {
-              partyName = String(
-                item.partyName || item.name || 'Unknown',
-              ).trim();
-              if (!partyName || partyName === '') {
+              // Calculate real-time amount from vouchers
+              const voucherAmounts = calculateCustomerAmount(item);
+
+              // Use voucher amounts instead of opening balance
+              const amount = voucherAmounts.totalAmount;
+              const type = voucherAmounts.type;
+
+              // If no vouchers found and no amount, set to 0
+              if (voucherAmounts.voucherCount === 0 && amount === 0) {
+                console.log(
+                  `ℹ️ Customer ${
+                    item.partyName || item.party_name
+                  } has no transactions, showing 0 balance`,
+                );
+              }
+
+              // Additional validation to ensure no hardcoded amounts slip through
+              if (amount > 0 && voucherAmounts.voucherCount === 0) {
+                console.warn(
+                  `⚠️ Customer ${
+                    item.partyName || item.party_name
+                  } has amount ${amount} but no vouchers - this might be incorrect data`,
+                );
+              }
+
+              console.log(
+                `💰 Customer ${
+                  item.partyName || item.party_name
+                } final amounts:`,
+                {
+                  amount,
+                  type,
+                  voucherCount: voucherAmounts.voucherCount,
+                  receipts: voucherAmounts.receiptTotal,
+                  payments: voucherAmounts.paymentTotal,
+                  customerId: item.id,
+                  partyName: item.partyName || item.party_name,
+                },
+              );
+
+              // Safely handle name and create avatar
+              let partyName: string;
+              try {
+                partyName = String(
+                  item.partyName || item.name || item.party_name || 'Unknown',
+                ).trim();
+                if (!partyName || partyName === '') {
+                  partyName = 'Unknown';
+                }
+              } catch (error) {
+                console.warn('Party name parsing error:', error);
                 partyName = 'Unknown';
               }
-            } catch (error) {
-              console.warn('Party name parsing error:', error);
-              partyName = 'Unknown';
-            }
 
-            // Debug: Log item structure for fallback data
-            if (item.id && item.id.toString().startsWith('voucher_')) {
-              console.log('🔍 Processing fallback item:', {
-                id: item.id,
-                partyName: item.partyName,
-                partyType: item.partyType,
-                hasAddress: !!item.address,
-                hasPhone: !!item.phoneNumber,
-              });
-            }
+              // Skip creating customer entries for subscription-related transactions
+              if (
+                partyName.toLowerCase() === 'unknown' ||
+                partyName.toLowerCase() === 'party 1' ||
+                partyName.toLowerCase().includes('subscription') ||
+                partyName.toLowerCase().includes('plan') ||
+                partyName.toLowerCase().includes('upgrade') ||
+                (partyName.toLowerCase().includes('payment') &&
+                  partyName.toLowerCase().includes('system'))
+              ) {
+                console.log(
+                  '🚫 Skipping subscription/system voucher entry:',
+                  partyName,
+                );
+                return null; // Skip this voucher entry
+              }
 
-            let avatar: string;
-            try {
-              avatar = String(partyName.charAt(0) || 'U').toUpperCase();
-            } catch (error) {
-              console.warn('Avatar creation error:', error);
-              avatar = 'U';
-            }
+              // Debug: Log item structure for fallback data
+              if (item.id && item.id.toString().startsWith('voucher_')) {
+                console.log('🔍 Processing fallback item:', {
+                  id: item.id,
+                  partyName: item.partyName,
+                  partyType: item.partyType,
+                  hasAddress: !!item.address,
+                  hasPhone: !!item.phoneNumber,
+                });
+              }
 
-            // Safely handle address
-            let location: string;
-            try {
-              if (item.address && typeof item.address === 'string') {
-                const addressParts = item.address.split(',');
-                location = addressParts[0]?.trim() || 'India';
-              } else {
+              let avatar: string;
+              try {
+                avatar = String(partyName.charAt(0) || 'U').toUpperCase();
+              } catch (error) {
+                console.warn('Avatar creation error:', error);
+                avatar = 'U';
+              }
+
+              // Safely handle address
+              let location: string;
+              try {
+                if (item.address && typeof item.address === 'string') {
+                  const addressParts = item.address.split(',');
+                  location = addressParts[0]?.trim() || 'India';
+                } else {
+                  location = 'India';
+                }
+              } catch (error) {
+                console.warn('Address parsing error:', error);
                 location = 'India';
               }
-            } catch (error) {
-              console.warn('Address parsing error:', error);
-              location = 'India';
-            }
 
-            // Safely handle date formatting
-            let lastInteraction: string;
-            try {
-              if (item.createdAt) {
-                const date = new Date(item.createdAt);
-                if (!isNaN(date.getTime())) {
-                  lastInteraction = date.toLocaleDateString('en-IN', {
-                    year: 'numeric',
-                    month: 'short',
-                    day: 'numeric',
-                  });
+              // Safely handle date formatting
+              let lastInteraction: string;
+              try {
+                if (item.createdAt) {
+                  const date = new Date(item.createdAt);
+                  if (!isNaN(date.getTime())) {
+                    lastInteraction = date.toLocaleDateString('en-IN', {
+                      year: 'numeric',
+                      month: 'short',
+                      day: 'numeric',
+                    });
+                  } else {
+                    lastInteraction = 'Recently';
+                  }
                 } else {
                   lastInteraction = 'Recently';
                 }
-              } else {
+              } catch (dateError) {
+                console.warn('Date parsing error:', dateError);
                 lastInteraction = 'Recently';
               }
-            } catch (dateError) {
-              console.warn('Date parsing error:', dateError);
-              lastInteraction = 'Recently';
-            }
 
-            // Safely handle phone number and GST
-            let phoneNumber: string | undefined;
-            let gstNumber: string | undefined;
-            try {
-              phoneNumber = item.phoneNumber
-                ? String(item.phoneNumber).trim()
-                : undefined;
-              gstNumber = item.gstNumber
-                ? String(item.gstNumber).trim()
-                : undefined;
+              // Get phone number from vouchers FIRST (most reliable source)
+              const customerIdForPhone = item.id;
+              let phoneFromVoucher: string | undefined = undefined;
+              if (vouchersData && Array.isArray(vouchersData)) {
+                const customerVouchers = vouchersData.filter((v: any) => {
+                  return (
+                    (v.customer_id &&
+                      v.customer_id.toString() ===
+                        customerIdForPhone.toString()) ||
+                    (v.customerId &&
+                      v.customerId.toString() ===
+                        customerIdForPhone.toString()) ||
+                    (v.party_id &&
+                      v.party_id.toString() ===
+                        customerIdForPhone.toString()) ||
+                    (v.partyName || v.party_name) ===
+                      (item.partyName || item.party_name)
+                  );
+                });
+
+                if (customerVouchers.length > 0) {
+                  const latestVoucher = customerVouchers[0];
+                  phoneFromVoucher =
+                    latestVoucher.partyPhone || latestVoucher.phone;
+                }
+              }
+
+              // Safely handle phone number and GST
+              let phoneNumber: string | undefined;
+              let gstNumber: string | undefined;
+              try {
+                // Debug: Log all phone-related fields and the full item structure
+                const nameForLog =
+                  item.partyName || item.party_name || 'Unknown';
+                console.log(`📱 Phone fields for ${nameForLog}:`, {
+                  phoneFromVoucher: phoneFromVoucher,
+                  phoneNumber: item.phoneNumber,
+                  phone: item.phone,
+                  phone_number: item.phone_number,
+                  partyPhone: item.partyPhone,
+                  mobile: item.mobile,
+                  contactNo: item.contactNo,
+                  id: item.id,
+                  allKeys: Object.keys(item).filter(
+                    k =>
+                      k.toLowerCase().includes('phone') ||
+                      k.toLowerCase().includes('mobile') ||
+                      k.toLowerCase().includes('contact'),
+                  ),
+                  fullItem: item, // Show complete item structure
+                });
+
+                // CRITICAL DEBUG: Log what we're getting
+                console.log(`🔍 DEBUG ${nameForLog}:`, {
+                  'item.phone': item.phone,
+                  'item.phoneNumber': item.phoneNumber,
+                  'item.phone_number': item.phone_number,
+                  'typeof item.phone': typeof item.phone,
+                  'typeof item.phoneNumber': typeof item.phoneNumber,
+                });
+
+                // Try multiple phone field combinations in priority order
+                // Priority: phoneFromVoucher (from vouchers) > phone > phoneNumber > others
+                let phoneSrc: any = undefined;
+
+                const phoneFields = [
+                  phoneFromVoucher, // Use voucher phone FIRST (most reliable)
+                  item.phone, // Then check phone field
+                  item.phoneNumber,
+                  item.phone_number,
+                  item.partyPhone,
+                  item.mobile,
+                  item.contactNo,
+                  (item as any).party_phone,
+                  (item as any).phone_Number,
+                  (item as any).PhoneNumber,
+                ];
+
+                // Find the first non-empty, non-country-code-only phone field
+                for (const field of phoneFields) {
+                  const fieldStr = field ? String(field).trim() : '';
+                  if (
+                    fieldStr &&
+                    fieldStr !== '+91' &&
+                    fieldStr !== '91' &&
+                    fieldStr.length >= 7
+                  ) {
+                    phoneSrc = field;
+                    console.log(`📱 Found phone in field: "${field}"`);
+                    break;
+                  }
+                }
+
+                // Normalize phone number: remove country code and formatting
+                if (phoneSrc) {
+                  let normalized = String(phoneSrc).trim();
+                  console.log(
+                    `📱 Phone normalization - Before: "${normalized}"`,
+                  );
+
+                  // REMOVE "+91-" prefix if present
+                  normalized = normalized.replace(/^\+?91-?/, '');
+                  console.log(`📱 Phone after removing +91: "${normalized}"`);
+
+                  // Handle case where only country code is present (like "+91")
+                  // In this case, check if there's a separate number field
+                  if (
+                    normalized === '+91' ||
+                    normalized === '91' ||
+                    normalized.length <= 3
+                  ) {
+                    console.log(
+                      `⚠️ Only country code found for ${partyName}, checking for alternative fields`,
+                    );
+                    // Try to find the actual phone number in other fields
+                    const alternativeSource =
+                      item.mobile ||
+                      item.contactNo ||
+                      (item as any).party_phone ||
+                      (item as any).phoneNumber || // Try this too
+                      (item as any).phone ||
+                      (item as any).phone_number ||
+                      '';
+
+                    if (alternativeSource) {
+                      normalized = String(alternativeSource).trim();
+                      console.log(
+                        `📱 Using alternative phone source: "${normalized}"`,
+                      );
+                    } else {
+                      // Last resort: Check if countryCode field exists and has full number
+                      const countryCodeField = (item as any).countryCode;
+                      if (countryCodeField && countryCodeField.length > 3) {
+                        normalized = String(countryCodeField).trim();
+                        console.log(
+                          `📱 Using countryCode field as phone: "${normalized}"`,
+                        );
+                      } else {
+                        console.log(
+                          `⚠️ No alternative phone found for ${partyName}`,
+                        );
+                        phoneNumber = undefined;
+                      }
+                    }
+                  }
+
+                  // Special case: If phone source has both country code and number (like "916666666666")
+                  // Extract the actual number part
+                  if (
+                    normalized &&
+                    normalized.length > 10 &&
+                    normalized.startsWith('91')
+                  ) {
+                    normalized = normalized.substring(2); // Remove the "91" prefix
+                    console.log(
+                      `📱 Extracted phone from country code: "${normalized}"`,
+                    );
+                  }
+
+                  if (
+                    normalized &&
+                    normalized !== '+91' &&
+                    normalized !== '91'
+                  ) {
+                    // Remove country code prefix (+91, 91, +91-)
+                    normalized = normalized.replace(/^\+?91-?/, '');
+                    console.log(
+                      `📱 Phone normalization - After removing +91: "${normalized}"`,
+                    );
+                    // Remove all non-digit characters after country code removal
+                    normalized = normalized.replace(/\D/g, '');
+                    console.log(
+                      `📱 Phone normalization - Digits only: "${normalized}"`,
+                    );
+                    // Only take last 10 digits (standard Indian phone number length)
+                    normalized = normalized.slice(-10);
+                    console.log(
+                      `📱 Phone normalization - Final (last 10): "${normalized}"`,
+                    );
+
+                    // Only set phone number if we have at least 7 digits
+                    if (normalized.length >= 7) {
+                      phoneNumber = normalized;
+                      console.log(`✅ Phone for ${partyName}: ${phoneNumber}`);
+                    } else {
+                      console.log(
+                        `⚠️ Phone number too short for ${partyName}: "${normalized}"`,
+                      );
+                      phoneNumber = undefined;
+                    }
+                  }
+                }
+
+                // If we still don't have a phone number, try vouchers as fallback
+                if (!phoneNumber) {
+                  console.log(
+                    `⚠️ No phone found in item fields for ${partyName}, checking vouchers...`,
+                  );
+                  const customerId = item.id;
+                  if (vouchersData && Array.isArray(vouchersData)) {
+                    const customerVouchers = vouchersData.filter((v: any) => {
+                      return (
+                        (v.customer_id &&
+                          v.customer_id.toString() === customerId.toString()) ||
+                        (v.customerId &&
+                          v.customerId.toString() === customerId.toString())
+                      );
+                    });
+
+                    if (customerVouchers.length > 0) {
+                      const voucherPhone =
+                        customerVouchers[0]?.partyPhone ||
+                        customerVouchers[0]?.phone;
+                      if (
+                        voucherPhone &&
+                        String(voucherPhone).trim() &&
+                        String(voucherPhone).trim() !== '+91'
+                      ) {
+                        console.log(
+                          `📱 Using phone from voucher: "${voucherPhone}"`,
+                        );
+                        let normalized = String(voucherPhone)
+                          .trim()
+                          .replace(/^\+?91-?/, '')
+                          .replace(/\D/g, '')
+                          .slice(-10);
+                        if (normalized.length >= 7) {
+                          phoneNumber = normalized;
+                          console.log(
+                            `✅ Phone from voucher for ${partyName}: ${phoneNumber}`,
+                          );
+                        }
+                      }
+                    }
+                  }
+
+                  if (!phoneNumber) {
+                    phoneNumber = undefined;
+                  }
+                }
+
+                const gstSrc =
+                  item.gstNumber !== undefined && item.gstNumber !== null
+                    ? item.gstNumber
+                    : item.gst_number;
+                gstNumber = gstSrc ? String(gstSrc).trim() : undefined;
+              } catch (error) {
+                console.warn('Phone/GST parsing error:', error);
+                phoneNumber = undefined;
+                gstNumber = undefined;
+              }
+
+              // Normalize party type from various backend shapes
+              let normalizedPartyType: 'customer' | 'supplier' = 'customer';
+              try {
+                const rawParty = String(
+                  item.partyType !== undefined
+                    ? item.partyType
+                    : item.type !== undefined
+                    ? item.type
+                    : item.party_type,
+                )
+                  .toLowerCase()
+                  .trim();
+                if (rawParty === 'supplier') normalizedPartyType = 'supplier';
+                if (rawParty === 'customer') normalizedPartyType = 'customer';
+              } catch {}
+
+              // Use the voucher-based calculation from calculateCustomerAmount function
+              // No fallback amounts - show 0 if no real transactions exist
+              let customerAmount = amount; // This comes from calculateCustomerAmount
+              let customerType = type; // This comes from calculateCustomerAmount
+
+              // Store opening balance for fallback calculation
+              const openingBalance =
+                item.openingBalance || item.opening_balance || 0;
+
+              // CRITICAL FIX: If no amount calculated from vouchers but customer has opening balance,
+              // use the opening balance directly
+              if (customerAmount === 0 && openingBalance !== 0) {
+                console.log(
+                  `🔄 CRITICAL FIX: Using opening balance directly for ${partyName}: ${openingBalance}`,
+                );
+                customerAmount = Math.abs(openingBalance);
+                customerType = openingBalance > 0 ? 'get' : 'give';
+                console.log(
+                  `✅ Set customer amount to ${customerAmount} (${customerType})`,
+                );
+              }
+
+              // ADDITIONAL FIX: Check AsyncStorage for opening balance if still no amount
+              if (customerAmount === 0) {
+                try {
+                  const storedOpeningBalances = await AsyncStorage.getItem(
+                    'customerOpeningBalances',
+                  );
+                  if (storedOpeningBalances) {
+                    const openingBalances = JSON.parse(storedOpeningBalances);
+                    const customerOpeningBalance = openingBalances[item.id];
+                    if (customerOpeningBalance) {
+                      console.log(
+                        `🔄 Found opening balance in AsyncStorage for ${partyName}: ${customerOpeningBalance.amount}`,
+                      );
+                      customerAmount = Math.abs(customerOpeningBalance.amount);
+                      customerType =
+                        customerOpeningBalance.type === 'receipt'
+                          ? 'get'
+                          : 'give';
+                      console.log(
+                        `✅ Set customer amount from AsyncStorage: ${customerAmount} (${customerType})`,
+                      );
+                    }
+                  }
+                } catch (error) {
+                  console.error(
+                    '❌ Error reading opening balance from AsyncStorage:',
+                    error,
+                  );
+                }
+              }
+
+              // ADDITIONAL FIX: Check if this is a newly created customer with no vouchers yet
+              // but the summary shows amounts (indicating vouchers exist but aren't being matched)
+              if (customerAmount === 0 && voucherAmounts.voucherCount === 0) {
+                console.log(
+                  `🔍 Customer ${partyName} has no vouchers but summary shows amounts - checking for timing issue`,
+                );
+
+                // Check if there are any vouchers in the system that might belong to this customer
+                const potentialVouchers = vouchersData.filter(
+                  (voucher: any) => {
+                    const customerName = partyName;
+                    const voucherPartyName =
+                      voucher.partyName || voucher.party_name;
+                    return (
+                      customerName &&
+                      voucherPartyName &&
+                      customerName.toString().trim().toLowerCase() ===
+                        voucherPartyName.toString().trim().toLowerCase()
+                    );
+                  },
+                );
+
+                if (potentialVouchers.length > 0) {
+                  console.log(
+                    `🔄 Found ${potentialVouchers.length} potential vouchers by name match for ${partyName}`,
+                  );
+                  // Use the first matching voucher as a fallback
+                  const fallbackVoucher = potentialVouchers[0];
+                  customerAmount = Math.abs(fallbackVoucher.amount);
+                  customerType =
+                    fallbackVoucher.type === 'credit' ? 'get' : 'give';
+                  console.log(
+                    `✅ Using fallback voucher: ${customerAmount} (${customerType})`,
+                  );
+                }
+              }
+
+              console.log(`🔍 DEBUG: Customer ${partyName} (ID: ${item.id}):`, {
+                finalAmount: customerAmount,
+                finalType: customerType,
+                voucherCount: voucherAmounts.voucherCount,
+                receipts: voucherAmounts.receiptTotal,
+                payments: voucherAmounts.paymentTotal,
+                openingBalance: openingBalance,
+              });
+
+              return {
+                id: String(item.id || `temp_${index}`),
+                name: partyName,
+                location: location,
+                lastInteraction: lastInteraction,
+                amount: customerAmount,
+                type: customerType as 'give' | 'get',
+                avatar: avatar,
+                phoneNumber: phoneNumber,
+                gstNumber: gstNumber,
+                address: item.address || undefined,
+                openingBalance: openingBalance, // Use the actual opening balance from API
+                // Use normalized party type for proper tab filtering
+                partyType: normalizedPartyType,
+              };
             } catch (error) {
-              console.warn('Phone/GST parsing error:', error);
-              phoneNumber = undefined;
-              gstNumber = undefined;
+              console.error('Customer transformation error:', error, item);
+              // Return a safe fallback customer
+              return {
+                id: `fallback_${index}`,
+                name: 'Error Customer',
+                location: 'India',
+                lastInteraction: 'Recently',
+                amount: 0, // No amount for error customers
+                type: 'give' as const,
+                avatar: 'E',
+                phoneNumber: undefined,
+                gstNumber: undefined,
+                address: undefined,
+                openingBalance: 0,
+                partyType: 'customer', // Default to customer for fallback
+              };
             }
+          }),
+      );
 
-            return {
-              id: String(item.id || `temp_${index}`),
-              name: partyName,
-              location: location,
-              lastInteraction: lastInteraction,
-              amount: amount,
-              type: type,
-              avatar: avatar,
-              phoneNumber: phoneNumber,
-              gstNumber: gstNumber,
-              address: item.address || undefined,
-              openingBalance:
-                voucherAmounts.receiptTotal - voucherAmounts.paymentTotal,
-              // Preserve the original partyType from API for proper filtering
-              partyType: item.partyType || item.type || 'customer',
-            };
-          } catch (error) {
-            console.error('Customer transformation error:', error, item);
-            // Return a safe fallback customer
-            return {
-              id: `fallback_${index}`,
-              name: 'Error Customer',
-              location: 'India',
-              lastInteraction: 'Recently',
-              amount: 0,
-              type: 'give' as const,
-              avatar: 'E',
-              phoneNumber: undefined,
-              gstNumber: undefined,
-              address: undefined,
-              openingBalance: 0,
-              partyType: 'customer', // Default to customer for fallback
-            };
+      const validCustomers: Customer[] = transformedCustomers.filter(
+        (customer): customer is Customer => {
+          // Filter out null values first
+          if (!customer) return false;
+
+          // Filter out "Party 1" and other system entries
+          const customerName =
+            customer.name || (customer as any).partyName || '';
+          if (
+            customerName.toLowerCase() === 'party 1' ||
+            customerName.toLowerCase() === 'unknown' ||
+            customerName.toLowerCase().includes('subscription') ||
+            customerName.toLowerCase().includes('plan') ||
+            customerName.toLowerCase().includes('upgrade') ||
+            customerName === 'SKIP'
+          ) {
+            console.log('🚫 Filtering out system entry:', customerName);
+            return false;
           }
-        })
-        .filter((customer: any): customer is Customer => {
-          // Additional validation to ensure we only have valid customers
+
+          // Relax validation: only require minimal fields so items still render
           const isValid =
             customer &&
             typeof customer === 'object' &&
             typeof customer.id === 'string' &&
-            typeof customer.name === 'string' &&
-            typeof customer.location === 'string' &&
-            typeof customer.lastInteraction === 'string' &&
-            typeof customer.amount === 'number' &&
-            (customer.type === 'give' || customer.type === 'get') &&
-            typeof customer.avatar === 'string';
+            typeof customer.name === 'string';
 
           if (!isValid) {
-            console.warn('❌ Invalid customer data filtered out:', customer);
+            console.warn('❌ Skipping malformed customer item:', customer);
           }
 
           return isValid;
-        });
+        },
+      );
 
       console.log(
         '✅ Transformed customers:',
-        transformedCustomers.length,
+        validCustomers.length,
         'items for tab:',
         activeTab,
       );
@@ -1616,23 +3458,40 @@ const CustomerScreen: React.FC = () => {
       });
 
       // Log summary of amounts calculated from vouchers
-      const totalReceipts = transformedCustomers.reduce((sum, customer) => {
+      const totalReceipts = validCustomers.reduce((sum, customer) => {
         return sum + (customer.type === 'get' ? customer.amount : 0);
       }, 0);
-      const totalPayments = transformedCustomers.reduce((sum, customer) => {
+      const totalPayments = validCustomers.reduce((sum, customer) => {
         return sum + (customer.type === 'give' ? customer.amount : 0);
       }, 0);
 
       console.log('💰 Voucher-based amounts summary:', {
-        totalCustomers: transformedCustomers.length,
+        totalCustomers: validCustomers.length,
         totalReceipts: `₹${totalReceipts.toFixed(2)}`,
         totalPayments: `₹${totalPayments.toFixed(2)}`,
         netBalance: `₹${(totalReceipts - totalPayments).toFixed(2)}`,
+        customersWithAmounts: validCustomers.filter(c => c.amount > 0).length,
+        customersWithoutAmounts: validCustomers.filter(c => c.amount === 0)
+          .length,
+        customersByType: {
+          customers: validCustomers.filter(c => c.partyType === 'customer')
+            .length,
+          suppliers: validCustomers.filter(c => c.partyType === 'supplier')
+            .length,
+        },
+        customersWithAmountsByType: {
+          customers: validCustomers.filter(
+            c => c.partyType === 'customer' && c.amount > 0,
+          ).length,
+          suppliers: validCustomers.filter(
+            c => c.partyType === 'supplier' && c.amount > 0,
+          ).length,
+        },
       });
 
       // Debug: Show order and voucher type mapping
       console.log('📋 FINAL ORDER (newest first):');
-      transformedCustomers.forEach((customer, index) => {
+      validCustomers.forEach((customer, index) => {
         console.log(`📊 ${index + 1}. ${customer.name}:`, {
           voucherType: 'receipt', // This will be the actual voucher type from API
           calculatedType: customer.type,
@@ -1642,28 +3501,54 @@ const CustomerScreen: React.FC = () => {
         });
       });
 
-      console.log(
-        '✅ Data fetched successfully:',
-        transformedCustomers.length,
-        'items',
-      );
-      console.log(
-        '📊 Transformed customers sample:',
-        transformedCustomers.slice(0, 3).map(c => ({
-          name: c.name,
-          partyType: c.partyType,
-          type: c.type,
-          amount: c.amount,
-        })),
-      );
-      setCustomers(transformedCustomers);
+      // Fallback: if strict transformation yields 0 but API has data, map minimally
+      let finalCustomers = validCustomers;
+      if (finalCustomers.length === 0 && apiData.length > 0) {
+        console.log('🔁 Using minimal mapping fallback for customer list');
+        finalCustomers = apiData.map((it: any, idx: number) => {
+          const name = String(
+            it.party_name || it.partyName || it.name || `Party ${idx + 1}`,
+          );
+          const ptRaw = String(
+            it.party_type || it.partyType || '',
+          ).toLowerCase();
+          const normalizedPT = ptRaw === 'supplier' ? 'supplier' : 'customer';
+          return {
+            id: String(it.id ?? `p_${idx}`),
+            name,
+            location: 'India',
+            lastInteraction: it.createdAt
+              ? new Date(it.createdAt).toLocaleDateString('en-IN', {
+                  year: 'numeric',
+                  month: 'short',
+                  day: 'numeric',
+                })
+              : 'Recently',
+            amount: 0, // No amount for minimal mapping fallback
+            type: 'give' as const,
+            avatar: name.charAt(0)?.toUpperCase() || 'U',
+            phoneNumber: it.phone_number || it.phoneNumber || '',
+            gstNumber: it.gst_number || it.gstNumber || '',
+            address: it.address || '',
+            partyType: normalizedPT,
+          };
+        });
+      }
+
+      // Final safety: de-duplicate to avoid growing duplicates across refreshes
+      const deduped = dedupeCustomers(finalCustomers);
+
+      console.log('✅ Data ready for UI (deduped):', deduped.length, 'items');
+      setCustomers(deduped);
 
       // If no data found, show appropriate message
       if (transformedCustomers.length === 0) {
         console.log('ℹ️ No data found for tab:', activeTab);
       }
 
-      return transformedCustomers;
+      // 🎯 FIXED: Reset flag on successful completion
+      isFetchingCustomers = false;
+      return deduped;
     } catch (err: any) {
       console.error('❌ Error fetching customers:', err);
       console.error('❌ Error details:', {
@@ -1680,7 +3565,15 @@ const CustomerScreen: React.FC = () => {
       });
 
       let errorMessage = 'Failed to fetch data';
-      if (err.response?.status === 401) {
+      if (err.response?.status === 400) {
+        errorMessage = 'Invalid request. Please check your data and try again.';
+        console.error(
+          '❌ 400 Bad Request - Invalid request parameters or validation failed',
+        );
+        console.error('❌ 400 Error details:', err.response?.data);
+        console.error('❌ Request URL:', err.config?.url);
+        console.error('❌ Request headers:', err.config?.headers);
+      } else if (err.response?.status === 401) {
         errorMessage = 'Authentication failed. Please login again.';
         console.error('🔐 401 Unauthorized - Token may be invalid or expired');
       } else if (err.response?.status === 403) {
@@ -1688,8 +3581,10 @@ const CustomerScreen: React.FC = () => {
         console.error('🚫 403 Forbidden - User lacks required permissions');
       } else if (err.response?.status === 404) {
         errorMessage =
-          'API endpoint not found. Please check the server configuration.';
-        console.error('🔍 404 Not Found - API endpoint may be incorrect');
+          'API server is not available. Please check your internet connection or try again later.';
+        console.error(
+          '🔍 404 Not Found - API server may be down or endpoint incorrect',
+        );
       } else if (err.response?.status >= 500) {
         errorMessage = 'Server error. Please try again later.';
         console.error('💥 Server error:', err.response?.status);
@@ -1709,9 +3604,12 @@ const CustomerScreen: React.FC = () => {
       setCustomers([]);
       return [];
     } finally {
+      // 🎯 FIXED: Always reset flag in finally block to prevent stuck state
+      isFetchingCustomers = false;
       console.log('🏁 Fetch completed. Final state:', {
         customersCount: customers.length,
         error,
+        isFetchingCustomers,
       });
     }
   };
@@ -1742,6 +3640,25 @@ const CustomerScreen: React.FC = () => {
       let filtered = customers.filter(customer => {
         // Safety check for each customer
         if (!customer || typeof customer !== 'object') {
+          return false;
+        }
+
+        // Filter out "Unknown" customers and subscription-related entries
+        const customerName = customer.name || (customer as any).partyName || '';
+        if (
+          customerName.toLowerCase() === 'unknown' ||
+          customerName.toLowerCase() === 'party 1' ||
+          customerName.toLowerCase().startsWith('party ') ||
+          customerName.toLowerCase().includes('subscription') ||
+          customerName.toLowerCase().includes('plan') ||
+          customerName.toLowerCase().includes('upgrade') ||
+          (customerName.toLowerCase().includes('payment') &&
+            customerName.toLowerCase().includes('system'))
+        ) {
+          console.log(
+            '🚫 Filtering out system/subscription entry:',
+            customerName,
+          );
           return false;
         }
 
@@ -1964,47 +3881,20 @@ const CustomerScreen: React.FC = () => {
     });
   }
 
-  // Calculate summary data from all vouchers
+  // Calculate summary from the currently displayed rows for perfect visual consistency
   const summaryData = (() => {
     try {
-      let totalPayment = 0;
-      let totalReceipt = 0;
-      let totalSell = 0;
-      let totalPurchase = 0;
-
-      allVouchers.forEach((voucher: any) => {
-        const amount = Math.abs(parseFloat(voucher.amount) || 0);
-
-        switch (voucher.type) {
-          case 'payment':
-            totalPayment += amount;
-            break;
-          case 'receipt':
-            totalReceipt += amount;
-            break;
-          case 'Sell':
-            totalSell += amount;
-            break;
-          case 'Purchase':
-            totalPurchase += amount;
-            break;
-        }
+      const list = filteredCustomers || customers || [];
+      let payment = 0;
+      let receipt = 0;
+      list.forEach((c: any) => {
+        const amt = Math.abs(parseFloat(c?.amount) || 0);
+        if ((c?.type as string) === 'give') payment += amt;
+        else if ((c?.type as string) === 'get') receipt += amt;
       });
-
-      console.log('💰 Summary totals from all vouchers:', {
-        totalPayment,
-        totalReceipt,
-        totalSell,
-        totalPurchase,
-        totalVouchers: allVouchers.length,
-      });
-
-      return {
-        payment: totalPayment,
-        receipt: totalReceipt,
-        sell: totalSell,
-        purchase: totalPurchase,
-      };
+      const finalSummary = { payment, receipt, sell: 0, purchase: 0 };
+      console.log('✅ Final summary from rows:', finalSummary);
+      return finalSummary;
     } catch (error) {
       console.warn('Summary calculation error:', error);
       return { payment: 0, receipt: 0, sell: 0, purchase: 0 };
@@ -2053,13 +3943,18 @@ const CustomerScreen: React.FC = () => {
         hasGST: 'all',
       });
 
-      // Clear current data to show loading state
-      setCustomers([]);
-      setError(null);
+      // Force refresh right after tab change so list repopulates
+      setTimeout(() => {
+        handleManualRefresh();
+      }, 50);
 
-      // Fetch fresh data for the new tab
-      console.log(`🔄 Fetching fresh data for ${tab} tab...`);
-      await fetchAllData();
+      // Do not clear current data; switch tabs instantly and refresh in background if needed
+      setError(null);
+      const timeSinceLastFetch = Date.now() - globalCustomerCache.lastUpdated;
+      if (timeSinceLastFetch > CACHE_TTL || customers.length === 0) {
+        console.log(`🔄 Background refresh for ${tab} tab...`);
+        handleManualRefresh();
+      }
     } catch (error) {
       console.error('Tab change error:', error);
     }
@@ -2100,10 +3995,11 @@ const CustomerScreen: React.FC = () => {
       );
 
       if (activeTab === 'suppliers') {
-        navigation.navigate('AddParty', {
+        // For suppliers, first go via contacts screen and propagate intent
+        navigation.navigate('AddCustomerFromContacts', {
           partyType: 'supplier',
-          shouldRefresh: true, // Tell the screen to refresh when returning
-        });
+          shouldRefresh: true,
+        } as any);
       } else if (activeTab === 'customers') {
         navigation.navigate('AddCustomerFromContacts', {
           shouldRefresh: true, // Tell the screen to refresh when returning
@@ -2134,6 +4030,9 @@ const CustomerScreen: React.FC = () => {
       setError(null);
       setCustomers([]);
 
+      // Clear voucher cache to ensure fresh voucher data
+      clearVoucherCache();
+
       const accessToken = await AsyncStorage.getItem('accessToken');
       if (!accessToken) {
         throw new Error('Authentication required');
@@ -2144,7 +4043,7 @@ const CustomerScreen: React.FC = () => {
         await Promise.all([
           fetchCustomersData(accessToken),
           fetchUserData(accessToken),
-          fetch(`${BASE_URL}/vouchers`, {
+          fetch(`${BASE_URL}/transactions`, {
             headers: { Authorization: `Bearer ${accessToken}` },
           })
             .then(res => res.json())
@@ -2169,11 +4068,13 @@ const CustomerScreen: React.FC = () => {
 
       // Update state
       setCustomers(customersResult);
+      console.log('🔍 DEBUG: Setting allVouchers in fetchAllData:', {
+        vouchersResponseLength: vouchersResponse.length,
+        vouchersResponse: vouchersResponse.slice(0, 3), // Show first 3 vouchers
+      });
       setAllVouchers(vouchersResponse);
       setUserData(userDataResult);
-      setBusinessName(
-        userDataResult?.businessName || userDataResult?.ownerName || 'User',
-      );
+      updateBusinessNameIfPresent(userDataResult?.businessName);
 
       console.log(
         '✅ CustomerScreen: Manual refresh completed - Customers:',
@@ -2187,12 +4088,98 @@ const CustomerScreen: React.FC = () => {
     }
   };
 
-  const handleViewReport = () => {
-    showCustomAlert(
-      'View Report',
-      'This will open the customer report',
-      'info',
-    );
+  const handleViewReport = async () => {
+    try {
+      console.log('🔍 View Report - Checking user plan access...');
+
+      // Always fetch fresh subscription data to get the latest plan information
+      // This ensures we get the updated plan even if user just upgraded
+      console.log('🔄 Fetching fresh subscription data for plan check...');
+
+      // Fetch subscription data directly from API (same as SubscriptionContext does)
+      let planType = 'free';
+      try {
+        const token = await AsyncStorage.getItem('accessToken');
+        if (token) {
+          const response = (await unifiedApi.get('/users/profile')) as {
+            data: any;
+            status: number;
+            headers: Headers;
+          };
+
+          // unifiedApi returns { data, status, headers } structure
+          if (response.status >= 200 && response.status < 300) {
+            const result = response.data || response;
+            const userData = result?.data ?? result;
+            console.log('🔍 View Report - User data from API:', userData);
+
+            // Get planType from user data (same logic as SubscriptionContext)
+            planType = userData.planType?.toLowerCase() || 'free';
+
+            // Map premium to professional (same as SubscriptionContext)
+            if (planType === 'premium') {
+              planType = 'professional';
+            }
+
+            console.log('🔍 View Report - Plan type from API:', planType);
+
+            // Also update subscription context for future checks
+            await fetchSubscriptionData();
+          }
+        }
+      } catch (fetchError) {
+        console.warn('⚠️ Error fetching subscription data:', fetchError);
+        // Fallback to subscription context if API fails
+        planType =
+          currentSubscription?.planId ||
+          currentSubscription?.planName?.toLowerCase() ||
+          'free';
+      }
+
+      // If API fetch failed, try subscription context
+      if (planType === 'free' && currentSubscription) {
+        planType =
+          currentSubscription.planId ||
+          currentSubscription.planName?.toLowerCase() ||
+          'free';
+        console.log(
+          '🔍 View Report - Using subscription context plan:',
+          planType,
+        );
+      }
+
+      const planLower = planType.toLowerCase().trim();
+
+      console.log('🔍 View Report - Final plan check:', {
+        planType,
+        planLower,
+        currentSubscription: currentSubscription,
+        isProfessional: planLower === 'professional',
+        isEnterprise: planLower === 'enterprise',
+        hasAccess: planLower === 'professional' || planLower === 'enterprise',
+      });
+
+      // Check if user has Professional or Enterprise plan
+      if (planLower === 'professional' || planLower === 'enterprise') {
+        console.log('✅ User has access to Reports screen');
+        navigation.navigate('Report');
+      } else {
+        console.log('❌ User does not have access - Plan:', planLower);
+        showCustomAlert(
+          'Access Restricted',
+          'Reports feature is available only for Professional and Enterprise plans. Please upgrade your plan to access advanced reports.',
+          'warning',
+        );
+      }
+    } catch (error) {
+      console.error('Navigation error:', error);
+      // Fallback to alert if navigation fails
+      showCustomAlert(
+        'View Report',
+        'Unable to open reports. Please try again.',
+        'error',
+      );
+    }
   };
 
   const handleFilterPress = () => {
@@ -2202,22 +4189,99 @@ const CustomerScreen: React.FC = () => {
   // Check if user needs to fill business information (triggered by button clicks)
   const checkBusinessInfoCompletion = async () => {
     try {
-      if (!userData) {
-        console.log('⚠️ No userData available');
-        return false;
+      // One-time gate per-user: if we've ever shown this modal for THIS user, don't show again
+      let userScopedKey = 'businessInfoShownOnce';
+      try {
+        const uid = await getUserIdFromToken();
+        if (uid) userScopedKey = `businessInfoShownOnce:${uid}`;
+      } catch {}
+      try {
+        const shownOnceScoped = await AsyncStorage.getItem(userScopedKey);
+        const shownOnceGlobal = await AsyncStorage.getItem(
+          'businessInfoShownOnce',
+        ); // backward compat
+        if (shownOnceScoped === 'true' || shownOnceGlobal === 'true') {
+          console.log(
+            'ℹ️ Business info modal already shown once for this user. Skipping.',
+          );
+          return false;
+        }
+      } catch {}
+
+      // If we don't yet have userData (brand new user / first open), fall back to cache
+      let effectiveUserData = userData;
+      if (!effectiveUserData) {
+        try {
+          const cached = await AsyncStorage.getItem('cachedUserData');
+          if (cached) effectiveUserData = JSON.parse(cached);
+        } catch {}
+      }
+      // If still no data, assume new user and show the modal once now
+      if (!effectiveUserData) {
+        console.log(
+          '🆕 New user detected (no userData yet). Showing business info modal once.',
+        );
+        setBusinessInfoForm({
+          ownerName: '',
+          businessName: '',
+          businessType: '',
+          businessSize: '',
+          industry: '',
+          monthlyTransactionVolume: '',
+          currentAccountingSoftware: '',
+        });
+        setShowBusinessInfoModal(true);
+        try {
+          await AsyncStorage.setItem(userScopedKey, 'true');
+          await AsyncStorage.setItem('businessInfoShownOnce', 'true'); // backward compat
+        } catch {}
+        return true;
       }
 
       // Check if user has default names that need to be changed
+      // Derive mobile last 4 digits to detect default auto-generated names like
+      // Owner: "User 9090" and Business: "User9090"
+      const rawMobile =
+        (effectiveUserData as any)?.mobileNumber ||
+        (effectiveUserData as any)?.phone ||
+        (effectiveUserData as any)?.phoneNumber ||
+        (await AsyncStorage.getItem('userMobile')) ||
+        (await AsyncStorage.getItem('userMobileNumber')) ||
+        '';
+      const digitsOnly = String(rawMobile).replace(/\D/g, '');
+      const last4 = digitsOnly.slice(-4);
+      const defaultOwnerFromMobile = last4 ? `User ${last4}` : 'User';
+      const defaultBusinessFromMobile = last4 ? `User${last4}` : 'User';
+
+      const ownerName = String(effectiveUserData.ownerName || '').trim();
+      const businessName = String(effectiveUserData.businessName || '').trim();
+
+      const looksLikeDefaultPattern = (name: string) => {
+        if (!name) return true;
+        // Matches "User 1234" or "User1234"
+        if (/^User\s?\d{4}$/.test(name)) return true;
+        if (
+          last4 &&
+          (name === defaultOwnerFromMobile ||
+            name === defaultBusinessFromMobile)
+        )
+          return true;
+        return false;
+      };
+
       const hasDefaultNames =
-        userData.ownerName === 'User' ||
-        userData.businessName === 'My Business' ||
-        userData.businessName === 'User' ||
-        !userData.ownerName ||
-        !userData.businessName;
+        ownerName === 'User' ||
+        businessName === 'My Business' ||
+        businessName === 'User' ||
+        !ownerName ||
+        !businessName ||
+        looksLikeDefaultPattern(ownerName) ||
+        looksLikeDefaultPattern(businessName);
 
       console.log('🔍 Checking business info completion:', {
-        ownerName: userData.ownerName,
-        businessName: userData.businessName,
+        ownerName: ownerName,
+        businessName: businessName,
+        last4,
         hasDefaultNames,
       });
 
@@ -2265,21 +4329,33 @@ const CustomerScreen: React.FC = () => {
 
       // Pre-fill form with existing data
       setBusinessInfoForm({
-        ownerName: userData.ownerName || '',
-        businessName: userData.businessName || '',
-        businessType: userData.businessType || '',
-        businessSize: userData.businessSize || '',
-        industry: userData.industry || '',
-        monthlyTransactionVolume: userData.monthlyTransactionVolume || '',
-        currentAccountingSoftware: userData.currentAccountingSoftware || '',
+        ownerName: effectiveUserData.ownerName || '',
+        businessName: effectiveUserData.businessName || '',
+        businessType: effectiveUserData.businessType || '',
+        businessSize: effectiveUserData.businessSize || '',
+        industry: effectiveUserData.industry || '',
+        monthlyTransactionVolume:
+          effectiveUserData.monthlyTransactionVolume || '',
+        currentAccountingSoftware:
+          effectiveUserData.currentAccountingSoftware || '',
       });
 
-      // Save timestamp when modal is shown
+      // Save timestamp when modal is shown (per-user key)
       const modalData = {
         timestamp: now,
         date: new Date().toDateString(),
       };
-      await AsyncStorage.setItem('lastModalShown', JSON.stringify(modalData));
+      const lastShownKey = userScopedKey.replace(
+        'businessInfoShownOnce',
+        'lastModalShown',
+      );
+      await AsyncStorage.setItem(lastShownKey, JSON.stringify(modalData));
+
+      // Mark as shown once so we never show again
+      try {
+        await AsyncStorage.setItem(userScopedKey, 'true');
+        await AsyncStorage.setItem('businessInfoShownOnce', 'true'); // backward compat
+      } catch {}
 
       console.log('✅ Showing business info modal (12-hour limit)');
 
@@ -2321,13 +4397,10 @@ const CustomerScreen: React.FC = () => {
         throw new Error('Authentication required');
       }
 
-      // Fetch CSRF token if not already available
+      // Try to obtain CSRF token if backend provides one, but do not block if unavailable
       let currentCsrfToken = csrfToken;
       if (!currentCsrfToken) {
         currentCsrfToken = await fetchCSRFToken();
-        if (!currentCsrfToken) {
-          throw new Error('Failed to obtain CSRF token');
-        }
       }
 
       // Use the same API pattern as ProfileScreen.tsx
@@ -2347,41 +4420,146 @@ const CustomerScreen: React.FC = () => {
           body[key] = (businessInfoForm as any)[key] || null;
         }
       });
+      body.status = 'complete';
+
+      // Include user's primary role id for backend auditing/mapping
+      try {
+        const { getRoleId } = await import('../../utils/roleHelper');
+        const roleId = await getRoleId();
+        if (roleId !== null && roleId !== undefined) {
+          (body as any).roleId = roleId;
+          (body as any).role_id = roleId; // alias for alternate DTOs
+          console.log(
+            '✅ CustomerScreen: Added role ID to request body:',
+            roleId,
+          );
+        }
+      } catch (e) {
+        console.warn('⚠️ CustomerScreen: Failed to add role ID:', e);
+      }
 
       console.log('🔄 Saving business info with body:', body);
       console.log('🔍 Using token:', accessToken?.substring(0, 20) + '...');
       console.log('🔍 API URL:', `${BASE_URL}/user/edit-profile`);
 
-      const response = await axios.patch(
-        `${BASE_URL}/user/edit-profile`,
-        body,
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-            'X-CSRF-Token': currentCsrfToken,
-          },
-          withCredentials: true, // Important for session cookies
-        },
-      );
+      const headers: any = {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      };
+      if (currentCsrfToken) headers['X-CSRF-Token'] = currentCsrfToken;
+      // Try multiple methods and endpoints to maximize compatibility
+      const endpoints: Array<{
+        method: 'PATCH' | 'PUT' | 'POST';
+        url: string;
+      }> = [
+        { method: 'PATCH', url: `${BASE_URL}/user/edit-profile` },
+        { method: 'PUT', url: `${BASE_URL}/user/edit-profile` },
+        { method: 'POST', url: `${BASE_URL}/user/edit-profile` },
+        { method: 'PATCH', url: `${BASE_URL}/users/profile` },
+        { method: 'PUT', url: `${BASE_URL}/users/profile` },
+        { method: 'PATCH', url: `${BASE_URL}/user/profile` },
+        { method: 'PUT', url: `${BASE_URL}/user/profile` },
+        { method: 'PATCH', url: `${BASE_URL}/profile` },
+        { method: 'PUT', url: `${BASE_URL}/profile` },
+      ];
 
-      console.log('✅ Business info saved successfully:', response.data);
+      const bodyVariants: any[] = [
+        body,
+        (() => {
+          const b = { ...body };
+          delete b.id;
+          return b;
+        })(),
+      ];
+
+      let lastError: any = null;
+      let successResp: any = null;
+      for (const variant of bodyVariants) {
+        for (const ep of endpoints) {
+          try {
+            const resp = await axios({
+              method: ep.method,
+              url: ep.url,
+              data: variant,
+              headers,
+              withCredentials: true,
+              validateStatus: s => s >= 200 && s < 300,
+            });
+            successResp = resp;
+            console.log('✅ Business info saved successfully:', {
+              method: ep.method,
+              url: ep.url,
+              status: resp.status,
+            });
+            break;
+          } catch (e: any) {
+            lastError = {
+              e,
+              method: ep.method,
+              url: ep.url,
+              status: e?.response?.status,
+            };
+            console.log('⚠️ Profile update attempt failed:', lastError);
+            continue;
+          }
+        }
+        if (successResp) break;
+      }
+
+      if (!successResp) {
+        throw new Error(
+          lastError?.status
+            ? `Profile update failed (${lastError.status}) at ${lastError.method} ${lastError.url}`
+            : 'Profile update failed: no compatible endpoint (PATCH/PUT/POST)',
+        );
+      }
 
       // Update local user data (remove id from body before updating)
       const { id, ...userData } = body;
       setUserData((prev: any) => ({ ...prev, ...userData }));
+
+      // Immediately update business name in header (profile API businessName only)
+      const newBusinessName = userData.businessName || '';
+      updateBusinessNameIfPresent(newBusinessName);
+      console.log('🔄 Updated business name in header:', newBusinessName);
+
+      // Cache the updated user data for persistence
+      try {
+        const updatedUserData = { ...userData, businessName: newBusinessName };
+        await AsyncStorage.setItem(
+          'cachedUserData',
+          JSON.stringify(updatedUserData),
+        );
+        console.log('✅ Cached updated user data with business name');
+      } catch (cacheError) {
+        console.error('❌ Failed to cache updated user data:', cacheError);
+      }
+
+      // Emit event to update drawer header immediately
+      try {
+        const eventPayload = {
+          name: userData.ownerName || '',
+          mobile: userData.mobileNumber || userData.phoneNumber || '',
+        };
+        console.log(
+          '📡 CUSTOMER: Emitting profile-updated event with payload:',
+          eventPayload,
+        );
+        DeviceEventEmitter.emit('profile-updated', eventPayload);
+        console.log('📡 CUSTOMER: Event emitted successfully');
+      } catch (emitError) {
+        console.error(
+          '❌ CUSTOMER: Failed to emit profile-updated event:',
+          emitError,
+        );
+      }
 
       setShowBusinessInfoModal(false);
       setCheckingBusinessInfo(false);
 
       // Clear the modal timestamp since user completed the info
       await AsyncStorage.removeItem('lastModalShown');
-
-      showCustomAlert(
-        'Success',
-        'Business information saved successfully!',
-        'success',
-      );
+      // No popup on success per request
     } catch (error: any) {
       console.error('❌ Error saving business info:', error);
 
@@ -2427,29 +4605,52 @@ const CustomerScreen: React.FC = () => {
   };
 
   // Enhanced filter modal with professional design
-  const renderFilterModal = () => (
-    <Modal
-      visible={showFilterModal}
-      transparent={true}
-      animationType="slide"
-      onRequestClose={() => setShowFilterModal(false)}
-    >
-      <View style={styles.modalOverlay}>
-        <View style={styles.modalContent}>
+  const renderFilterModal = () =>
+    showFilterModal && (
+      <View
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',
+          zIndex: 9999,
+        }}
+      >
+        <TouchableOpacity
+          style={{ flex: 1 }}
+          activeOpacity={1}
+          onPress={() => setShowFilterModal(false)}
+        />
+        <View
+          style={{
+            backgroundColor: '#fff',
+            borderTopLeftRadius: 20,
+            borderTopRightRadius: 20,
+            height: '90%',
+            width: '100%',
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
+          }}
+        >
           {/* Header */}
           <View style={styles.modalHeader}>
             <TouchableOpacity
               onPress={() => setShowFilterModal(false)}
               style={styles.closeButton}
+              activeOpacity={0.7}
             >
               <MaterialCommunityIcons
                 name="arrow-left"
-                size={24}
+                size={28}
                 color="#222"
               />
             </TouchableOpacity>
             <View style={styles.modalTitleContainer}>
-              <Text style={styles.modalTitle}>Filter Customers</Text>
+              <Text style={styles.modalTitle}>Filter</Text>
               <Text style={styles.modalSubtitle}>
                 Smart & organized filters
               </Text>
@@ -2460,11 +4661,17 @@ const CustomerScreen: React.FC = () => {
           {/* Filter Content */}
           <View style={styles.modalBody}>
             <ScrollView
-              showsVerticalScrollIndicator={false}
-              contentContainerStyle={styles.modalBodyContent}
-              bounces={false}
+              style={{ flex: 1 }}
+              showsVerticalScrollIndicator={true}
+              contentContainerStyle={{
+                ...styles.modalBodyContent,
+                flexGrow: 1,
+                paddingBottom: 20,
+              }}
+              bounces={true}
               nestedScrollEnabled={true}
               keyboardShouldPersistTaps="handled"
+              scrollEnabled={true}
             >
               {/* Quick Filters */}
               <View style={styles.quickFiltersSection}>
@@ -2482,7 +4689,7 @@ const CustomerScreen: React.FC = () => {
                     <View style={styles.quickFilterIcon}>
                       <MaterialCommunityIcons
                         name="arrow-down"
-                        size={24}
+                        size={20}
                         color="#28a745"
                       />
                     </View>
@@ -2504,7 +4711,7 @@ const CustomerScreen: React.FC = () => {
                     <View style={styles.quickFilterIcon}>
                       <MaterialCommunityIcons
                         name="arrow-up"
-                        size={24}
+                        size={20}
                         color="#dc3545"
                       />
                     </View>
@@ -2545,7 +4752,7 @@ const CustomerScreen: React.FC = () => {
                     >
                       <MaterialCommunityIcons
                         name={range.icon as any}
-                        size={18}
+                        size={16}
                         color={
                           filterOptions.amountRange === range.key
                             ? '#fff'
@@ -2583,7 +4790,7 @@ const CustomerScreen: React.FC = () => {
                     onChangeText={text =>
                       setFilterOptions({ ...filterOptions, location: text })
                     }
-                    placeholderTextColor="#8a94a6"
+                    placeholderTextColor="#666666"
                   />
                   {filterOptions.location ? (
                     <TouchableOpacity
@@ -2641,7 +4848,7 @@ const CustomerScreen: React.FC = () => {
                         >
                           <MaterialCommunityIcons
                             name={option.icon as any}
-                            size={16}
+                            size={14}
                             color={
                               filterOptions.hasPhone === option.key
                                 ? '#fff'
@@ -2695,7 +4902,7 @@ const CustomerScreen: React.FC = () => {
                         >
                           <MaterialCommunityIcons
                             name={option.icon as any}
-                            size={16}
+                            size={14}
                             color={
                               filterOptions.hasGST === option.key
                                 ? '#fff'
@@ -2740,7 +4947,7 @@ const CustomerScreen: React.FC = () => {
             >
               <MaterialCommunityIcons
                 name="refresh"
-                size={18}
+                size={16}
                 color="#dc3545"
                 style={{ marginRight: 8 }}
               />
@@ -2752,7 +4959,7 @@ const CustomerScreen: React.FC = () => {
             >
               <MaterialCommunityIcons
                 name="check"
-                size={18}
+                size={16}
                 color="#fff"
                 style={{ marginRight: 8 }}
               />
@@ -2761,8 +4968,7 @@ const CustomerScreen: React.FC = () => {
           </View>
         </View>
       </View>
-    </Modal>
-  );
+    );
 
   // Safety wrapper for filter modal
   const renderFilterModalSafely = () => {
@@ -2783,28 +4989,33 @@ const CustomerScreen: React.FC = () => {
         return null;
       }
 
-      // Validate all required fields
-      const requiredFields = [
-        'id',
-        'name',
-        'location',
-        'lastInteraction',
-        'amount',
-        'type',
-        'avatar',
-      ] as const;
-      for (const field of requiredFields) {
-        if (customer[field] === undefined || customer[field] === null) {
-          console.warn(`Missing required field: ${field}`, customer);
-          return null;
-        }
-      }
+      // Only strictly require id and name; provide safe defaults for the rest
+      if (customer.id === undefined || customer.id === null) return null;
+      if (!customer.name || String(customer.name).trim() === '') return null;
+
+      const safeLocation =
+        (customer.location && String(customer.location)) || 'India';
+      const safeLastInteraction =
+        (customer.lastInteraction && String(customer.lastInteraction)) ||
+        'Recently';
+      const safeAmount = Math.abs(Number(customer.amount) || 0);
+      const safeType = (customer.type as any) === 'get' ? 'get' : 'give';
+      const safeAvatar = (customer.avatar && String(customer.avatar)) || 'U';
+
+      // Debug: Log customer data for troubleshooting
+      console.log(`🔍 DEBUG: Customer ${customer.name}:`, {
+        originalAmount: customer.amount,
+        safeAmount: safeAmount,
+        type: customer.type,
+        safeType: safeType,
+        customer: customer,
+      });
 
       // Safe amount formatting
       let formattedAmount: string;
       try {
-        const amount = Math.abs(Number(customer.amount) || 0);
-        formattedAmount = amount === 0 ? '₹0' : `₹${amount.toLocaleString()}`;
+        formattedAmount =
+          safeAmount === 0 ? '₹0' : `₹${safeAmount.toLocaleString()}`;
       } catch (error) {
         console.warn('Amount formatting error:', error);
         formattedAmount = '₹0';
@@ -2816,10 +5027,10 @@ const CustomerScreen: React.FC = () => {
       let amountColor: string;
       let amountLabel: string;
       try {
-        if (customer.type === 'get') {
+        if (safeType === 'get') {
           amountColor = '#28a745'; // GREEN for "Receipt" (receiving money)
           amountLabel = 'Receipt';
-        } else if (customer.type === 'give') {
+        } else if (safeType === 'give') {
           amountColor = '#dc3545'; // RED for "Payment" (giving money away)
           amountLabel = 'Payment';
         } else {
@@ -2860,19 +5071,28 @@ const CustomerScreen: React.FC = () => {
             ]}
           >
             <View style={styles.customerAvatar}>
-              <Text style={styles.avatarText}>{customer.avatar || 'U'}</Text>
+              <Text style={styles.avatarText}>{safeAvatar}</Text>
             </View>
             <View style={styles.customerInfo}>
               <Text style={styles.customerName}>
                 {customer.name || 'Unknown'}
               </Text>
-              <Text style={styles.customerDate}>
-                {customer.lastInteraction || 'Recently'}
-              </Text>
+              <Text style={styles.customerDate}>{safeLastInteraction}</Text>
               {/* Using ternary operator instead of && */}
-              {!!customer.phoneNumber && customer.phoneNumber.trim() !== '' ? (
-                <Text style={styles.customerPhone}>{customer.phoneNumber}</Text>
-              ) : null}
+              {(() => {
+                const formatPhone = (phone: string | undefined): string => {
+                  if (!phone) return '';
+                  let digits = String(phone).replace(/\D/g, '');
+                  // If includes country code, reduce to last 10
+                  if (digits.length > 10) digits = digits.slice(-10);
+                  if (digits.length === 10) return `+91-${digits}`;
+                  return '';
+                };
+                const formattedPhone = formatPhone(customer.phoneNumber);
+                return formattedPhone ? (
+                  <Text style={styles.customerPhone}>{formattedPhone}</Text>
+                ) : null;
+              })()}
             </View>
             <View style={styles.customerAmount}>
               <Text style={[styles.amountText, { color: amountColor }]}>
@@ -2959,38 +5179,58 @@ const CustomerScreen: React.FC = () => {
   // Safety wrapper for summary section
   const renderSummarySection = () => {
     try {
+      // Debug: Log the actual summary data being used for display
+      console.log(
+        '🔍 DEBUG: renderSummarySection called with summaryData:',
+        summaryData,
+      );
+      console.log('🔍 DEBUG: Individual values:', {
+        payment: summaryData.payment,
+        receipt: summaryData.receipt,
+        sell: summaryData.sell,
+        purchase: summaryData.purchase,
+      });
+
       return (
-        <View style={styles.summaryCard}>
+        <View style={styles.summaryContainer}>
           <View style={styles.summaryRow}>
             <View style={styles.summaryItem}>
-              <Text style={styles.summaryLabel}>Payment</Text>
+              <View style={styles.summaryIconLabelRow}>
+                <Text style={styles.summaryLabel}>Payment</Text>
+              </View>
               <Text style={[styles.summaryAmount, { color: '#dc3545' }]}>
                 ₹{summaryData.payment.toLocaleString()}
               </Text>
             </View>
             <View style={styles.summaryItem}>
-              <Text style={styles.summaryLabel}>Receipt</Text>
+              <View style={styles.summaryIconLabelRow}>
+                <Text style={styles.summaryLabel}>Receipt</Text>
+              </View>
               <Text style={[styles.summaryAmount, { color: '#28a745' }]}>
                 ₹{summaryData.receipt.toLocaleString()}
               </Text>
             </View>
           </View>
 
-          {/* Sell and Purchase Data Display Row */}
-          <View style={styles.dataDisplayRow}>
+          {/* Sell and Purchase Data Display Row - Hidden */}
+          {/* <View style={styles.dataDisplayRow}>
             <View style={styles.dataDisplayItem}>
-              <Text style={styles.dataDisplayLabel}>Sell</Text>
+              <View style={styles.summaryIconLabelRow}>
+                <Text style={styles.dataDisplayLabel}>Sell</Text>
+              </View>
               <Text style={[styles.dataDisplayAmount, { color: '#28a745' }]}>
                 ₹{summaryData.sell.toLocaleString()}
               </Text>
             </View>
             <View style={styles.dataDisplayItem}>
-              <Text style={styles.dataDisplayLabel}>Purchase</Text>
+              <View style={styles.summaryIconLabelRow}>
+                <Text style={styles.dataDisplayLabel}>Purchase</Text>
+              </View>
               <Text style={[styles.dataDisplayAmount, { color: '#dc3545' }]}>
                 ₹{summaryData.purchase.toLocaleString()}
               </Text>
             </View>
-          </View>
+          </View> */}
 
           {/* View Report Button - Bottom */}
           <TouchableOpacity
@@ -2999,7 +5239,7 @@ const CustomerScreen: React.FC = () => {
           >
             <MaterialCommunityIcons
               name="chart-line"
-              size={16}
+              size={17}
               color="#4f8cff"
             />
             <Text style={styles.bottomViewReportText}>View Report</Text>
@@ -3009,7 +5249,7 @@ const CustomerScreen: React.FC = () => {
     } catch (error) {
       console.error('Error rendering summary section:', error);
       return (
-        <View style={styles.summaryCard}>
+        <View style={styles.summaryContainer}>
           <Text style={styles.errorText}>Summary unavailable</Text>
         </View>
       );
@@ -3035,7 +5275,7 @@ const CustomerScreen: React.FC = () => {
               }
               value={searchQuery}
               onChangeText={setSearchQuery}
-              placeholderTextColor="#8a94a6"
+              placeholderTextColor="#666666"
             />
             {searchQuery.length > 0 && (
               <TouchableOpacity onPress={() => setSearchQuery('')}>
@@ -3082,26 +5322,38 @@ const CustomerScreen: React.FC = () => {
   const renderHeader = () => {
     try {
       return (
-        <View style={styles.header}>
+        <View
+          style={[
+            styles.header,
+            getSolidHeaderStyle(
+              preciseStatusBarHeight || statusBarSpacer.height,
+            ),
+          ]}
+          key={`hdr-${headerKey}`}
+        >
+          <View style={{ height: HEADER_CONTENT_HEIGHT }} />
           <TouchableOpacity
+            style={styles.headerMenuButton}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             onPress={() => navigation.dispatch(DrawerActions.openDrawer())}
+            activeOpacity={0.8}
           >
-            <MaterialCommunityIcons name="menu" size={24} color="#fff" />
+            <MaterialCommunityIcons name="menu" size={25} color="#fff" />
           </TouchableOpacity>
           <View style={styles.headerTitle}>
             <MaterialCommunityIcons
               name="book-open-variant"
-              size={20}
+              size={21}
               color="#fff"
             />
-            <Text style={styles.headerText}>{businessName || 'User'}</Text>
+            <Text style={styles.headerText}>{getHeaderDisplayName()}</Text>
           </View>
           <TouchableOpacity
             style={styles.editIconButton}
             onPress={() => navigation.navigate('ProfileScreen', { user: {} })}
             activeOpacity={0.7}
           >
-            <MaterialCommunityIcons name="pencil" size={16} color="#fff" />
+            <MaterialCommunityIcons name="pencil" size={17} color="#fff" />
           </TouchableOpacity>
 
           <View style={{ width: 24 }} />
@@ -3120,42 +5372,7 @@ const CustomerScreen: React.FC = () => {
   // Safety wrapper for navigation tabs
   const renderNavigationTabs = () => {
     try {
-      return (
-        <View style={styles.tabContainer}>
-          <TouchableOpacity
-            style={[
-              styles.tab,
-              activeTab === 'customers' ? styles.activeTab : {},
-            ]}
-            onPress={() => handleTabChange('customers')}
-          >
-            <Text
-              style={[
-                styles.tabText,
-                activeTab === 'customers' ? styles.activeTabText : {},
-              ]}
-            >
-              Customers
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[
-              styles.tab,
-              activeTab === 'suppliers' ? styles.activeTab : {},
-            ]}
-            onPress={() => handleTabChange('suppliers')}
-          >
-            <Text
-              style={[
-                styles.tabText,
-                activeTab === 'suppliers' ? styles.activeTabText : {},
-              ]}
-            >
-              Suppliers
-            </Text>
-          </TouchableOpacity>
-        </View>
-      );
+      return <TopTabs activeTab={activeTab} onChange={handleTabChange} />;
     } catch (error) {
       console.error('Error rendering navigation tabs:', error);
       return (
@@ -3190,17 +5407,13 @@ const CustomerScreen: React.FC = () => {
     try {
       return (
         <>
-          <StatusBar barStyle="light-content" backgroundColor="#4f8cff" />
-
           {/* Header */}
           {renderHeader()}
-
-          {/* Navigation Tabs */}
-          {renderNavigationTabs()}
 
           <ScrollView
             style={styles.content}
             showsVerticalScrollIndicator={false}
+            stickyHeaderIndices={[0]}
             refreshControl={
               <RefreshControl
                 refreshing={globalCustomerCache.isRefreshing}
@@ -3233,7 +5446,7 @@ const CustomerScreen: React.FC = () => {
                       await Promise.all([
                         fetchCustomersData(accessToken),
                         fetchUserData(accessToken),
-                        fetch(`${BASE_URL}/vouchers`, {
+                        fetch(`${BASE_URL}/transactions`, {
                           headers: { Authorization: `Bearer ${accessToken}` },
                         })
                           .then(res => res.json())
@@ -3258,13 +5471,16 @@ const CustomerScreen: React.FC = () => {
 
                     // Update state
                     setCustomers(customersResult);
+                    console.log(
+                      '🔍 DEBUG: Setting allVouchers in manual refresh:',
+                      {
+                        vouchersResponseLength: vouchersResponse.length,
+                        vouchersResponse: vouchersResponse.slice(0, 3), // Show first 3 vouchers
+                      },
+                    );
                     setAllVouchers(vouchersResponse);
                     setUserData(userDataResult);
-                    setBusinessName(
-                      userDataResult?.businessName ||
-                        userDataResult?.ownerName ||
-                        'User',
-                    );
+                    updateBusinessNameIfPresent(userDataResult?.businessName);
 
                     console.log(
                       '✅ CustomerScreen: Pull-to-refresh completed - Customers:',
@@ -3287,57 +5503,43 @@ const CustomerScreen: React.FC = () => {
               />
             }
           >
-            {/* Summary Card */}
-            {renderSummarySection()}
-
-            {/* Search and Filter */}
-            {renderSearchAndFilter()}
+            {/* Sticky header block: Tabs + Summary + Search */}
+            <View style={styles.stickyHeaderBlock}>
+              {renderNavigationTabs()}
+              {renderSummarySection()}
+              {renderSearchAndFilter()}
+            </View>
 
             {/* Customer List */}
             <View style={styles.customerList}>
-              {error ? (
-                <View style={styles.errorContainer}>
-                  <MaterialCommunityIcons
-                    name="alert-circle"
-                    size={48}
-                    color="#dc3545"
-                  />
-                  <Text style={styles.errorText}>{error}</Text>
-                  <TouchableOpacity
-                    style={styles.retryButton}
-                    onPress={handleManualRefresh}
-                  >
-                    <Text style={styles.retryButtonText}>Retry</Text>
-                  </TouchableOpacity>
-                </View>
-              ) : customers.length === 0 ? (
-                <View style={styles.emptyContainer}>
-                  <MaterialCommunityIcons
-                    name={
-                      activeTab === 'suppliers'
-                        ? 'truck-delivery-outline'
-                        : 'account-group-outline'
-                    }
-                    size={48}
-                    color="#666"
-                  />
-                  <Text style={styles.emptyText}>
-                    {tabText.emptyText || 'No items found'}
-                  </Text>
-                  <Text style={styles.emptySubtext}>
-                    {tabText.emptySubtext ||
-                      'Add your first item to get started'}
-                  </Text>
-                  <TouchableOpacity
-                    style={styles.retryButton}
-                    onPress={handleManualRefresh}
-                  >
-                    <Text style={styles.retryButtonText}>Refresh</Text>
-                  </TouchableOpacity>
-                </View>
-              ) : (
-                renderCustomerList()
-              )}
+              <PartyList
+                items={
+                  (filteredCustomers || []).map((it: any) => {
+                    const raw = String(
+                      it?.phoneNumber || it?.partyPhone || it?.phone || '',
+                    );
+                    let digits = raw.replace(/\D/g, '');
+                    if (digits.length > 10) digits = digits.slice(-10);
+                    const formatted =
+                      digits.length === 10 ? `+91-${digits}` : '';
+                    return { ...it, phoneNumber: formatted };
+                  }) as unknown as PartyItem[]
+                }
+                emptyTitle={tabText.emptyText}
+                emptySubtitle={tabText.emptySubtext}
+                onPressItem={item => {
+                  try {
+                    navigation.navigate('CustomerDetail', {
+                      customer: item,
+                      partyType:
+                        (item.partyType as any) ||
+                        (activeTab === 'suppliers' ? 'supplier' : 'customer'),
+                    });
+                  } catch (e) {
+                    console.error('Navigation error:', e);
+                  }
+                }}
+              />
             </View>
           </ScrollView>
 
@@ -3426,7 +5628,7 @@ const CustomerScreen: React.FC = () => {
                           handleBusinessInfoChange('ownerName', value)
                         }
                         placeholder="Enter your full name"
-                        placeholderTextColor="#8a94a6"
+                        placeholderTextColor="#666666"
                         returnKeyType="next"
                         onSubmitEditing={() =>
                           handleSubmitEditing(businessNameRef)
@@ -3450,7 +5652,7 @@ const CustomerScreen: React.FC = () => {
                           handleBusinessInfoChange('businessName', value)
                         }
                         placeholder="Enter your business name"
-                        placeholderTextColor="#8a94a6"
+                        placeholderTextColor="#666666"
                         returnKeyType="next"
                         onSubmitEditing={() => {
                           // Focus will move to dropdowns, so we'll handle this differently
@@ -3625,7 +5827,7 @@ const CustomerScreen: React.FC = () => {
                           )
                         }
                         placeholder="Enter your current accounting software"
-                        placeholderTextColor="#8a94a6"
+                        placeholderTextColor="#666666"
                         returnKeyType="done"
                         onSubmitEditing={() => {
                           // This is the last field, so we'll blur it
@@ -3837,7 +6039,11 @@ const CustomerScreen: React.FC = () => {
         if (!element) return element;
 
         if (typeof element === 'string' || typeof element === 'number') {
-          return <Text>{String(element)}</Text>;
+          return (
+            <Text style={{ fontFamily: 'Roboto-Medium' }}>
+              {String(element)}
+            </Text>
+          );
         }
 
         if (Array.isArray(element)) {
@@ -3879,7 +6085,12 @@ const CustomerScreen: React.FC = () => {
   // 🚨 REMOVED: Loading screen completely
 
   return (
-    <SafeAreaView style={styles.container} key={refreshKey}>
+    <SafeAreaView style={styles.container} key={refreshKey} edges={['bottom']}>
+      <StatusBar
+        backgroundColor="#4f8cff"
+        barStyle="light-content"
+        translucent={false}
+      />
       {(() => {
         try {
           return renderMainContent();
@@ -3909,6 +6120,14 @@ const CustomerScreen: React.FC = () => {
 };
 
 const styles = StyleSheet.create({
+  stickyHeaderBlock: {
+    backgroundColor: '#f8fafc',
+    zIndex: 1,
+    elevation: 0,
+    shadowColor: 'transparent',
+    shadowOpacity: 0,
+    borderWidth: 0,
+  },
   container: {
     flex: 1,
     backgroundColor: '#f8fafc',
@@ -3919,13 +6138,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'flex-start',
     paddingHorizontal: 12,
-    paddingVertical: 12,
+    paddingTop: 30,
+    paddingBottom: 30,
   },
   headerTitle: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginLeft: 12,
+    // marginLeft: 10,
   },
   editIconButton: {
     padding: 8,
@@ -3935,9 +6155,17 @@ const styles = StyleSheet.create({
   },
   headerText: {
     color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
+    fontSize: 15,
+    fontWeight: '800',
+    fontFamily: 'Roboto-Medium',
   },
+  headerMenuButton: {
+    padding: 10,
+    // borderRadius: 10,
+    // backgroundColor: 'rgba(255,255,255,0.15)',
+    marginRight: 6,
+  },
+
   tabContainer: {
     flexDirection: 'row',
     backgroundColor: '#fff',
@@ -3945,6 +6173,8 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderBottomWidth: 1,
     borderBottomColor: '#e2e8f0',
+    zIndex: 1000,
+    elevation: 8,
   },
   tab: {
     flex: 1,
@@ -3958,12 +6188,14 @@ const styles = StyleSheet.create({
   },
   tabText: {
     fontSize: 12,
-    fontWeight: '500',
     color: '#64748b',
+    fontFamily: 'Roboto-Medium',
   },
+
   activeTabText: {
     color: '#4f8cff',
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
   supplierTab: {
     flexDirection: 'row',
@@ -3979,99 +6211,146 @@ const styles = StyleSheet.create({
   newBadgeText: {
     color: '#fff',
     fontSize: 7.5,
-    fontWeight: 'bold',
+    fontFamily: 'Roboto-Medium',
   },
+
   content: {
     flex: 1,
     paddingHorizontal: 12,
   },
-  summaryCard: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    marginTop: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
+  summaryContainer: {
+    backgroundColor: 'transparent',
+    paddingHorizontal: 0,
+    paddingVertical: 4,
+    marginTop: 2,
+    paddingBottom: 0,
   },
 
   bottomViewReportButton: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 9,
+    paddingVertical: 10,
     paddingHorizontal: 18,
-    marginTop: 12,
-    marginHorizontal: 12,
-    backgroundColor: '#f0f6ff',
-    borderWidth: 1,
-    borderColor: '#4f8cff',
+    marginTop: 4,
+    marginHorizontal: 0,
+    backgroundColor: 'transparent',
+    borderWidth: 0,
     borderRadius: 6,
     gap: 6,
-    shadowColor: '#4f8cff',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
   },
   bottomViewReportText: {
     color: '#4f8cff',
-    fontSize: 10.5,
-    fontWeight: '600',
+    fontSize: 13,
+    fontWeight: '700',
+    fontFamily: 'Roboto-Medium',
   },
+
   summaryRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 12,
+    gap: 9,
+    marginBottom: 5.5,
+    paddingHorizontal: 0,
   },
   summaryItem: {
     flex: 1,
     alignItems: 'center',
-    paddingVertical: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    backgroundColor: '#ffffff',
+    borderRadius: 7,
+    marginHorizontal: 0,
+    borderWidth: 1,
+    borderColor: '#e9eef5',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
   },
   summaryLabel: {
     fontSize: 12,
-    color: '#64748b',
-    marginBottom: 6,
-    fontWeight: '500',
-  },
-  summaryAmount: {
-    fontSize: 20,
+    color: '#000000',
+    marginLeft: 8,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
     fontWeight: '700',
-    color: '#1e293b',
+    fontFamily: 'Roboto-Medium',
   },
+
+  summaryAmount: {
+    fontSize: 22,
+    fontWeight: '600',
+    color: '#1e293b',
+    fontFamily: 'Roboto-Medium',
+  },
+
   dataDisplayRow: {
     flexDirection: 'row',
-    gap: 15,
-    marginTop: 9,
-    paddingTop: 9,
-    borderTopWidth: 0.5,
-    borderTopColor: '#e5e5e5',
+    gap: 12,
+    marginTop: 4,
+    paddingHorizontal: 0,
   },
   dataDisplayItem: {
     flex: 1,
     alignItems: 'center',
-    paddingVertical: 4.5,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    backgroundColor: '#ffffff',
+    borderRadius: 7,
+    marginHorizontal: 0,
+    borderWidth: 1,
+    borderColor: '#e9eef5',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  summaryIconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#e0f2fe',
+  },
+  summaryIconLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+    paddingHorizontal: 4,
+  },
+  dataDisplayIconWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f1f5f9',
   },
   dataDisplayLabel: {
-    fontSize: 10.5,
-    color: '#666',
-    marginBottom: 3,
-    fontWeight: '500',
+    fontSize: 12,
+    color: '#000000',
+    marginLeft: 8,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    fontWeight: '700',
+    fontFamily: 'Roboto-Medium',
   },
+
   dataDisplayAmount: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#333',
+    fontSize: 22,
+    fontWeight: '600',
+    color: '#1e293b',
+    fontFamily: 'Roboto-Medium',
   },
 
   searchContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 12,
-    marginBottom: 12,
+    marginTop: 8,
+    marginBottom: 8,
     gap: 12,
   },
   searchBar: {
@@ -4079,35 +6358,36 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#fff',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    // paddingVertical: 6,
+    // shadowColor: '#000',
+    // shadowOffset: { width: 0, height: 2 },
+    // shadowOpacity: 0.06,
+    // shadowRadius: 6,
     elevation: 2,
     borderWidth: 1,
-    borderColor: '#e2e8f0',
+    borderColor: '#e5e7eb',
   },
   searchInput: {
     flex: 1,
     marginLeft: 8,
     fontSize: 14,
-    color: '#1e293b',
-    fontWeight: '500',
+    color: '#333333',
+    fontFamily: 'Roboto-Medium',
   },
+
   filterButton: {
     backgroundColor: '#fff',
     padding: 8,
-    borderRadius: 8,
+    borderRadius: 12,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
     elevation: 2,
     borderWidth: 1,
-    borderColor: '#e2e8f0',
+    borderColor: '#e6eaf0',
     minWidth: 40,
     height: 40,
     alignItems: 'center',
@@ -4116,7 +6396,7 @@ const styles = StyleSheet.create({
   filterButtonActive: {
     borderColor: '#4f8cff',
     borderWidth: 2,
-    backgroundColor: '#f0f6ff',
+    backgroundColor: '#eaf2ff',
   },
   customerList: {
     marginBottom: 60, // Space for FAB
@@ -4125,20 +6405,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#fff',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    marginBottom: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    borderRadius: 12,
+    marginBottom: 10,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
     elevation: 2,
   },
   customerAvatar: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     backgroundColor: '#4f8cff',
     alignItems: 'center',
     justifyContent: 'center',
@@ -4146,45 +6426,51 @@ const styles = StyleSheet.create({
   },
   avatarText: {
     color: '#fff',
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 15,
+    fontFamily: 'Roboto-Medium',
   },
+
   customerInfo: {
     flex: 1,
   },
   customerName: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#1e293b',
+    fontSize: 16,
+    color: '#333333',
     marginBottom: 4,
+    fontFamily: 'Roboto-Medium',
   },
+
   customerDate: {
-    fontSize: 10,
-    color: '#64748b',
-    fontWeight: '500',
+    fontSize: 13,
+    color: '#6b7280',
+    fontFamily: 'Roboto-Medium',
   },
+
   customerPhone: {
-    fontSize: 10,
-    color: '#64748b',
+    fontSize: 13,
+    color: '#6b7280',
     marginTop: 2,
-    fontWeight: '500',
+    fontFamily: 'Roboto-Medium',
   },
+
   customerAmount: {
     alignItems: 'flex-end',
   },
   amountText: {
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 16,
     marginBottom: 4,
+    fontFamily: 'Roboto-Medium',
   },
+
   amountLabel: {
     fontSize: 9,
-    color: '#64748b',
-    fontWeight: '500',
+    color: '#6b7280',
+    fontFamily: 'Roboto-Medium',
   },
+
   fab: {
     position: 'absolute',
-    bottom: 20,
+    bottom: 40,
     right: 20,
     backgroundColor: '#4f8cff',
     flexDirection: 'row',
@@ -4200,10 +6486,12 @@ const styles = StyleSheet.create({
   },
   fabText: {
     color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: 14,
     marginLeft: 8,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '700',
   },
+
   loadingContainer: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -4211,9 +6499,11 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     marginTop: 9,
-    fontSize: 12,
-    color: '#666',
+    fontSize: 10,
+    color: '#666666',
+    fontFamily: 'Roboto-Medium',
   },
+
   errorContainer: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -4221,11 +6511,13 @@ const styles = StyleSheet.create({
   },
   errorText: {
     marginTop: 9,
-    fontSize: 12,
+    fontSize: 10,
     color: '#dc3545',
     textAlign: 'center',
     marginBottom: 12,
+    fontFamily: 'Roboto-Medium',
   },
+
   retryButton: {
     backgroundColor: '#4f8cff',
     paddingHorizontal: 18,
@@ -4234,9 +6526,10 @@ const styles = StyleSheet.create({
   },
   retryButtonText: {
     color: '#fff',
-    fontSize: 10.5,
-    fontWeight: '600',
+    fontSize: 9.5,
+    fontFamily: 'Roboto-Medium',
   },
+
   emptyContainer: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -4244,16 +6537,19 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     marginTop: 9,
-    fontSize: 13.5,
-    fontWeight: '600',
-    color: '#333',
+    fontSize: 12,
+    color: '#333333',
     marginBottom: 3,
+    fontFamily: 'Roboto-Medium',
   },
+
   emptySubtext: {
-    fontSize: 10.5,
-    color: '#666',
+    fontSize: 9.5,
+    color: '#666666',
     textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
   },
+
   modalOverlay: {
     flex: 1,
     justifyContent: 'flex-end',
@@ -4282,16 +6578,19 @@ const styles = StyleSheet.create({
     borderBottomColor: '#f0f0f0',
   },
   modalTitle: {
-    fontSize: 12,
-    fontWeight: 'bold',
-    color: '#222',
+    fontSize: 18,
+    color: '#333333',
+    fontFamily: 'Roboto-Medium',
   },
+
   modalSubtitle: {
-    fontSize: 7.5,
-    color: '#666',
-    marginTop: 0.75,
+    fontSize: 12,
+    color: '#666666',
+    marginTop: 2,
     textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
   },
+
   modalTitleContainer: {
     flex: 1,
     alignItems: 'center',
@@ -4303,21 +6602,26 @@ const styles = StyleSheet.create({
     minHeight: 0,
   },
   modalBodyContent: {
-    padding: 12,
-    paddingBottom: 12,
+    padding: 16,
+    paddingBottom: 16,
   },
   closeButton: {
-    padding: 3,
+    padding: 12,
+    minWidth: 48,
+    minHeight: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   filterSection: {
     marginBottom: 12,
   },
   filterSectionTitle: {
-    fontSize: 11.25,
-    fontWeight: '600',
-    color: '#1f2937',
+    fontSize: 12,
+    color: '#333333',
     marginBottom: 6,
+    fontFamily: 'Roboto-Medium',
   },
+
   filterOptions: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -4345,20 +6649,22 @@ const styles = StyleSheet.create({
     borderColor: '#4f8cff',
   },
   filterOptionText: {
-    fontSize: 10.5,
+    fontSize: 11,
     color: '#6b7280',
-    fontWeight: '500',
+    fontFamily: 'Roboto-Medium',
   },
+
   filterOptionTextSelected: {
     color: '#fff',
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
   modalFooter: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     padding: 10.5,
-    paddingTop: 7.5,
-    paddingBottom: 6,
+    paddingTop: 12,
+    paddingBottom: 24,
     borderTopWidth: 1,
     borderTopColor: '#f0f0f0',
     gap: 10.5,
@@ -4373,9 +6679,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderWidth: 2,
     borderColor: '#dc3545',
-    borderRadius: 6,
-    paddingVertical: 9,
-    paddingHorizontal: 12,
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
     shadowColor: '#dc3545',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
@@ -4384,10 +6690,11 @@ const styles = StyleSheet.create({
   },
   resetButtonText: {
     color: '#dc3545',
-    fontSize: 10.5,
-    fontWeight: '700',
+    fontSize: 14,
     letterSpacing: 0.2,
+    fontFamily: 'Roboto-Medium',
   },
+
   applyButton: {
     flex: 1,
     flexDirection: 'row',
@@ -4396,9 +6703,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#4f8cff',
     borderWidth: 2,
     borderColor: '#4f8cff',
-    borderRadius: 6,
-    paddingVertical: 9,
-    paddingHorizontal: 12,
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
     shadowColor: '#4f8cff',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.2,
@@ -4407,10 +6714,11 @@ const styles = StyleSheet.create({
   },
   applyButtonText: {
     color: '#fff',
-    fontSize: 10.5,
-    fontWeight: '700',
+    fontSize: 14,
     letterSpacing: 0.2,
+    fontFamily: 'Roboto-Medium',
   },
+
   locationInput: {
     borderWidth: 1.5,
     borderColor: '#d1d5db',
@@ -4418,13 +6726,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 13.5,
     paddingVertical: 10.5,
     fontSize: 12,
-    color: '#222',
+    color: '#333333',
     backgroundColor: '#f9fafb',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
     shadowRadius: 2,
     elevation: 1,
+    fontFamily: 'Roboto-Medium',
   },
   filterBadge: {
     position: 'absolute',
@@ -4446,10 +6755,11 @@ const styles = StyleSheet.create({
   },
   filterBadgeText: {
     color: '#fff',
-    fontSize: 9,
-    fontWeight: 'bold',
+    fontSize: 8,
     lineHeight: 12,
+    fontFamily: 'Roboto-Medium',
   },
+
   scrollIndicator: {
     alignItems: 'center',
     paddingVertical: 6,
@@ -4469,21 +6779,24 @@ const styles = StyleSheet.create({
     borderTopColor: '#f0f0f0',
   },
   scrollHintText: {
-    fontSize: 10.5,
-    color: '#666',
+    fontSize: 9.5,
+    color: '#666666',
     marginTop: 3,
     textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
   },
+
   quickFiltersSection: {
     marginBottom: 15,
   },
   sectionTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: '#1f2937',
-    marginBottom: 9,
-    letterSpacing: -0.3,
+    fontSize: 16,
+    color: '#333333',
+    marginBottom: 12,
+    letterSpacing: -0.2,
+    fontFamily: 'Roboto-Medium',
   },
+
   quickFiltersGrid: {
     flexDirection: 'row',
     gap: 7.5,
@@ -4491,8 +6804,8 @@ const styles = StyleSheet.create({
   quickFilterCard: {
     flex: 1,
     backgroundColor: '#f8fafc',
-    borderRadius: 9,
-    padding: 9,
+    borderRadius: 12,
+    padding: 16,
     alignItems: 'center',
     borderWidth: 2,
     borderColor: '#e2e8f0',
@@ -4501,6 +6814,7 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.05,
     shadowRadius: 6,
     elevation: 2,
+    minHeight: 80,
   },
   quickFilterActive: {
     backgroundColor: '#4f8cff',
@@ -4512,26 +6826,29 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   quickFilterIcon: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: '#f1f5f9',
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#eaf2ff',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 6,
+    marginBottom: 8,
   },
   quickFilterLabel: {
-    fontSize: 9.75,
-    fontWeight: '700',
-    color: '#1f2937',
-    marginBottom: 1.5,
+    fontSize: 16,
+    color: '#333333',
+    marginBottom: 4,
     textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
   },
+
   quickFilterSubtext: {
-    fontSize: 7.5,
+    fontSize: 12,
     color: '#6b7280',
     textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
   },
+
   amountRangeContainer: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -4540,15 +6857,15 @@ const styles = StyleSheet.create({
   amountRangeOption: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 9,
-    paddingVertical: 6,
-    borderRadius: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 16,
     borderWidth: 1.5,
-    borderColor: '#d1d5db',
+    borderColor: '#cfe0ff',
     backgroundColor: '#ffffff',
-    minWidth: 52.5,
+    minWidth: 80,
     justifyContent: 'center',
-    gap: 3,
+    gap: 6,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
@@ -4560,13 +6877,14 @@ const styles = StyleSheet.create({
     borderColor: '#4f8cff',
   },
   amountRangeText: {
-    fontSize: 9,
+    fontSize: 14,
     color: '#6b7280',
-    fontWeight: '600',
+    fontFamily: 'Roboto-Medium',
   },
+
   amountRangeTextActive: {
     color: '#fff',
-    fontWeight: '700',
+    fontFamily: 'Roboto-Medium',
   },
   locationSearchContainer: {
     flexDirection: 'row',
@@ -4588,10 +6906,11 @@ const styles = StyleSheet.create({
   },
   locationSearchInput: {
     flex: 1,
-    fontSize: 12,
-    color: '#1f2937',
-    fontWeight: '500',
+    fontSize: 11,
+    color: '#333333',
+    fontFamily: 'Roboto-Medium',
   },
+
   clearLocationButton: {
     padding: 3,
     marginLeft: 6,
@@ -4599,27 +6918,28 @@ const styles = StyleSheet.create({
   addressSearchContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#f8fafc',
-    borderRadius: 7.5,
-    paddingHorizontal: 9,
-    paddingVertical: 2.25,
+    backgroundColor: '#f9fbff',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
     borderWidth: 1.5,
-    borderColor: '#d1d5db',
+    borderColor: '#e6ecf5',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 1,
+    shadowOpacity: 0.06,
+    shadowRadius: 3,
+    elevation: 2,
   },
   addressIcon: {
     marginRight: 7.5,
   },
   addressSearchInput: {
     flex: 1,
-    fontSize: 10.5,
-    color: '#1f2937',
-    fontWeight: '500',
+    fontSize: 14,
+    color: '#333333',
+    fontFamily: 'Roboto-Medium',
   },
+
   clearAddressButton: {
     padding: 3,
     marginLeft: 4.5,
@@ -4632,11 +6952,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   contactFilterLabel: {
-    fontSize: 10.5,
-    fontWeight: '600',
+    fontSize: 9.5,
     color: '#374151',
     marginBottom: 6,
+    fontFamily: 'Roboto-Medium',
   },
+
   contactFilterOptions: {
     flexDirection: 'row',
     gap: 4.5,
@@ -4659,29 +6980,31 @@ const styles = StyleSheet.create({
     borderColor: '#4f8cff',
   },
   contactFilterOptionText: {
-    fontSize: 9,
+    fontSize: 8.5,
     color: '#6b7280',
-    fontWeight: '500',
+    fontFamily: 'Roboto-Medium',
   },
+
   contactFilterOptionTextActive: {
     color: '#fff',
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
   contactFilterGrid: {
     flexDirection: 'column',
     gap: 9,
   },
   contactFilterCard: {
-    backgroundColor: '#f8fafc',
-    borderRadius: 10.5,
-    padding: 10.5,
+    backgroundColor: '#f9fbff',
+    borderRadius: 12,
+    padding: 12,
     borderWidth: 1.5,
-    borderColor: '#e2e8f0',
+    borderColor: '#e6ecf5',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 6,
-    elevation: 2,
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 3,
   },
   contactFilterHeader: {
     flexDirection: 'row',
@@ -4690,10 +7013,11 @@ const styles = StyleSheet.create({
     gap: 4.5,
   },
   contactFilterTitle: {
-    fontSize: 10.5,
-    fontWeight: '700',
-    color: '#1f2937',
+    fontSize: 16,
+    color: '#333333',
+    fontFamily: 'Roboto-Medium',
   },
+
   contactFilterButtons: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -4702,9 +7026,9 @@ const styles = StyleSheet.create({
   contactFilterButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 7.5,
-    paddingVertical: 4.5,
-    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 16,
     borderWidth: 1.5,
     borderColor: '#d1d5db',
     backgroundColor: '#ffffff',
@@ -4713,20 +7037,21 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.05,
     shadowRadius: 2,
     elevation: 1,
-    minWidth: 52.5,
+    minWidth: 70,
   },
   contactFilterButtonActive: {
     backgroundColor: '#4f8cff',
     borderColor: '#4f8cff',
   },
   contactFilterButtonText: {
-    fontSize: 8.25,
+    fontSize: 14,
     color: '#6b7280',
-    fontWeight: '600',
+    fontFamily: 'Roboto-Medium',
   },
+
   contactFilterButtonTextActive: {
     color: '#fff',
-    fontWeight: '700',
+    fontFamily: 'Roboto-Medium',
   },
   businessNameModalContent: {
     backgroundColor: '#fff',
@@ -4747,10 +7072,11 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   businessNameModalTitle: {
-    fontSize: 13.5,
-    fontWeight: 'bold',
-    color: '#222',
+    fontSize: 12,
+    color: '#333333',
+    fontFamily: 'Roboto-Medium',
   },
+
   businessNameModalCloseButton: {
     padding: 3,
   },
@@ -4758,24 +7084,26 @@ const styles = StyleSheet.create({
     marginBottom: 18,
   },
   businessNameModalLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#333',
+    fontSize: 11,
+    color: '#333333',
     marginBottom: 6,
+    fontFamily: 'Roboto-Medium',
   },
+
   businessNameModalInput: {
     borderWidth: 1.5,
     borderColor: '#d1d5db',
     borderRadius: 6,
     padding: 9,
-    fontSize: 12,
-    color: '#222',
+    fontSize: 11,
+    color: '#333333',
     backgroundColor: '#f9fafb',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
     shadowOpacity: 0.05,
     shadowRadius: 2,
     elevation: 1,
+    fontFamily: 'Roboto-Medium',
   },
   businessNameModalFooter: {
     flexDirection: 'row',
@@ -4800,10 +7128,11 @@ const styles = StyleSheet.create({
   },
   businessNameModalCancelText: {
     color: '#dc3545',
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 11,
     letterSpacing: 0.2,
+    fontFamily: 'Roboto-Medium',
   },
+
   businessNameModalSaveButton: {
     flex: 1,
     paddingVertical: 9,
@@ -4822,9 +7151,9 @@ const styles = StyleSheet.create({
   },
   businessNameModalSaveText: {
     color: '#fff',
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 11,
     letterSpacing: 0.2,
+    fontFamily: 'Roboto-Medium',
   },
 
   // Business Information Modal Styles
@@ -4870,15 +7199,18 @@ const styles = StyleSheet.create({
   },
   businessInfoModalTitle: {
     fontSize: 20,
-    fontWeight: '700',
-    color: '#222',
+    color: '#333333',
     marginBottom: 4,
+    fontFamily: 'Roboto-Medium',
   },
+
   businessInfoModalSubtitle: {
     fontSize: 14,
-    color: '#666',
+    color: '#666666',
     lineHeight: 20,
+    fontFamily: 'Roboto-Medium',
   },
+
   businessInfoModalCloseButton: {
     width: 40,
     height: 40,
@@ -4903,10 +7235,11 @@ const styles = StyleSheet.create({
   },
   businessInfoFormLabel: {
     fontSize: 14,
-    fontWeight: '600',
-    color: '#333',
+    color: '#333333',
     marginBottom: 8,
+    fontFamily: 'Roboto-Medium',
   },
+
   businessInfoDropdown: {
     borderWidth: 1.5,
     borderColor: '#e3e7ee',
@@ -4917,13 +7250,17 @@ const styles = StyleSheet.create({
     minHeight: 48,
   },
   businessInfoDropdownPlaceholder: {
-    color: '#8a94a6',
+    color: '#666666',
     fontSize: 14,
+    fontFamily: 'Roboto-Medium',
   },
+
   businessInfoDropdownSelectedText: {
-    color: '#222',
+    color: '#333333',
     fontSize: 14,
+    fontFamily: 'Roboto-Medium',
   },
+
   businessInfoDropdownContainer: {
     borderRadius: 12,
     borderColor: '#e3e7ee',
@@ -4941,10 +7278,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 14,
     fontSize: 14,
-    color: '#222',
+    color: '#333333',
     backgroundColor: '#f8fafc',
     minHeight: 48,
+    fontFamily: 'Roboto-Medium',
   },
+
   businessInfoModalFooter: {
     flexDirection: 'row',
     padding: 20,
@@ -4971,10 +7310,11 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   businessInfoModalSkipText: {
-    color: '#666',
+    color: '#666666',
     fontSize: 14,
-    fontWeight: '600',
+    fontFamily: 'Roboto-Medium',
   },
+
   businessInfoModalSaveButton: {
     flex: 1,
     paddingVertical: 10,
@@ -4995,7 +7335,7 @@ const styles = StyleSheet.create({
   businessInfoModalSaveText: {
     color: '#fff',
     fontSize: 14,
-    fontWeight: '700',
+    fontFamily: 'Roboto-Medium',
   },
 
   // Enhanced Business Info Modal Styles
@@ -5018,9 +7358,10 @@ const styles = StyleSheet.create({
   },
   businessInfoSectionTitle: {
     fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
+    color: '#333333',
+    fontFamily: 'Roboto-Medium',
   },
+
   safeArea: {
     flex: 1,
     backgroundColor: '#f6fafc',
@@ -5062,21 +7403,24 @@ const styles = StyleSheet.create({
     marginBottom: 15,
   },
   alertTitle: {
-    fontSize: 16.5,
-    fontWeight: '800',
-    color: '#1a1a1a',
+    fontSize: 15,
+    color: '#333333',
     textAlign: 'center',
     marginBottom: 9,
     letterSpacing: 0.3,
+    fontFamily: 'Roboto-Medium',
   },
+
   alertMessage: {
-    fontSize: 12,
-    color: '#666',
+    fontSize: 11,
+    color: '#666666',
     textAlign: 'center',
     lineHeight: 18,
     marginBottom: 24,
     paddingHorizontal: 6,
+    fontFamily: 'Roboto-Medium',
   },
+
   alertButtons: {
     flexDirection: 'row',
     gap: 12,
@@ -5106,16 +7450,17 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   alertButtonCancelText: {
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 11,
     color: '#6c757d',
     letterSpacing: 0.2,
+    fontFamily: 'Roboto-Medium',
   },
+
   alertButtonConfirmText: {
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 11,
     color: '#fff',
     letterSpacing: 0.2,
+    fontFamily: 'Roboto-Medium',
   },
 });
 

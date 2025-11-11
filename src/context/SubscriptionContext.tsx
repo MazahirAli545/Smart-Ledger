@@ -6,7 +6,8 @@ import React, {
   ReactNode,
 } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { BASE_URL } from '../api';
+import { unifiedApi } from '../api/unifiedApiService';
+import { jwtDecode } from 'jwt-decode';
 
 export interface SubscriptionPlan {
   id: string; // String that can be parsed as a number (e.g., "1", "2", "3")
@@ -43,7 +44,7 @@ interface SubscriptionContextType {
   availablePlans: SubscriptionPlan[];
   loading: boolean;
   error: string | null;
-  fetchSubscriptionData: () => Promise<void>;
+  fetchSubscriptionData: (forceRefreshPlans?: boolean) => Promise<void>;
   upgradePlan: (planId: string) => Promise<boolean>;
   downgradePlan: (planId: string) => Promise<boolean>;
   cancelSubscription: () => Promise<boolean>;
@@ -74,36 +75,45 @@ export const SubscriptionProvider: React.FC<{ children: ReactNode }> = ({
 
   // Helper function to map API plan data to SubscriptionPlan interface
   const mapApiPlanToSubscriptionPlan = (apiPlan: any): SubscriptionPlan => {
-    // Generate a numeric ID based on plan name or use existing ID if available
-    let planId: string;
-    if (apiPlan.id && !isNaN(parseInt(apiPlan.id))) {
-      planId = apiPlan.id.toString();
-    } else {
-      // Fallback: create numeric ID from plan name
-      const planNameToId: { [key: string]: string } = {
-        free: '1',
-        starter: '2',
-        professional: '3',
-        enterprise: '4',
-      };
-      planId = planNameToId[apiPlan.name] || '999'; // Default fallback
-    }
+    console.log('🔍 Mapping API plan:', apiPlan);
+    console.log('🔍 API plan ID details:', {
+      originalId: apiPlan.id,
+      idType: typeof apiPlan.id,
+      idValue: apiPlan.id,
+      isNumber: typeof apiPlan.id === 'number',
+      isString: typeof apiPlan.id === 'string',
+      parsed: Number(apiPlan.id),
+      isNaN: isNaN(Number(apiPlan.id)),
+    });
 
-    return {
-      id: planId, // Use numeric ID instead of plan name
-      name: apiPlan.displayName,
-      price: parseInt(apiPlan.price),
-      period: apiPlan.billingCycle === 'monthly' ? 'month' : 'year',
-      description: apiPlan.description,
-      features: apiPlan.features,
+    // Use the actual ID from the API
+    const planId = apiPlan.id ? apiPlan.id.toString() : '999';
+    console.log('🔍 Final plan ID:', planId);
+
+    const mappedPlan = {
+      id: planId,
+      name: apiPlan.displayName || apiPlan.name,
+      price: parseFloat(apiPlan.price) || 0,
+      period:
+        apiPlan.billingCycle === 'month'
+          ? 'month'
+          : apiPlan.billingCycle === 'year'
+          ? 'year'
+          : apiPlan.billingCycle === 'monthly'
+          ? 'month'
+          : 'month',
+      description: apiPlan.description || 'No description available',
+      features: Array.isArray(apiPlan.features) ? apiPlan.features : [],
       limits: {
-        transactions:
-          apiPlan.maxTransactions === -1 ? -1 : apiPlan.maxTransactions,
-        users: getPlanUserLimit(apiPlan.name),
-        storage: getPlanStorageLimit(apiPlan.name),
+        transactions: apiPlan.maxTransactions || 0,
+        users: getPlanUserLimit(apiPlan.name || apiPlan.displayName),
+        storage: getPlanStorageLimit(apiPlan.name || apiPlan.displayName),
       },
-      isPopular: apiPlan.isPopular,
+      isPopular: apiPlan.isPopular || false,
     };
+
+    console.log('🔍 Mapped plan result:', mappedPlan);
+    return mappedPlan;
   };
 
   // Helper functions to get user and storage limits based on plan name
@@ -127,32 +137,116 @@ export const SubscriptionProvider: React.FC<{ children: ReactNode }> = ({
     return storageLimits[planName] || 1;
   };
 
-  const fetchSubscriptionData = async () => {
+  const fetchSubscriptionData = async (forceRefreshPlans: boolean = false) => {
     setLoading(true);
     setError(null);
     try {
-      // Fetch plans from API
-      const plansResponse = await fetch(`${BASE_URL}/plans`, {
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (!plansResponse.ok) {
-        throw new Error(`HTTP error! status: ${plansResponse.status}`);
-      }
-
-      const plansResult = await plansResponse.json();
-
-      if (plansResult.code !== 200) {
-        throw new Error(plansResult.message || 'Failed to fetch plans');
-      }
-
-      // Map API plans to SubscriptionPlan interface
-      const mappedPlans = plansResult.data.map(mapApiPlanToSubscriptionPlan);
-      setAvailablePlans(mappedPlans);
-
       const token = await AsyncStorage.getItem('accessToken');
+
+      // Build headers with Authorization if token exists
+      const commonHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        commonHeaders.Authorization = `Bearer ${token}`;
+      }
+
+      // Fetch plans from API only if not already loaded or force refresh is requested
+      // Plans don't change frequently, so we can cache them
+      let mappedPlans: SubscriptionPlan[] =
+        availablePlans.length > 0 && !forceRefreshPlans ? availablePlans : [];
+
+      if (mappedPlans.length === 0 || forceRefreshPlans) {
+        try {
+          console.log('🔍 Fetching plans from API:', '/plans');
+          // Use unified API - get() already returns response.data
+          // Plans endpoint is public (no auth required), so skip auth
+          const plansResult = await unifiedApi.get('/plans', {
+            skipAuth: true, // Plans endpoint is public, no auth required
+          });
+          console.log('📡 Plans API Response:', plansResult);
+          console.log('📡 Plans API Response Type:', typeof plansResult);
+          console.log(
+            '📡 Plans API Response Is Array:',
+            Array.isArray(plansResult),
+          );
+
+          // Backend returns array directly, but unifiedApi.get() wraps it
+          // Handle both cases: direct array or wrapped in { data: ... }
+          let plansArray: any[] = [];
+
+          if (Array.isArray(plansResult)) {
+            // Direct array response
+            plansArray = plansResult;
+          } else if (plansResult && typeof plansResult === 'object') {
+            // Wrapped response - check for data property
+            if (Array.isArray((plansResult as any).data)) {
+              plansArray = (plansResult as any).data;
+            } else if (Array.isArray((plansResult as any).plans)) {
+              plansArray = (plansResult as any).plans;
+            } else {
+              // Try to extract array from any property
+              const keys = Object.keys(plansResult);
+              for (const key of keys) {
+                if (Array.isArray((plansResult as any)[key])) {
+                  plansArray = (plansResult as any)[key];
+                  break;
+                }
+              }
+            }
+          }
+
+          console.log('📡 Plans Array Length:', plansArray.length);
+          console.log(
+            '📡 Plans Array Data:',
+            JSON.stringify(plansArray, null, 2),
+          );
+
+          if (plansArray.length > 0) {
+            mappedPlans = plansArray.map(mapApiPlanToSubscriptionPlan);
+            console.log('📡 Mapped Plans Count:', mappedPlans.length);
+            console.log(
+              '📡 Mapped Plans:',
+              mappedPlans.map(p => ({
+                id: p.id,
+                name: p.name,
+                price: p.price,
+              })),
+            );
+          } else {
+            console.warn(
+              '⚠️ Plans array is empty - no plans found in response',
+            );
+          }
+        } catch (e: any) {
+          console.error('❌ Plans API request failed:', e);
+          // Safely log error details
+          try {
+            const errorDetails: any = {};
+            if (e?.message) errorDetails.message = e.message;
+            if (e?.status) errorDetails.status = e.status;
+            if (e?.response) errorDetails.response = e.response;
+            if (e?.data) errorDetails.data = e.data;
+            console.error('❌ Error details:', errorDetails);
+          } catch (logError) {
+            console.error('❌ Error logging failed:', logError);
+          }
+          setError(e?.message || 'Failed to fetch plans');
+        }
+
+        if (mappedPlans.length === 0) {
+          console.log(
+            '⚠️ No plans available from API - this may indicate a backend issue',
+          );
+          // Don't set any fallback plans - show empty state instead
+          mappedPlans = [];
+        }
+
+        setAvailablePlans(mappedPlans);
+      } else {
+        console.log('✅ Using cached plans, skipping API call');
+      }
+
       if (!token) {
         console.log(
           '⚠️ No authentication token found, skipping subscription fetch',
@@ -185,8 +279,8 @@ export const SubscriptionProvider: React.FC<{ children: ReactNode }> = ({
         const token = await AsyncStorage.getItem('accessToken');
         if (token) {
           try {
-            // Decode JWT token to get user ID (if token contains user info)
-            const tokenPayload = JSON.parse(atob(token.split('.')[1]));
+            // Decode JWT token to get user ID (RN-safe)
+            const tokenPayload: any = jwtDecode(token);
             userId = tokenPayload.userId || tokenPayload.id || tokenPayload.sub;
           } catch (e) {
             console.log('Could not decode token for user ID');
@@ -200,52 +294,151 @@ export const SubscriptionProvider: React.FC<{ children: ReactNode }> = ({
         }
       }
 
-      // Fetch user data from API
-      const response = await fetch(`${BASE_URL}/user/${userId}`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-      });
+      // Fetch subscription data from /subscriptions/current endpoint first (most up-to-date)
+      // This endpoint returns the current subscription with plan details
+      let subscriptionData: any = null;
+      try {
+        console.log('🔍 Fetching subscription from /subscriptions/current...');
+        const subscriptionResult = await unifiedApi.get(
+          '/subscriptions/current',
+        );
+        const subscriptionResultData =
+          (subscriptionResult as any)?.data ?? subscriptionResult ?? {};
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        // Backend returns { success: true, data: subscription } or direct subscription object
+        if (
+          (subscriptionResultData as any).success &&
+          (subscriptionResultData as any).data
+        ) {
+          subscriptionData = (subscriptionResultData as any).data;
+        } else if (
+          subscriptionResultData &&
+          typeof subscriptionResultData === 'object' &&
+          (subscriptionResultData as any).id
+        ) {
+          subscriptionData = subscriptionResultData;
+        }
+
+        console.log(
+          '📡 Subscription data from /subscriptions/current:',
+          subscriptionData,
+        );
+      } catch (subError) {
+        console.warn(
+          '⚠️ Failed to fetch from /subscriptions/current, falling back to /users/profile:',
+          subError,
+        );
       }
 
-      const result = await response.json();
-
-      if (result.code !== 200) {
-        throw new Error(result.message || 'Failed to fetch user data');
+      // Fallback to user profile if subscription endpoint doesn't have data
+      let userData: any = null;
+      if (!subscriptionData) {
+        try {
+          console.log('🔍 Fetching user data from /users/profile...');
+          const result = await unifiedApi.get('/users/profile');
+          userData = (result as any)?.data ?? result;
+          console.log('📡 User data fetched:', userData);
+        } catch (userError) {
+          console.warn('⚠️ Failed to fetch from /users/profile:', userError);
+        }
       }
 
-      const userData = result.data;
-      console.log('User data fetched:', userData);
+      // Extract plan information from subscription data or user data
+      let planType = 'free';
+      let planName = 'Free';
+      let planAmount = 0;
+      let nextBillingDate: string | null = null;
+      let startDate = '2024-01-01';
+      let endDate = '2024-12-31';
 
-      // Map planType to subscription data
-      let planType = userData.planType?.toLowerCase() || 'free';
+      if (subscriptionData) {
+        // Use subscription data (most accurate)
+        const plan =
+          subscriptionData.plan ||
+          subscriptionData.planName ||
+          subscriptionData.planType;
+        if (plan) {
+          if (typeof plan === 'object') {
+            planName = plan.displayName || plan.name || 'Free';
+            planType = (plan.name || plan.displayName || 'free').toLowerCase();
+            planAmount = parseFloat(plan.price || 0);
+          } else {
+            planName = String(plan);
+            planType = String(plan).toLowerCase();
+            // Try to find plan amount from availablePlans
+            const matchedPlan = availablePlans.find(
+              (p: any) => p.name?.toLowerCase() === planType,
+            );
+            planAmount = matchedPlan?.price || 0;
+          }
+        }
+        nextBillingDate =
+          subscriptionData.nextBillingDate ||
+          subscriptionData.endDate ||
+          subscriptionData.expiryDate;
+        startDate =
+          subscriptionData.startDate ||
+          subscriptionData.createdAt ||
+          '2024-01-01';
+        endDate =
+          subscriptionData.endDate ||
+          subscriptionData.expiryDate ||
+          '2024-12-31';
+      } else if (userData) {
+        // Fallback to user data
+        planType = userData.planType?.toLowerCase() || 'free';
+        planName = planType.charAt(0).toUpperCase() + planType.slice(1);
+        planAmount = getPlanAmount(planType);
+        nextBillingDate = userData.planExpiryDT || '2025-01-15';
+        startDate = userData.planFromDT || '2024-01-01';
+        endDate = userData.planUpToDT || '2024-12-31';
+      }
 
       // Map premium to professional
       if (planType === 'premium') {
         planType = 'professional';
+        planName = 'Professional';
       }
 
-      // Create subscription data based on user's planType
+      // If we still don't have plan amount, calculate from plan type
+      if (planAmount === 0) {
+        planAmount = getPlanAmount(planType);
+      }
+
+      // Create subscription data
       const currentSubscription: CurrentSubscription = {
         planId: planType,
-        planName: planType.charAt(0).toUpperCase() + planType.slice(1), // Capitalize first letter
-        status: 'active',
-        startDate: userData.planFromDT || '2024-01-01',
-        endDate: userData.planUpToDT || '2024-12-31',
-        nextBillingDate: userData.planExpiryDT || '2025-01-15',
-        amount: getPlanAmount(planType),
+        planName: planName,
+        status: subscriptionData?.status || 'active',
+        startDate: startDate,
+        endDate: endDate,
+        nextBillingDate: nextBillingDate || '2025-01-15',
+        amount: planAmount,
         usage: getPlanUsage(planType),
       };
 
-      console.log('Current subscription:', currentSubscription);
+      console.log('✅ Current subscription updated:', currentSubscription);
       setCurrentSubscription(currentSubscription);
     } catch (err: any) {
-      console.error('Error fetching subscription data:', err);
+      // Avoid redbox overlays by using warn and set a safe default
+      console.warn('Failed to fetch subscription data:', err);
       setError(err.message || 'Failed to fetch subscription data');
+      if (!currentSubscription) {
+        setCurrentSubscription({
+          planId: 'free',
+          planName: 'Free',
+          status: 'active',
+          startDate: new Date().toISOString().split('T')[0],
+          endDate: '2025-12-31',
+          nextBillingDate: '2025-12-31',
+          amount: 0,
+          usage: {
+            transactions: { used: 0, limit: 50 },
+            users: { used: 1, limit: 1 },
+            storage: { used: 0, limit: 100 },
+          },
+        });
+      }
     } finally {
       setLoading(false);
     }
@@ -258,19 +451,13 @@ export const SubscriptionProvider: React.FC<{ children: ReactNode }> = ({
       const token = await AsyncStorage.getItem('accessToken');
       if (!token) throw new Error('No authentication token');
 
-      // Mock API call - replace with actual API
-      // const response = await fetch(`${BASE_URL}/subscription/upgrade`, {
-      //   method: 'POST',
-      //   headers: {
-      //     'Content-Type': 'application/json',
-      //     Authorization: `Bearer ${token}`,
-      //   },
-      //   body: JSON.stringify({ planId }),
-      // });
-      // const data = await response.json();
+      // API call to upgrade subscription using unifiedApi
+      // unifiedApi.post() returns response.data directly
+      const response = await unifiedApi.post('/subscriptions', {
+        planId: parseInt(planId),
+      });
 
-      // Mock success
-      console.log('Upgrading to plan:', planId);
+      console.log('Upgrading to plan:', planId, 'Response:', response);
 
       // Refresh subscription data
       await fetchSubscriptionData();
@@ -290,25 +477,116 @@ export const SubscriptionProvider: React.FC<{ children: ReactNode }> = ({
       const token = await AsyncStorage.getItem('accessToken');
       if (!token) throw new Error('No authentication token');
 
-      // Mock API call - replace with actual API
-      // const response = await fetch(`${BASE_URL}/subscription/downgrade`, {
-      //   method: 'POST',
-      //   headers: {
-      //     'Content-Type': 'application/json',
-      //     Authorization: `Bearer ${token}`,
-      //   },
-      //   body: JSON.stringify({ planId }),
-      // });
-      // const data = await response.json();
+      // Backend handles downgrade via the same upgrade endpoint
+      // If the selected plan is cheaper, it switches immediately without payment
+      // unifiedApi.post() returns response.data directly
+      const response = await unifiedApi.post('/subscriptions/upgrade', {
+        planId: parseInt(planId, 10),
+      });
 
-      // Mock success
-      console.log('Downgrading to plan:', planId);
+      console.log(
+        'Downgrade request sent (upgrade endpoint):',
+        planId,
+        'Response:',
+        response,
+      );
 
-      // Refresh subscription data
-      await fetchSubscriptionData();
+      // Check if response indicates success
+      // unifiedApi.post() returns data directly, check for success indicators
+      const responseData = (response as any)?.data ?? response;
+      const isSuccess = !!(
+        responseData?.success ||
+        responseData?.id ||
+        responseData?.subscriptionId ||
+        (responseData &&
+          !responseData.error &&
+          !responseData.message?.includes('error'))
+      );
+
+      if (!isSuccess) {
+        const errorMsg = responseData?.message || 'Failed to downgrade plan';
+        console.warn('❌ Downgrade failed:', errorMsg);
+
+        // Check if it's the "already subscribed" error - don't log as error
+        if (
+          errorMsg.toLowerCase().includes('already subscribed') ||
+          errorMsg.toLowerCase().includes('already on this plan')
+        ) {
+          console.log('ℹ️ User is already on this plan');
+        }
+
+        setError(errorMsg);
+        return false;
+      }
+
+      // 🎯 FIXED: Invalidate subscription cache to ensure fresh data
+      try {
+        unifiedApi.invalidateCachePattern('.*/subscriptions.*');
+        unifiedApi.invalidateCachePattern('.*/users/profile.*');
+        console.log('✅ Invalidated subscription cache after downgrade');
+      } catch (cacheError) {
+        console.warn('⚠️ Failed to invalidate cache:', cacheError);
+      }
+
+      // Refresh subscription data immediately
+      await fetchSubscriptionData(false); // false = don't refresh plans
+
+      // 🎯 FIXED: Add multiple retries with increasing delays to ensure backend updates are visible
+      // This ensures the current plan is immediately updated in the UI
+      setTimeout(async () => {
+        console.log(
+          '🔄 First retry: Refreshing subscription data after plan downgrade (1s delay)...',
+        );
+        // Invalidate cache again before retry
+        try {
+          unifiedApi.invalidateCachePattern('.*/subscriptions.*');
+          unifiedApi.invalidateCachePattern('.*/users/profile.*');
+        } catch {}
+        // Refresh subscription data again after delay to get updated plan
+        await fetchSubscriptionData(false); // false = don't refresh plans
+
+        // Second retry with longer delay
+        setTimeout(async () => {
+          console.log(
+            '🔄 Second retry: Refreshing subscription data after plan downgrade (2.5s delay)...',
+          );
+          // Invalidate cache again before retry
+          try {
+            unifiedApi.invalidateCachePattern('.*/subscriptions.*');
+            unifiedApi.invalidateCachePattern('.*/users/profile.*');
+          } catch {}
+          await fetchSubscriptionData(false); // false = don't refresh plans
+
+          // Third retry with even longer delay
+          setTimeout(async () => {
+            console.log(
+              '🔄 Third retry: Refreshing subscription data after plan downgrade (4s delay)...',
+            );
+            // Invalidate cache again before retry
+            try {
+              unifiedApi.invalidateCachePattern('.*/subscriptions.*');
+              unifiedApi.invalidateCachePattern('.*/users/profile.*');
+            } catch {}
+            await fetchSubscriptionData(false); // false = don't refresh plans
+          }, 1500); // Wait another 1.5 seconds (total 4s from first retry)
+        }, 1500); // Wait another 1.5 seconds (total 2.5s from first retry)
+      }, 1000); // Wait 1 second for backend to update subscription
+
       return true;
     } catch (err: any) {
-      setError(err.message || 'Failed to downgrade plan');
+      const errorMsg = err.message || 'Failed to downgrade plan';
+
+      // Check if it's the "already subscribed" error - don't log as error
+      if (
+        errorMsg.toLowerCase().includes('already subscribed') ||
+        errorMsg.toLowerCase().includes('already on this plan')
+      ) {
+        console.log('ℹ️ User is already on this plan');
+      } else {
+        console.error('❌ Downgrade error:', errorMsg);
+      }
+
+      setError(errorMsg);
       return false;
     } finally {
       setLoading(false);
@@ -322,22 +600,15 @@ export const SubscriptionProvider: React.FC<{ children: ReactNode }> = ({
       const token = await AsyncStorage.getItem('accessToken');
       if (!token) throw new Error('No authentication token');
 
-      // Mock API call - replace with actual API
-      // const response = await fetch(`${BASE_URL}/subscription/cancel`, {
-      //   method: 'POST',
-      //   headers: {
-      //     'Content-Type': 'application/json',
-      //     Authorization: `Bearer ${token}`,
-      //   },
-      // });
-      // const data = await response.json();
+      // API call to cancel subscription using unifiedApi
+      // unifiedApi.delete() returns response.data directly
+      const response = await unifiedApi.delete('/subscriptions/current');
 
-      // Mock success
-      console.log('Cancelling subscription');
+      console.log('Cancelling subscription, response:', response);
 
       // Refresh subscription data
       await fetchSubscriptionData();
-      return true;
+      return !!response; // If response exists, assume success
     } catch (err: any) {
       setError(err.message || 'Failed to cancel subscription');
       return false;

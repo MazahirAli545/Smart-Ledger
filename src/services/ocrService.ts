@@ -1,4 +1,4 @@
-import { BASE_URL } from 'services/api/config';
+import { unifiedApi } from '../api/unifiedApiService';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export interface OCRResponse {
@@ -42,9 +42,11 @@ export class OCRService {
         type: 'image/jpeg',
       } as any);
 
-      console.log('Sending OCR request to:', `${BASE_URL}/api/ocr`);
+      console.log('Sending OCR request to:', '/api/ocr');
       console.log('File:', fileName, 'URI:', imageUri);
 
+      // OCR endpoint is not available on backend; feature-guard
+      return '';
       const response = await fetch(`${BASE_URL}/api/ocr`, {
         method: 'POST',
         headers: {
@@ -93,8 +95,10 @@ export class OCRService {
         type: 'application/pdf',
       } as any);
 
-      console.log('Sending PDF OCR request to:', `${BASE_URL}/api/ocr`);
+      console.log('Sending PDF OCR request to:', '/api/ocr');
 
+      // OCR endpoint is not available on backend; feature-guard
+      return '';
       const response = await fetch(`${BASE_URL}/api/ocr`, {
         method: 'POST',
         headers: {

@@ -59,7 +59,9 @@ const FolderScreen: React.FC<FolderScreenProps> = ({ route, navigation }) => {
   if (!ScreenComponent) {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-        <Text>Unknown folder type: {folder.icon}</Text>
+        <Text style={{ fontFamily: 'Roboto-Medium' }}>
+          Unknown folder type: {folder.icon}
+        </Text>
       </View>
     );
   }

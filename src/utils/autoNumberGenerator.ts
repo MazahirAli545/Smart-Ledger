@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { BASE_URL } from '../api';
 
 // Document type prefixes
 export const DOCUMENT_PREFIXES = {
@@ -37,6 +38,13 @@ const getStorageKey = (documentType: DocumentType | string): string => {
   return `last_${documentType.toLowerCase()}_number`;
 };
 
+// Export storage key getter for use in screens
+export const getDocumentNumberStorageKey = (
+  documentType: DocumentType | string,
+): string => {
+  return getStorageKey(documentType);
+};
+
 // Format number with leading zeros (e.g., 1 -> 001, 100 -> 100, 1000 -> 1,000)
 export const formatNumberWithLeadingZeros = (
   num: number,
@@ -64,29 +72,117 @@ export const formatNumberWithLeadingZeros = (
   return paddedNumber;
 };
 
-// Generate next document number
-export const generateNextDocumentNumber = async (
+// Helper function to extract numeric part from document number (e.g., "PAY-001" -> 1)
+const extractNumberFromDocument = (
+  docNumber: string | null | undefined,
+): number => {
+  if (!docNumber) return 0;
+  const match = docNumber.match(/\d+/g);
+  if (match && match.length > 0) {
+    // Get the last numeric part and remove commas
+    const lastNumericPart = match[match.length - 1].replace(/,/g, '');
+    return parseInt(lastNumericPart, 10) || 0;
+  }
+  return 0;
+};
+
+// Get highest transaction number from backend for the user
+const getHighestTransactionNumberFromBackend = async (
   documentType: DocumentType | string,
-): Promise<string> => {
+): Promise<number> => {
   try {
-    const storageKey = getStorageKey(documentType);
-    const lastNumberStr = await AsyncStorage.getItem(storageKey);
+    const token = await AsyncStorage.getItem('accessToken');
+    if (!token) {
+      console.log('⚠️ No token found, cannot check backend');
+      return 0;
+    }
 
-    let nextNumber = 1;
+    // Map document types to transaction types and field names
+    const typeMapping: Record<
+      string,
+      { transactionType?: string; fieldName: string }
+    > = {
+      payment: { transactionType: 'debit', fieldName: 'billNumber' },
+      purchase: { transactionType: 'debit', fieldName: 'billNumber' },
+      receipt: { transactionType: 'credit', fieldName: 'receiptNumber' },
+      invoice: { transactionType: 'credit', fieldName: 'invoiceNumber' },
+      sell: { transactionType: 'credit', fieldName: 'invoiceNumber' },
+    };
 
-    if (lastNumberStr) {
-      // Extract the numeric part from the last number (e.g., "PAY-001" -> 1)
-      const match = lastNumberStr.match(/\d+/g);
-      if (match && match.length > 0) {
-        // Get the last numeric part and remove commas
-        const lastNumericPart = match[match.length - 1].replace(/,/g, '');
-        nextNumber = parseInt(lastNumericPart, 10) + 1;
+    const normalizedType = documentType.toLowerCase().trim();
+    const mapping = typeMapping[normalizedType];
+
+    if (!mapping) {
+      console.log(`⚠️ No mapping found for document type: ${documentType}`);
+      return 0;
+    }
+
+    // Fetch transactions from backend
+    const query = mapping.transactionType
+      ? `?type=${encodeURIComponent(mapping.transactionType)}`
+      : '';
+    const res = await fetch(`${BASE_URL}/transactions${query}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (!res.ok) {
+      console.log(`⚠️ Failed to fetch transactions: ${res.status}`);
+      return 0;
+    }
+
+    const data = await res.json();
+    const transactions = data.data || data || [];
+
+    if (!Array.isArray(transactions) || transactions.length === 0) {
+      console.log(`📊 No existing transactions found for ${documentType}`);
+      return 0;
+    }
+
+    // Get prefix to filter by (e.g., PAY, PUR, REC, SEL)
+    let prefix: string;
+    if (documentType in DOCUMENT_PREFIXES) {
+      prefix = DOCUMENT_PREFIXES[documentType as DocumentType];
+    } else {
+      prefix = getFolderPrefix(documentType);
+    }
+
+    // Extract numbers from the relevant field, filtering by prefix
+    const numbers: number[] = [];
+    for (const transaction of transactions) {
+      const fieldValue = transaction[mapping.fieldName];
+      if (fieldValue && typeof fieldValue === 'string') {
+        // Only count numbers that match the expected prefix (e.g., PAY-XXX for payment)
+        if (fieldValue.toUpperCase().startsWith(`${prefix}-`)) {
+          const num = extractNumberFromDocument(fieldValue);
+          if (num > 0) {
+            numbers.push(num);
+          }
+        }
       }
     }
 
-    // Format the next number
-    const formattedNumber = formatNumberWithLeadingZeros(nextNumber);
+    if (numbers.length === 0) {
+      console.log(`📊 No document numbers found in existing transactions`);
+      return 0;
+    }
 
+    const maxNumber = Math.max(...numbers);
+    console.log(
+      `📊 Found highest ${documentType} number from backend: ${maxNumber}`,
+    );
+    return maxNumber;
+  } catch (error) {
+    console.error(`❌ Error fetching transactions from backend:`, error);
+    return 0;
+  }
+};
+
+// Generate next document number (preview only - doesn't store until transaction is saved)
+export const generateNextDocumentNumber = async (
+  documentType: DocumentType | string,
+  store: boolean = true, // Only store when transaction is actually saved
+): Promise<string> => {
+  try {
     // Get prefix based on document type
     let prefix: string;
     if (documentType in DOCUMENT_PREFIXES) {
@@ -96,17 +192,51 @@ export const generateNextDocumentNumber = async (
       prefix = getFolderPrefix(documentType);
     }
 
+    // Step 1: Check backend for highest existing number
+    const backendMaxNumber = await getHighestTransactionNumberFromBackend(
+      documentType,
+    );
+
+    // Step 2: Check local storage for last saved number (not just generated)
+    const storageKey = getStorageKey(documentType);
+    const lastNumberStr = await AsyncStorage.getItem(storageKey);
+    const localMaxNumber = extractNumberFromDocument(lastNumberStr);
+
+    // Step 3: Calculate next number based on backend (source of truth)
+    // If backend has transactions, use backend max + 1
+    // If backend has no transactions (new user), start at 1 (001)
+    // Local storage should match backend (it's just a cache)
+    let nextNumber: number;
+    if (backendMaxNumber > 0) {
+      // Backend has transactions - increment from backend max
+      nextNumber = backendMaxNumber + 1;
+    } else if (localMaxNumber > 0) {
+      // Backend has no transactions, but local has a number
+      // This means a number was generated but transaction not saved yet
+      // Reuse the local number (don't increment)
+      nextNumber = localMaxNumber;
+    } else {
+      // Both are 0 - new user, start at 1 (001)
+      nextNumber = 1;
+    }
+
+    // Format the next number
+    const formattedNumber = formatNumberWithLeadingZeros(nextNumber);
     const newDocumentNumber = `${prefix}-${formattedNumber}`;
 
-    // Store the new number for next time
-    await AsyncStorage.setItem(storageKey, newDocumentNumber);
+    // Only store if explicitly requested (when transaction is saved)
+    if (store) {
+      await AsyncStorage.setItem(storageKey, newDocumentNumber);
+    }
 
-    console.log(`📝 Generated ${documentType} number: ${newDocumentNumber}`);
+    console.log(
+      `📝 Generated ${documentType} number: ${newDocumentNumber} (backend max: ${backendMaxNumber}, local max: ${localMaxNumber}, store: ${store})`,
+    );
     return newDocumentNumber;
   } catch (error) {
     console.error(`Error generating ${documentType} number:`, error);
 
-    // Fallback: generate number based on current timestamp
+    // Fallback: return first number (001) for new users
     let prefix: string;
     if (documentType in DOCUMENT_PREFIXES) {
       prefix = DOCUMENT_PREFIXES[documentType as DocumentType];
@@ -114,7 +244,7 @@ export const generateNextDocumentNumber = async (
       prefix = getFolderPrefix(documentType);
     }
 
-    const fallbackNumber = `${prefix}-${Date.now()}`;
+    const fallbackNumber = `${prefix}-001`;
     console.log(`📝 Using fallback ${documentType} number: ${fallbackNumber}`);
     return fallbackNumber;
   }

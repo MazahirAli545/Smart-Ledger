@@ -263,16 +263,20 @@ const styles = StyleSheet.create({
   },
   titleText: {
     fontSize: 24,
-    fontWeight: 'bold',
     color: '#ffffff',
     textAlign: 'center',
     marginBottom: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   subtitleText: {
     fontSize: 16,
     color: 'rgba(255,255,255,0.9)',
     textAlign: 'center',
     lineHeight: 22,
+
+    fontFamily: 'Roboto-Medium',
   },
 
   // Status Section
@@ -294,6 +298,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: 'rgba(255,255,255,0.9)',
     flex: 1,
+
+    fontFamily: 'Roboto-Medium',
   },
 
   // Button Section
@@ -317,9 +323,11 @@ const styles = StyleSheet.create({
   },
   primaryButtonText: {
     fontSize: 16,
-    fontWeight: '600',
     color: '#ffffff',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   secondaryButton: {
     backgroundColor: 'transparent',
     borderRadius: 12,
@@ -331,6 +339,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: 'rgba(255,255,255,0.7)',
     textDecorationLine: 'underline',
+
+    fontFamily: 'Roboto-Medium',
   },
 
   // Help Section
@@ -341,15 +351,19 @@ const styles = StyleSheet.create({
   },
   helpTitle: {
     fontSize: 14,
-    fontWeight: 'bold',
     color: '#ffffff',
     marginBottom: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   helpItem: {
     fontSize: 12,
     color: 'rgba(255,255,255,0.8)',
     lineHeight: 18,
     marginBottom: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
 });
 

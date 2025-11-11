@@ -261,15 +261,19 @@ const styles = StyleSheet.create({
   },
   modalTitle: {
     fontSize: 18,
-    fontWeight: '700',
     color: '#fff',
     marginBottom: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   modalSubtitle: {
     fontSize: 14,
     color: 'rgba(255, 255, 255, 0.9)',
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   closeButton: {
     width: 32,
     height: 32,
@@ -296,17 +300,22 @@ const styles = StyleSheet.create({
   },
   expiryTitle: {
     fontSize: 20,
-    fontWeight: '700',
     color: '#333',
     textAlign: 'center',
     marginBottom: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   expiryDescription: {
     fontSize: 14,
     color: '#6c757d',
     textAlign: 'center',
     lineHeight: 20,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   featuresList: {
     marginBottom: 24,
   },
@@ -318,9 +327,11 @@ const styles = StyleSheet.create({
   featureText: {
     fontSize: 14,
     color: '#333',
-    fontWeight: '500',
     marginLeft: 12,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   actionButtons: {
     gap: 12,
   },
@@ -336,9 +347,11 @@ const styles = StyleSheet.create({
   },
   renewButtonText: {
     fontSize: 16,
-    fontWeight: '600',
     color: '#fff',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   dismissButton: {
     backgroundColor: '#6c757d',
     alignItems: 'center',
@@ -349,8 +362,9 @@ const styles = StyleSheet.create({
   },
   dismissButtonText: {
     fontSize: 14,
-    fontWeight: '500',
     color: '#fff',
+
+    fontFamily: 'Roboto-Medium',
   },
 });
 

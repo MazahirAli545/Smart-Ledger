@@ -1,4 +1,9 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  startTransition,
+} from 'react';
 import {
   View,
   Text,
@@ -8,54 +13,109 @@ import {
   Image,
   Keyboard,
   TouchableWithoutFeedback,
+<<<<<<< Updated upstream
   SafeAreaView,
-  Platform,
+  Alert,
+=======
   Modal,
-  Dimensions,
+>>>>>>> Stashed changes
 } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
+<<<<<<< Updated upstream
 import { BASE_URL } from '../../api';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { RootStackParamList } from '../../types/navigation';
-import { navigationRef, ROOT_STACK_APP } from '../../../Navigation';
-import { useAuth } from '../../context/AuthContext';
+=======
+import { sendOtp } from '../../api';
 import { useAlert } from '../../context/AlertContext';
 import { SafeAreaView as SafeAreaViewRN } from 'react-native-safe-area-context';
-import Ionicons from 'react-native-vector-icons/Ionicons';
-import CountryPicker from 'react-native-country-picker-modal';
-import SignInOtpScreen from './SignInOtpScreen';
-import TestCredentialsPanel from '../../components/TestCredentialsPanel';
-import { getTestUser, TestUser } from '../../config/testCredentials';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
+>>>>>>> Stashed changes
 
-const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
+// Logo removed - using text-based branding instead
+
+interface CountryType {
+  cca2: string;
+  callingCode: string[];
+  flag: string;
+}
+
+// Define the navigation param list
+type RootStackParamList = {
+  SignIn: undefined;
+  SetupWizard: undefined;
+  CreateAccount: undefined;
+  Dashboard: undefined;
+};
 
 const SignInScreen: React.FC = () => {
+<<<<<<< Updated upstream
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
-  const { login } = useAuth();
-  const { showAlert } = useAlert();
+  const [step, setStep] = useState<'MOBILE' | 'OTP'>('MOBILE');
   const [mobile, setMobile] = useState('');
-  const [callingCode, setCallingCode] = useState('91');
-  const [countryCode, setCountryCode] = useState('IN');
-  const [country, setCountry] = useState<any>({ flag: '🇮🇳' });
+  const [otp, setOtp] = useState('');
+  const [timer, setTimer] = useState(30);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showCountryPicker, setShowCountryPicker] = useState(false);
-  const [showProfilePopup, setShowProfilePopup] = useState(false);
-  const [pendingMobile, setPendingMobile] = useState<string | null>(null);
-  const [otp, setOtp] = useState<string[]>(['', '', '', '', '', '', '']);
-  const [showTestCredentials, setShowTestCredentials] = useState(false);
-
-  // Get screen dimensions for responsive design
-  const screenWidth = Dimensions.get('window').width;
-  const isSmallScreen = screenWidth < 375; // iPhone SE and smaller devices
+  const [backendOtp, setBackendOtp] = useState<string | null>(null);
 
   useEffect(() => {
-    console.log(
-      '🔍 SignInScreen - Component mounted (direct navigation from splash)',
-    );
+    if (step === 'OTP' && timer > 0) {
+      timerRef.current = setTimeout(() => setTimer(timer - 1), 1000);
+    }
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, [step, timer]);
+
+  const handleSendOtp = async () => {
+    if (mobile.length === 10) {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const response = await fetch(`${BASE_URL}/user/login/request-otp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ mobileNumber: mobile }),
+        });
+
+        const result = await response.json();
+
+        if (response.ok && result.otp) {
+          setBackendOtp(result.otp);
+          setStep('OTP');
+          setTimer(30);
+        } else {
+          throw new Error(result.message || 'Failed to send OTP');
+        }
+      } catch (err: any) {
+        setError(err.message || 'Failed to send OTP');
+        Alert.alert('Error', err.message || 'Failed to send OTP');
+      } finally {
+        setLoading(false);
+      }
+=======
+  const navigation = useNavigation<StackNavigationProp<any>>();
+  const { showAlert } = useAlert();
+  const [mobile, setMobile] = useState('');
+  const [callingCode] = useState('91');
+  const [countryCode] = useState('IN');
+  const [country, setCountry] = useState<CountryType>({
+    cca2: 'IN',
+    callingCode: ['91'],
+    flag: '🇮🇳',
+  });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showProfilePopup, setShowProfilePopup] = useState(false);
+  const [pendingMobile, setPendingMobile] = useState<string | null>(null);
+
+  useEffect(() => {
     setCountry({
       cca2: 'IN',
       callingCode: ['91'],
@@ -63,148 +123,186 @@ const SignInScreen: React.FC = () => {
     });
   }, []);
 
-  const onSelectCountry = (selectedCountry: any) => {
-    setCountryCode(selectedCountry.cca2);
-    setCallingCode(selectedCountry.callingCode[0]);
-    setCountry({
-      ...selectedCountry,
-      flag: getFlagEmoji(selectedCountry.cca2),
-    });
-    setShowCountryPicker(false);
-  };
+  // Optimized validation - single pass with early returns
+  const validatePhoneNumber = useCallback((phone: string): string | null => {
+    const trimmed = phone.trim();
+    if (!trimmed) return 'Please enter your mobile number';
+    if (trimmed.length !== 10)
+      return 'Please enter a valid 10-digit mobile number';
+    if (!/^\d+$/.test(trimmed)) return 'Phone number must contain only digits';
+    return null;
+  }, []);
 
-  const getFlagEmoji = (countryCode: string) => {
-    const codePoints = countryCode
-      .toUpperCase()
-      .split('')
-      .map(char => 127397 + char.charCodeAt(0));
-    return String.fromCodePoint(...codePoints);
-  };
+  // Optimized OTP sending with faster navigation
+  const handleSendOtp = useCallback(async () => {
+    // Early validation - synchronous, no async overhead
+    const validationError = validatePhoneNumber(mobile);
+    if (validationError) {
+      setError(validationError);
+      showAlert({
+        title: 'Invalid Phone Number',
+        message: validationError,
+        type: 'error',
+      });
+      return;
+    }
 
-  // Handle test user selection
-  const handleTestUserSelect = (user: TestUser) => {
-    setMobile(user.mobileNumber);
+    // Pre-compute values before async operations
+    const trimmedMobile = mobile.trim();
+    const fullPhone = `${callingCode}${trimmedMobile}`;
+
+    // Batch state updates
     setError(null);
-  };
+    setLoading(true);
 
-  // UNIFIED AUTH APPROACH: Single endpoint handles both login and registration
-  const handleSendOtp = async () => {
-    console.log('🚀 handleSendOtp called with mobile:', mobile);
+    try {
+      // Make API call - navigation happens immediately after success
+      const result = await sendOtp({ phone: fullPhone });
 
-    if (mobile.length === 10) {
-      setLoading(true);
-      setError(null);
-      const fullPhone = `${callingCode}${mobile}`;
-
-      console.log('🔍 Processing mobile number:', fullPhone);
-      console.log('🎯 Using UNIFIED AUTH endpoint for both login/registration');
-
-      try {
-        // Use the unified auth endpoint that handles both scenarios automatically
-        const response = await fetch(
-          `${BASE_URL}/user/unified-auth/request-otp`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mobileNumber: fullPhone }),
-          },
-        );
-
-        const result = await response.json();
-        console.log('🎯 Unified auth response:', response.status, result);
-
-        if (response.ok && result.otp) {
-          console.log('✅ OTP sent successfully via unified auth');
-          setLoading(false);
-
-          // Navigate to unified OTP verification screen
-          (navigation as any).navigate('Auth', {
+      if (result && (result.otp || result.success)) {
+        // Use startTransition for non-blocking navigation - smoother UX
+        startTransition(() => {
+          navigation.navigate('Auth', {
             screen: 'SignInOtp',
             params: {
               phone: fullPhone,
-              backendOtp: result.otp,
+              backendOtp: result.otp || undefined, // Handle case where success=true but no OTP
               callingCode,
               countryCode,
-              isExistingUser: null, // Will be determined during verification
-              useUnifiedAuth: true, // Flag to use unified auth
+              isExistingUser: null,
+              usePostmanAuth: true,
             },
           });
-        } else {
-          throw new Error(result.message || 'Failed to send OTP');
-        }
-      } catch (err: any) {
-        console.error('❌ Error in unified auth:', err);
-        setLoading(false);
-        setError(err.message || 'Failed to send OTP. Please try again.');
-        showAlert({
-          title: 'Error',
-          message: err.message || 'Failed to send OTP. Please try again.',
-          type: 'error',
         });
+        // Reset loading state immediately for faster UI response
+        setLoading(false);
+      } else {
+        throw new Error(result?.message || 'Failed to send OTP');
       }
-    } else {
+    } catch (err: any) {
+      const errorMessage =
+        err.message || 'Failed to send OTP. Please try again.';
+      setLoading(false);
+      setError(errorMessage);
       showAlert({
         title: 'Error',
-        message: 'Please enter a valid 10-digit mobile number',
+        message: errorMessage,
         type: 'error',
       });
+>>>>>>> Stashed changes
     }
-  };
+  }, [
+    mobile,
+    callingCode,
+    countryCode,
+    validatePhoneNumber,
+    navigation,
+    showAlert,
+  ]);
 
+<<<<<<< Updated upstream
   const handleResend = async () => {
-    // Resend functionality will be handled in the respective OTP screens
-    // This function is kept for future use if needed
-    console.log('Resend functionality handled in OTP screens');
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch(`${BASE_URL}/user/login/request-otp`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ mobileNumber: mobile }),
+      });
+
+      const result = await response.json();
+
+      if (response.ok && result.otp) {
+        setBackendOtp(result.otp);
+        setTimer(30);
+        setOtp('');
+      } else {
+        throw new Error(result.message || 'Failed to resend OTP');
+      }
+    } catch (err: any) {
+      setError(err.message || 'Failed to resend OTP');
+      Alert.alert('Error', err.message || 'Failed to resend OTP');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleVerify = async () => {
-    // OTP verification logic removed as per original code
-  };
+    if (otp.length === 6) {
+      setLoading(true);
+      setError(null);
 
-  const otpInputRefs: Array<TextInput | null> = Array(6).fill(null);
+      try {
+        const response = await fetch(`${BASE_URL}/user/login/verify-otp`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            mobileNumber: mobile,
+            otp: otp,
+          }),
+        });
 
-  const handleOtpChange = (text: string, index: number) => {
-    if (text.length > 1) {
-      const chars = text.replace(/\D/g, '').slice(0, 6).split('');
-      let newOtpArr = [...otp];
-      for (let i = 0; i < 6; i++) {
-        newOtpArr[i] = chars[i] || '';
-      }
-      setOtp(newOtpArr);
-      if (chars.length < 6) {
-        otpInputRefs[chars.length]?.focus();
-      } else {
-        otpInputRefs[5]?.blur();
-      }
-      return;
-    }
-    if (!/^[0-9]?$/.test(text)) return;
-    let newOtpArr = [...otp];
-    newOtpArr[index] = text;
-    setOtp(newOtpArr);
-    if (text && index < 5) {
-      otpInputRefs[index + 1]?.focus();
-    }
-  };
+        const result = await response.json();
 
-  const handleOtpKeyPress = (nativeEvent: any, index: number) => {
-    if (nativeEvent.key === 'Backspace') {
-      if (otp[index]) {
-        let newOtpArr = [...otp];
-        newOtpArr[index] = '';
-        setOtp(newOtpArr);
-      } else if (index > 0) {
-        otpInputRefs[index - 1]?.focus();
-        let newOtpArr = [...otp];
-        newOtpArr[index - 1] = '';
-        setOtp(newOtpArr);
+        if (response.ok && result.success) {
+          // Save tokens to AsyncStorage
+          await AsyncStorage.setItem('accessToken', result.accessToken);
+          await AsyncStorage.setItem('refreshToken', result.refreshToken);
+          await AsyncStorage.setItem('userMobileNumber', mobile);
+
+          // Check if profile is complete
+          if (result.profileComplete) {
+            Alert.alert('Success', 'Login successful!', [
+              { text: 'OK', onPress: () => navigation.navigate('Dashboard') },
+            ]);
+          }
+          // } else {
+          //   // If profile is not complete, navigate to setup wizard
+          //   navigation.navigate('Dashboard');
+          // }
+        } else {
+          throw new Error(result.message || 'Invalid OTP');
+        }
+      } catch (err: any) {
+        setError(err.message || 'Failed to verify OTP');
+        Alert.alert('Error', err.message || 'Failed to verify OTP');
+      } finally {
+        setLoading(false);
       }
-    } else if (nativeEvent.key === 'ArrowLeft' && index > 0) {
-      otpInputRefs[index - 1]?.focus();
-    } else if (nativeEvent.key === 'ArrowRight' && index < 5) {
-      otpInputRefs[index + 1]?.focus();
     }
   };
+
+  return (
+    <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.container}>
+          <TouchableOpacity
+            style={styles.backRow}
+            onPress={() => navigation.goBack()}
+          >
+            <Text style={styles.backText}>{'\u2190'} Back to Home</Text>
+          </TouchableOpacity>
+          <View style={styles.logoRow}>
+            <Image source={LOGO} style={styles.logo} />
+            <Text style={styles.appName}>Smart Ledger</Text>
+=======
+  // Optimized input handler - memoized to prevent unnecessary re-renders
+  const handleMobileChange = useCallback(
+    (text: string) => {
+      // Filter non-digits and limit to 10 characters in one pass
+      const digitsOnly = text.replace(/\D/g, '').slice(0, 10);
+      setMobile(digitsOnly);
+      // Clear error when user starts typing
+      if (error) setError(null);
+    },
+    [error],
+  );
 
   return (
     <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
@@ -218,6 +316,13 @@ const SignInScreen: React.FC = () => {
           <View style={styles.container}>
             {/* Header Section */}
             <View style={styles.headerSection}>
+              <View style={styles.logoContainer}>
+                <Image
+                  source={require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png')}
+                  style={styles.logoIcon}
+                  resizeMode="contain"
+                />
+              </View>
               <View style={styles.titleSection}>
                 <Text style={styles.welcome}>Welcome to Smart Ledger</Text>
                 <Text style={styles.subtitle}>
@@ -246,69 +351,47 @@ const SignInScreen: React.FC = () => {
                   <View style={styles.inputSection}>
                     <Text style={styles.label}>Phone Number</Text>
                     <View style={styles.phoneInputRow}>
-                      <TouchableOpacity
-                        style={styles.countryTrigger}
-                        onPress={() => setShowCountryPicker(true)}
-                        activeOpacity={0.8}
-                      >
+                      <View style={styles.countryTrigger}>
                         <Text style={styles.flag}>{country?.flag || '🇮🇳'}</Text>
                         <Text style={styles.code}>+{callingCode}</Text>
-                        <Ionicons
-                          name="chevron-down"
-                          size={16}
-                          color="#718096"
-                          style={{ marginLeft: 4 }}
-                        />
-                      </TouchableOpacity>
+                      </View>
                       <TextInput
                         style={styles.phoneInput}
                         placeholder="9999999999"
                         placeholderTextColor="#a0aec0"
                         value={mobile}
-                        onChangeText={text =>
-                          setMobile(text.replace(/\D/g, '').slice(0, 10))
-                        }
+                        onChangeText={handleMobileChange}
                         keyboardType="number-pad"
                         maxLength={10}
+                        autoComplete="tel"
+                        textContentType="telephoneNumber"
                       />
                     </View>
                   </View>
 
-                  {showCountryPicker && (
-                    <CountryPicker
-                      countryCode={countryCode as any}
-                      withFilter
-                      withAlphaFilter
-                      withFlag
-                      withCountryNameButton={false}
-                      withCallingCodeButton={false}
-                      visible={showCountryPicker}
-                      onSelect={onSelectCountry}
-                      onClose={() => setShowCountryPicker(false)}
-                      theme={{
-                        backgroundColor: '#fff',
-                        fontSize: 18,
-                        itemHeight: 48,
-                        filterPlaceholderTextColor: '#8a94a6',
-                        primaryColor: '#4f8cff',
-                      }}
-                    />
-                  )}
-
                   <View style={styles.buttonSection}>
                     <LinearGradient
-                      colors={['#8f5cff', '#6f4cff']}
+                      colors={
+                        mobile.length !== 10
+                          ? ['#cbd5e1', '#94a3b8']
+                          : ['#6366f1', '#4f46e5', '#4338ca']
+                      }
                       start={{ x: 0, y: 0 }}
                       end={{ x: 1, y: 0 }}
                       style={styles.purpleButton}
                     >
                       <TouchableOpacity
-                        style={styles.button}
+                        style={[
+                          styles.button,
+                          (mobile.length !== 10 || loading) &&
+                            styles.buttonDisabled,
+                        ]}
                         onPress={handleSendOtp}
                         disabled={mobile.length !== 10 || loading}
+                        activeOpacity={0.8}
                       >
                         <Text style={styles.buttonText}>
-                          {loading ? 'Checking User...' : 'Send OTP'}
+                          {loading ? 'Sending...' : 'Send OTP'}
                         </Text>
                       </TouchableOpacity>
                     </LinearGradient>
@@ -327,14 +410,6 @@ const SignInScreen: React.FC = () => {
             </View>
           </View>
         </KeyboardAwareScrollView>
-
-        {/* Test Credentials Panel */}
-        <TestCredentialsPanel
-          visible={showTestCredentials}
-          onClose={() => setShowTestCredentials(false)}
-          onSelectUser={handleTestUserSelect}
-          mode="login"
-        />
 
         {/* Profile Complete Popup */}
         <Modal
@@ -363,9 +438,9 @@ const SignInScreen: React.FC = () => {
               <Text
                 style={{
                   fontSize: 18,
-                  fontWeight: 'bold',
                   marginBottom: 12,
                   color: '#222',
+                  fontFamily: 'Roboto-Medium',
                 }}
               >
                 Profile Incomplete
@@ -376,6 +451,7 @@ const SignInScreen: React.FC = () => {
                   color: '#444',
                   marginBottom: 18,
                   textAlign: 'center',
+                  fontFamily: 'Roboto-Medium',
                 }}
               >
                 Please complete your profile
@@ -398,15 +474,119 @@ const SignInScreen: React.FC = () => {
                 }}
               >
                 <Text
-                  style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}
+                  style={{
+                    color: '#fff',
+                    fontSize: 16,
+                    fontFamily: 'Roboto-Medium',
+                  }}
                 >
                   OK
                 </Text>
               </TouchableOpacity>
             </View>
+>>>>>>> Stashed changes
           </View>
-        </Modal>
-      </SafeAreaViewRN>
+          <Text style={styles.welcome}>Welcome Back</Text>
+          <Text style={styles.subtitle}>Sign in to your account</Text>
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Sign In</Text>
+            <Text style={styles.cardSubtitle}>
+              Enter your credentials to access your account
+            </Text>
+            {step === 'MOBILE' ? (
+              <>
+                <Text style={styles.label}>Mobile Number</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Enter your mobile number"
+                  placeholderTextColor="#8a94a6"
+                  value={mobile}
+                  onChangeText={setMobile}
+                  keyboardType="phone-pad"
+                  maxLength={10}
+                />
+                <LinearGradient
+                  colors={['#4f8cff', '#1ecb81']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={styles.gradientButton}
+                >
+                  <TouchableOpacity
+                    style={styles.button}
+                    onPress={handleSendOtp}
+                    disabled={mobile.length !== 10 || loading}
+                  >
+                    <Text style={styles.buttonText}>
+                      {loading ? 'Sending...' : 'Send OTP'}
+                    </Text>
+                  </TouchableOpacity>
+                </LinearGradient>
+              </>
+            ) : (
+              <>
+                <Text style={styles.label}>Enter OTP</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Enter 6-digit OTP"
+                  placeholderTextColor="#8a94a6"
+                  value={otp}
+                  onChangeText={setOtp}
+                  keyboardType="number-pad"
+                  maxLength={6}
+                />
+                <Text style={styles.otpInfo}>
+                  OTP sent to {mobile} {timer > 0 ? `Resend in ${timer}s` : ''}
+                  {timer === 0 && (
+                    <Text style={styles.resend} onPress={handleResend}>
+                      {' '}
+                      Resend
+                    </Text>
+                  )}
+                </Text>
+                {/* Show OTP for testing purposes */}
+                {backendOtp && (
+                  <Text
+                    style={{
+                      color: 'red',
+                      fontWeight: 'bold',
+                      marginTop: 4,
+                      textAlign: 'center',
+                    }}
+                  >
+                    [API OTP: {backendOtp}]
+                  </Text>
+                )}
+                <LinearGradient
+                  colors={['#4f8cff', '#1ecb81']}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 0 }}
+                  style={styles.gradientButton}
+                >
+                  <TouchableOpacity
+                    style={styles.button}
+                    onPress={handleVerify}
+                    disabled={otp.length !== 6 || loading}
+                  >
+                    <Text style={styles.buttonText}>
+                      {loading ? 'Verifying...' : 'Verify & Sign In'}
+                    </Text>
+                  </TouchableOpacity>
+                </LinearGradient>
+              </>
+            )}
+            {error && <Text style={styles.errorText}>{error}</Text>}
+            <Text style={styles.bottomText}>
+              Don't have an account?{' '}
+              <Text
+                style={styles.link}
+                onPress={() => navigation.navigate('CreateAccount')}
+              >
+                Create one here
+              </Text>
+            </Text>
+          </View>
+        </View>
+      </SafeAreaView>
     </TouchableWithoutFeedback>
   );
 };
@@ -414,90 +594,200 @@ const SignInScreen: React.FC = () => {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#f6fafc',
+    backgroundColor: '#ffffff',
   },
   container: {
     flex: 1,
-    backgroundColor: '#f6fafc',
+    backgroundColor: '#ffffff',
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+  },
+  backRow: {
+    alignSelf: 'flex-start',
+    marginTop: 32,
+    marginLeft: 24,
+    marginBottom: 8,
+  },
+  backText: {
+    color: '#222',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+  logoRow: {
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 16, // Responsive padding
+<<<<<<< Updated upstream
+    marginTop: 8,
+    marginBottom: 2,
+  },
+  logo: {
+    width: 44,
+    height: 44,
+    borderRadius: 10,
+    marginRight: 10,
+  },
+  appName: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#222',
+    letterSpacing: 0.5,
+  },
+  welcome: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    color: '#222',
+    marginTop: 8,
+    textAlign: 'center',
+  },
+  subtitle: {
+    fontSize: 15,
+    color: '#7a869a',
+    marginBottom: 18,
+    textAlign: 'center',
+    fontWeight: '400',
+=======
+    paddingHorizontal: 20,
   },
   // Header Section
   headerSection: {
     width: '100%',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 32,
+    marginTop: 15,
+  },
+  logoContainer: {
+    alignItems: 'center',
+    marginBottom: 24,
+    padding: 12,
+    borderRadius: 20,
+    backgroundColor: 'transparent',
+  },
+  logoIcon: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
   },
   titleSection: {
     alignItems: 'center',
-    marginTop: 20,
   },
   welcome: {
-    fontSize: 26,
-    fontWeight: '700',
-    color: '#1a202c',
+    fontSize: 32,
+    color: '#0f172a',
     textAlign: 'center',
-    marginBottom: 6,
+    marginBottom: 12,
+    fontWeight: '800',
+    fontFamily: 'Roboto-Bold',
+    letterSpacing: -0.5,
   },
+
   mainContent: {
     width: '100%',
     flex: 1,
     justifyContent: 'center',
   },
   subtitle: {
-    fontSize: 15,
-    color: '#718096',
+    fontSize: 17,
+    color: '#475569',
     textAlign: 'center',
-    fontWeight: '400',
-    lineHeight: 20,
+    lineHeight: 24,
+    fontWeight: '500',
+    fontFamily: 'Roboto-Medium',
+>>>>>>> Stashed changes
   },
+
   card: {
+<<<<<<< Updated upstream
     backgroundColor: '#fff',
     borderRadius: 16,
-    padding: 24, // Reduced from 28 to give more space for content
+    padding: 24,
+    marginHorizontal: 12,
+    marginTop: 8,
+    marginBottom: 24,
     shadowColor: '#000',
-    shadowOpacity: 0.06,
+    shadowOpacity: 0.07,
     shadowRadius: 12,
     shadowOffset: { width: 0, height: 2 },
-    elevation: 4,
+    elevation: 3,
+    alignItems: 'center',
+    width: '92%',
+=======
+    backgroundColor: '#ffffff',
+    borderRadius: 24,
+    padding: 32,
+    shadowColor: '#6366f1',
+    shadowOpacity: 0.12,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
     width: '100%',
-    maxWidth: 360, // Reduced from 380 to give more space on smaller screens
+    maxWidth: 400,
+>>>>>>> Stashed changes
     alignSelf: 'center',
+    borderWidth: 1.5,
+    borderColor: '#f1f5f9',
   },
+<<<<<<< Updated upstream
+  cardTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#222',
+    marginBottom: 2,
+    textAlign: 'center',
+=======
   cardHeader: {
     alignItems: 'center',
-    marginBottom: 28,
+    marginBottom: 32,
   },
   cardTitle: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: '#1a202c',
-    marginBottom: 6,
+    fontSize: 28,
+    color: '#0f172a',
+    marginBottom: 10,
     textAlign: 'center',
+    fontWeight: '700',
+    fontFamily: 'Roboto-Bold',
+    letterSpacing: -0.3,
+>>>>>>> Stashed changes
   },
+
   cardSubtitle: {
-    fontSize: 15,
-    color: '#718096',
+<<<<<<< Updated upstream
+    fontSize: 14,
+    color: '#7a869a',
+    marginBottom: 18,
     textAlign: 'center',
     fontWeight: '400',
-    lineHeight: 20,
-  },
-  formSection: {
-    width: '100%',
-    marginBottom: 20,
   },
   label: {
     fontSize: 15,
-    color: '#1a202c',
-    marginBottom: 10,
-    fontWeight: '600',
-    alignSelf: 'flex-start',
+    color: '#222',
+    marginBottom: 6,
+    marginTop: 16,
+    fontWeight: 'bold',
+=======
+    fontSize: 16,
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 24,
+    fontWeight: '500',
+    fontFamily: 'Roboto-Medium',
   },
-  inputSection: {
+
+  formSection: {
     width: '100%',
-    marginBottom: 20,
+    marginBottom: 24,
   },
+  label: {
+    fontSize: 15,
+    color: '#1e293b',
+    marginBottom: 12,
+>>>>>>> Stashed changes
+    alignSelf: 'flex-start',
+    fontWeight: '700',
+    fontFamily: 'Roboto-Medium',
+    letterSpacing: 0.2,
+  },
+<<<<<<< Updated upstream
   input: {
     width: '100%',
     height: 52,
@@ -508,180 +798,190 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     marginBottom: 12,
     backgroundColor: '#fff',
-    fontSize: 15,
+    fontSize: 14,
     color: '#222',
     textAlignVertical: 'center',
-    shadowColor: 'transparent',
   },
   gradientButton: {
     borderRadius: 8,
     width: '100%',
-    marginTop: 10,
-    marginBottom: 10,
-    shadowColor: '#4f8cff',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.13,
-    shadowRadius: 8,
-    elevation: 3,
+    marginTop: 8,
+    marginBottom: 8,
   },
   button: {
     paddingHorizontal: 24,
-    paddingVertical: 14,
-    borderRadius: 12,
+    paddingVertical: 12,
+    borderRadius: 8,
+=======
+
+  inputSection: {
+    width: '100%',
+    marginBottom: 24,
+  },
+  button: {
+    paddingHorizontal: 28,
+    paddingVertical: 18,
+    borderRadius: 16,
+>>>>>>> Stashed changes
     backgroundColor: 'transparent',
     width: '100%',
     alignItems: 'center',
   },
+  buttonDisabled: {
+    opacity: 0.6,
+  },
   buttonText: {
     color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
+<<<<<<< Updated upstream
+    fontSize: 15,
+    fontWeight: 'bold',
     textAlign: 'center',
-    letterSpacing: 0.2,
   },
   otpInfo: {
     fontSize: 13,
     color: '#7a869a',
     marginBottom: 8,
-    marginTop: 0,
-    textAlign: 'center',
+    marginTop: -4,
+    textAlign: 'left',
     width: '100%',
   },
   resend: {
     color: '#1ecb81',
     fontWeight: 'bold',
-    textDecorationLine: 'underline',
-    fontSize: 13,
+=======
+    fontSize: 18,
+    textAlign: 'center',
+    letterSpacing: 0.5,
+    fontWeight: '700',
+    fontFamily: 'Roboto-Bold',
+>>>>>>> Stashed changes
   },
+
   bottomText: {
     fontSize: 14,
-    color: '#718096',
+<<<<<<< Updated upstream
+    color: '#7a869a',
+    marginTop: 10,
     textAlign: 'center',
-    lineHeight: 20,
   },
   link: {
     color: '#4f8cff',
     fontWeight: 'bold',
-    textDecorationLine: 'underline',
-    fontSize: 15,
+=======
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 22,
+    fontWeight: '400',
+    fontFamily: 'Roboto-Medium',
+>>>>>>> Stashed changes
   },
+
   errorText: {
-    color: '#e53e3e',
+    color: '#dc2626',
     fontSize: 14,
-    marginTop: 16,
+    marginTop: 8,
     marginBottom: 8,
     textAlign: 'center',
-    fontWeight: '600',
-    backgroundColor: '#fed7d7',
+<<<<<<< Updated upstream
+=======
+    backgroundColor: '#fee2e2',
     paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 8,
+    paddingVertical: 10,
+    borderRadius: 10,
+    fontFamily: 'Roboto-Medium',
   },
+
   phoneInputRow: {
     flexDirection: 'row',
     alignItems: 'center',
     width: '100%',
-    backgroundColor: '#fff',
-    borderRadius: 12,
+    backgroundColor: '#fafbfc',
+    borderRadius: 16,
     borderWidth: 1.5,
     borderColor: '#e2e8f0',
-    shadowColor: '#000',
-    shadowOpacity: 0.03,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 1 },
-    elevation: 1,
-    overflow: 'hidden', // Prevent content from extending beyond borders
-    minHeight: 52, // Ensure consistent height
+    shadowColor: '#6366f1',
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
+    overflow: 'hidden',
+    minHeight: 60,
   },
   countryTrigger: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    height: 52,
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+    height: 60,
     borderRightWidth: 1.5,
     borderRightColor: '#e2e8f0',
-    minWidth: 80, // Set minimum width for country selector
-    maxWidth: 100, // Set maximum width to prevent taking too much space
+    minWidth: 90,
+    maxWidth: 105,
+    backgroundColor: '#ffffff',
   },
   flag: {
-    fontSize: 22,
-    marginRight: 6,
+    fontSize: 24,
+    marginRight: 8,
+    lineHeight: 28,
+    fontFamily: 'Roboto-Medium',
   },
+
   code: {
     fontSize: 16,
-    color: '#1a202c',
-    fontWeight: '600',
-    marginRight: 3,
+    color: '#0f172a',
+    marginRight: 4,
+    lineHeight: 22,
+    fontWeight: '700',
+    fontFamily: 'Roboto-Bold',
   },
+
   phoneInput: {
     flex: 1,
-    height: 52,
-    paddingHorizontal: 12,
-    fontSize: 16,
-    color: '#1a202c',
-    backgroundColor: '#fff',
-    minWidth: 0, // Allow flex to shrink properly
-    textAlignVertical: 'center', // Ensure text is centered vertically
+    height: 60,
+    paddingHorizontal: 14,
+    paddingVertical: 0,
+    fontSize: 17,
+    color: '#0f172a',
+    backgroundColor: '#fafbfc',
+    minWidth: 0,
+    textAlignVertical: 'center',
+    includeFontPadding: false,
+    fontWeight: '700',
+    fontFamily: 'Roboto-Bold',
   },
+
   purpleButton: {
-    borderRadius: 12,
+    borderRadius: 16,
     width: '100%',
-    shadowColor: '#8f5cff',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 8,
-    elevation: 6,
+    shadowColor: '#6366f1',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+    elevation: 10,
   },
   buttonSection: {
     width: '100%',
-    marginTop: 4,
-  },
-  otpContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
     marginTop: 8,
-    width: '100%',
-  },
-  otpBox: {
-    width: 36,
-    height: 46,
-    borderWidth: 1.5,
-    borderColor: '#e3e7ee',
-    borderRadius: 8,
-    backgroundColor: '#fff',
-    textAlign: 'center',
-    fontSize: 18,
-    color: '#222',
-    marginHorizontal: 2,
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
-  },
-  otpBoxActive: {
-    borderColor: '#8f5cff',
-    shadowColor: '#8f5cff',
-    shadowOpacity: 0.13,
-    shadowRadius: 8,
-    elevation: 3,
   },
 
   infoText: {
-    fontSize: 14,
-    color: '#718096',
-    marginBottom: 24,
+    fontSize: 15,
+    color: '#64748b',
+    marginBottom: 28,
     textAlign: 'center',
-    lineHeight: 20,
+    lineHeight: 24,
     paddingHorizontal: 8,
+    fontWeight: '400',
+    fontFamily: 'Roboto-Medium',
   },
+
   footerSection: {
     alignItems: 'center',
-    paddingTop: 12,
-    borderTopWidth: 1,
+    paddingTop: 20,
+    borderTopWidth: 1.5,
     borderTopColor: '#f1f5f9',
+    marginTop: 8,
+>>>>>>> Stashed changes
   },
 });
 

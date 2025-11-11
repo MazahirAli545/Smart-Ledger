@@ -293,15 +293,19 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 20,
-    fontWeight: '700',
     color: '#fff',
     marginBottom: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   subtitle: {
     fontSize: 14,
     color: 'rgba(255, 255, 255, 0.9)',
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   closeButton: {
     width: 32,
     height: 32,
@@ -322,15 +326,19 @@ const styles = StyleSheet.create({
   },
   planName: {
     fontSize: 18,
-    fontWeight: '600',
     color: '#1a202c',
     marginBottom: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   planPrice: {
     fontSize: 16,
     color: '#718096',
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   messageContainer: {
     marginBottom: 24,
   },
@@ -339,17 +347,22 @@ const styles = StyleSheet.create({
     color: '#4a5568',
     lineHeight: 22,
     textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   featuresContainer: {
     marginBottom: 32,
   },
   featuresTitle: {
     fontSize: 16,
-    fontWeight: '600',
     color: '#1a202c',
     marginBottom: 12,
     textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   featuresList: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -366,7 +379,10 @@ const styles = StyleSheet.create({
     color: '#4a5568',
     marginLeft: 8,
     flex: 1,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   buttonContainer: {
     gap: 12,
   },
@@ -389,9 +405,11 @@ const styles = StyleSheet.create({
   },
   upgradeButtonText: {
     fontSize: 16,
-    fontWeight: '600',
     color: '#fff',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   remindLaterButton: {
     alignItems: 'center',
     paddingVertical: 12,
@@ -399,7 +417,8 @@ const styles = StyleSheet.create({
   remindLaterText: {
     fontSize: 14,
     color: '#718096',
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
 });
 

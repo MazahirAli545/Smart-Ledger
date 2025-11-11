@@ -8,12 +8,14 @@ import {
   Alert,
   Modal,
 } from 'react-native';
+
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
 import { BASE_URL } from '../../api';
+import { unifiedApi } from '../../api/unifiedApiService';
 import { useAlert } from '../../context/AlertContext';
 
 const FOLDER_TYPE_ICONS: Record<string, string> = {
@@ -95,9 +97,8 @@ const AllQuickActionsScreen = () => {
   const handleDeleteFolder = async (folderId: number) => {
     try {
       const token = await AsyncStorage.getItem('accessToken');
-      await axios.delete(`${BASE_URL}/menus/${folderId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      // Use unified API for delete
+      await unifiedApi.delete(`/menus/${folderId}`);
       navigation.goBack(); // After delete, go back to Dashboard (which will refresh)
     } catch (err) {
       showAlert({
@@ -297,9 +298,9 @@ const AllQuickActionsScreen = () => {
             <Text
               style={{
                 fontSize: 20,
-                fontWeight: 'bold',
                 color: '#222',
                 marginBottom: 10,
+                fontFamily: 'Roboto-Medium',
               }}
             >
               Delete Folder
@@ -310,10 +311,11 @@ const AllQuickActionsScreen = () => {
                 color: '#444',
                 textAlign: 'center',
                 marginBottom: 24,
+                fontFamily: 'Roboto-Medium',
               }}
             >
               Are you sure you want to delete the folder
-              <Text style={{ fontWeight: 'bold', color: '#dc3545' }}>
+              <Text style={{ color: '#dc3545', fontFamily: 'Roboto-Medium' }}>
                 {' '}
                 "{folderToDelete?.title}"
               </Text>
@@ -341,7 +343,11 @@ const AllQuickActionsScreen = () => {
                 onPress={hideDeleteModal}
               >
                 <Text
-                  style={{ color: '#444', fontWeight: 'bold', fontSize: 16 }}
+                  style={{
+                    color: '#444',
+                    fontSize: 16,
+                    fontFamily: 'Roboto-Medium',
+                  }}
                 >
                   Cancel
                 </Text>
@@ -356,7 +362,11 @@ const AllQuickActionsScreen = () => {
                 onPress={confirmDeleteFolder}
               >
                 <Text
-                  style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}
+                  style={{
+                    color: '#fff',
+                    fontSize: 16,
+                    fontFamily: 'Roboto-Medium',
+                  }}
                 >
                   Delete
                 </Text>
@@ -380,7 +390,8 @@ const styles = StyleSheet.create({
     borderBottomColor: '#f0f0f0',
   },
   backButton: { marginRight: 12 },
-  title: { fontSize: 18, fontWeight: 'bold', color: '#222' },
+  title: { fontSize: 18, color: '#222', fontFamily: 'Roboto-Medium' },
+
   grid: { padding: 16 },
   actionButton: {
     backgroundColor: '#f9f9f9',
@@ -391,7 +402,12 @@ const styles = StyleSheet.create({
     width: '100%',
     marginBottom: 12,
   },
-  actionText: { fontSize: 14, color: '#222', marginTop: 8, fontWeight: '500' },
+  actionText: {
+    fontSize: 14,
+    color: '#222',
+    marginTop: 8,
+    fontFamily: 'Roboto-Medium',
+  },
 });
 
 export default AllQuickActionsScreen;

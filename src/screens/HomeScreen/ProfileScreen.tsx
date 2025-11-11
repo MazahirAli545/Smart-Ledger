@@ -5,13 +5,13 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  StatusBar,
   TextInput,
   ActivityIndicator,
   Dimensions,
   Image,
   Animated,
   RefreshControl,
+  DeviceEventEmitter,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import LinearGradient from 'react-native-linear-gradient';
@@ -19,7 +19,7 @@ import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityI
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import axios from 'axios';
-import { BASE_URL } from '../../api';
+import { unifiedApi } from '../../api/unifiedApiService';
 import { getUserIdFromToken } from '../../utils/storage';
 import { Dropdown } from 'react-native-element-dropdown';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
@@ -34,12 +34,40 @@ import {
   languages,
   goals,
 } from '../../utils/dropdownOptions';
+import { profileUpdateManager } from '../../utils/profileUpdateManager';
+import { useStatusBarWithGradient } from '../../hooks/useStatusBar';
+import { getStatusBarHeight } from 'react-native-status-bar-height';
+import {
+  HEADER_CONTENT_HEIGHT,
+  getGradientHeaderStyle,
+} from '../../utils/headerLayout';
 
 const { width } = Dimensions.get('window');
 
 const GRADIENT = ['#4f8cff', '#1ecb81'];
-const PROFILE_IMAGE =
-  'https://img.icons8.com/ios-filled/100/4f8cff/user-male-circle.png';
+
+// Enforce exact UI/UX text sizing regardless of OS accessibility scaling
+// so component sizes and spacings remain consistent with design
+// (scoped to this screen via module execution)
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
+if (Text && (Text as any).defaultProps == null) (Text as any).defaultProps = {};
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
+if (TextInput && (TextInput as any).defaultProps == null)
+  (TextInput as any).defaultProps = {};
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
+(Text as any).defaultProps.allowFontScaling = false;
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
+(Text as any).defaultProps.maxFontSizeMultiplier = 1;
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
+(TextInput as any).defaultProps.allowFontScaling = false;
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
+(TextInput as any).defaultProps.maxFontSizeMultiplier = 1;
 
 // Dummy profile image component
 const DummyProfileImage = ({ size = 68 }: { size?: number }) => (
@@ -66,6 +94,13 @@ export const clearProfileCache = () => {
 const ProfileScreen = () => {
   const navigation = useNavigation();
   const { showAlert } = useAlert();
+
+  // Configure StatusBar for gradient header
+  const { statusBarSpacer } = useStatusBarWithGradient(
+    'ProfileScreen',
+    GRADIENT,
+  );
+  const preciseStatusBarHeight = getStatusBarHeight(true);
   const [user, setUser] = useState<any>(globalUserCache); // Use global cache immediately
   const [loading, setLoading] = useState(!globalUserCache); // Only loading if no global cache
   const [editMode, setEditMode] = useState(false);
@@ -75,6 +110,8 @@ const ProfileScreen = () => {
   const [activeField, setActiveField] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [cacheChecked, setCacheChecked] = useState(globalCacheChecked);
+
+  const [error, setError] = useState<string | null>(null);
 
   // Check for cached user data on component mount
   useEffect(() => {
@@ -89,6 +126,14 @@ const ProfileScreen = () => {
       }
     }, [user]),
   );
+
+  // Ensure form is synchronized with user data
+  useEffect(() => {
+    if (user && !editMode) {
+      console.log('🔄 ProfileScreen: Syncing form with user data:', user);
+      setForm(user);
+    }
+  }, [user, editMode]);
 
   const checkCachedUserData = async () => {
     // If we already have global cache, use it immediately
@@ -141,26 +186,79 @@ const ProfileScreen = () => {
     }
     try {
       const accessToken = await AsyncStorage.getItem('accessToken');
-      const userId = await getUserIdFromToken();
-      const res = await axios.get(`${BASE_URL}/user/${userId}`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
+      if (!accessToken) {
+        throw new Error('No access token found. Please login again.');
+      }
+
+      // Use unified API with caching
+      const res = await unifiedApi.getUserProfile();
+      const payload = (res as any)?.data ?? res ?? {};
+      const normalized = {
+        ownerName:
+          payload.ownerName || payload.name || payload.fullName || 'User',
+        businessName:
+          payload.businessName || payload.companyName || 'My Business',
+        mobileNumber:
+          payload.mobileNumber || payload.phone || payload.mobile || '',
+        planType:
+          payload.planType ||
+          payload.plan ||
+          payload.subscription?.planName ||
+          'free',
+        ...payload,
+      };
+
+      // Ensure we have proper fallback values
+      if (!normalized.ownerName || normalized.ownerName === 'User') {
+        normalized.ownerName = 'User';
+      }
+      if (
+        !normalized.businessName ||
+        normalized.businessName === 'My Business'
+      ) {
+        normalized.businessName = 'My Business';
+      }
+
+      console.log('🔄 ProfileScreen: Normalized user data:', {
+        ownerName: normalized.ownerName,
+        businessName: normalized.businessName,
+        mobileNumber: normalized.mobileNumber,
       });
 
       // Update global cache
-      globalUserCache = res.data.data;
+      globalUserCache = normalized;
 
       // Cache the user data
-      await AsyncStorage.setItem(
-        'cachedUserData',
-        JSON.stringify(res.data.data),
-      );
+      await AsyncStorage.setItem('cachedUserData', JSON.stringify(normalized));
 
-      setUser(res.data.data);
-      setForm(res.data.data);
-    } catch (err) {
+      setUser(normalized);
+      setForm(normalized);
+    } catch (err: any) {
+      console.error('❌ ProfileScreen: Error fetching user data:', err);
+
+      let message = 'Failed to fetch profile';
+      let title = 'Error';
+
+      if (err.response) {
+        if (err.response.status === 401) {
+          title = 'Authentication Error';
+          message = 'Your session has expired. Please login again.';
+        } else if (err.response.status === 403) {
+          title = 'Permission Denied';
+          message = 'You do not have permission to access this profile.';
+        } else if (err.response.status >= 500) {
+          title = 'Server Error';
+          message = 'Server error occurred. Please try again later.';
+        } else if (err.response.data?.message) {
+          message = err.response.data.message;
+        }
+      } else if (err.message) {
+        message = err.message;
+      }
+
       showAlert({
-        title: 'Error',
-        message: 'Failed to fetch profile',
+        title,
+        message,
         type: 'error',
       });
     } finally {
@@ -177,7 +275,12 @@ const ProfileScreen = () => {
   };
 
   const handleChange = (key: string, value: string) => {
-    setForm((prev: any) => ({ ...prev, [key]: value }));
+    console.log('🔄 ProfileScreen: Form field changed:', { key, value });
+    setForm((prev: any) => {
+      const updated = { ...prev, [key]: value };
+      console.log('🔄 ProfileScreen: Updated form state:', updated);
+      return updated;
+    });
   };
 
   const onRefresh = async () => {
@@ -187,10 +290,79 @@ const ProfileScreen = () => {
   };
 
   const handleSave = async () => {
+    console.log('🔄 ProfileScreen: Save button pressed!');
     setSaving(true);
+
+    // Declare finalUserId at the function scope
+    let finalUserId: number | undefined;
+
     try {
+      console.log('🔄 ProfileScreen: Starting save process...');
+      console.log('🔄 ProfileScreen: Current form data:', form);
+
       const accessToken = await AsyncStorage.getItem('accessToken');
+      console.log('🔑 Access token exists:', !!accessToken);
+
       const userId = await getUserIdFromToken();
+      console.log('👤 User ID:', userId);
+      console.log('👤 User ID type:', typeof userId);
+
+      if (!userId) {
+        console.error('❌ ProfileScreen: No user ID found in token');
+        throw new Error('User ID not found. Please login again.');
+      }
+
+      if (isNaN(Number(userId))) {
+        console.error('❌ ProfileScreen: Invalid user ID format:', userId);
+        throw new Error('Invalid user ID format. Please login again.');
+      }
+
+      // Debug: Log the user data structure
+      console.log('🔍 ProfileScreen: User data structure:', {
+        user: user,
+        userId: userId,
+        userKeys: user ? Object.keys(user) : 'no user data',
+      });
+
+      // Get user ID from profile endpoint (more reliable across environments)
+      // If it fails, fall back to token user ID
+      let profileUserId: number | null = null;
+      try {
+        // Use unified API with caching
+        const profileRes = await unifiedApi.getUserProfile();
+        const profileUser = (profileRes as any)?.data ?? profileRes ?? {};
+        profileUserId = Number(
+          (profileUser?.id ?? profileUser?.userId ?? profileUser?.user_id) || 0,
+        );
+        if (profileUserId && !isNaN(profileUserId)) {
+          console.log(
+            '🔄 ProfileScreen: Resolved user ID from profile:',
+            profileUserId,
+          );
+        }
+      } catch (e) {
+        console.warn(
+          '⚠️ ProfileScreen: Failed to resolve ID from /users/profile, using token ID',
+        );
+      }
+
+      // Prefer profile ID; fallback to token sub/id
+      finalUserId = Number(profileUserId || userId);
+
+      console.log('🔄 ProfileScreen: Using final user ID:', finalUserId);
+
+      // Additional validation: Check if the user ID is valid
+      if (!finalUserId || isNaN(finalUserId) || finalUserId <= 0) {
+        console.error('❌ ProfileScreen: Invalid user ID:', finalUserId);
+        throw new Error('Invalid user ID. Please login again.');
+      }
+
+      console.log('🔄 ProfileScreen: Final user ID for API call:', finalUserId);
+
+      if (!accessToken) {
+        throw new Error('Access token not found. Please login again.');
+      }
+
       const allowedFields = [
         'businessName',
         'ownerName',
@@ -209,17 +381,127 @@ const ProfileScreen = () => {
         'primaryGoal',
         'currentChallenges',
         'profileComplete',
+        'gstNumber', // Added missing GST Number field
       ];
-      const body: { id: any; [key: string]: any } = { id: userId };
+
+      const body: { [key: string]: any } = {};
       allowedFields.forEach(key => {
-        if (form[key] !== undefined) body[key] = form[key];
+        if (form[key] !== undefined && form[key] !== null) {
+          body[key] = form[key];
+        }
       });
-      await axios.patch(`${BASE_URL}/user/edit-profile`, body, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
+
+      // Include user's primary role id for backend auditing/mapping
+      try {
+        const { getRoleId } = await import('../../utils/roleHelper');
+        const roleId = await getRoleId();
+        if (roleId !== null && roleId !== undefined) {
+          body.roleId = roleId;
+          body.role_id = roleId; // alias for alternate DTOs
+          console.log(
+            '✅ ProfileScreen: Added role ID to request body:',
+            roleId,
+          );
+        }
+      } catch (e) {
+        console.warn('⚠️ ProfileScreen: Failed to add role ID:', e);
+      }
+
+      console.log('📤 ProfileScreen: Preparing update request with data:', {
+        originalUserId: userId,
+        finalUserId,
+        body,
+        // Use unified API - no need for url/baseUrl
       });
+
+      // Check if we have any data to send
+      if (Object.keys(body).length === 0) {
+        console.warn(
+          '⚠️ ProfileScreen: No data to update, form might be empty',
+        );
+        console.log('⚠️ ProfileScreen: Form data:', form);
+        console.log('⚠️ ProfileScreen: User data:', user);
+        console.log('⚠️ ProfileScreen: Form vs User comparison:', {
+          formKeys: Object.keys(form || {}),
+          userKeys: Object.keys(user || {}),
+          formValues: form,
+          userValues: user,
+        });
+        showAlert({
+          title: 'No Changes',
+          message:
+            'No changes detected to save. Please make some changes first.',
+          type: 'info',
+        });
+        setSaving(false);
+        return;
+      }
+
+      // Additional check: compare form with user data to see if there are actual changes
+      const hasChanges = Object.keys(body).some(key => {
+        const formValue = form[key];
+        const userValue = user[key];
+        return formValue !== userValue;
+      });
+
+      if (!hasChanges) {
+        console.warn('⚠️ ProfileScreen: No actual changes detected');
+        showAlert({
+          title: 'No Changes',
+          message:
+            'No changes detected to save. Please make some changes first.',
+          type: 'info',
+        });
+        setSaving(false);
+        return;
+      }
+
+      console.log(
+        '📤 ProfileScreen: Making API call to:',
+        // Use unified API
+      );
+
+      // No need to verify user exists - the JWT token already validates the user
+      // and the backend will handle the validation
+
+      // Use PATCH to update user profile
+      console.log('📤 ProfileScreen: Final API call details:', {
+        // Use unified API
+        userId: finalUserId,
+        bodyKeys: Object.keys(body),
+        body: body,
+      });
+
+      // Make the API call to update user profile, retrying with alternate ID on 404
+      let response: any;
+      try {
+        // Use unified API for update
+        response = await unifiedApi.updateUserProfile(body);
+      } catch (firstErr: any) {
+        // unifiedApi handles errors automatically, but we can still retry if needed
+        const altId =
+          Number(userId) !== Number(finalUserId) ? Number(userId) : null;
+        if (firstErr?.message?.includes('404') && altId) {
+          console.warn(
+            '⚠️ ProfileScreen: 404 for ID',
+            finalUserId,
+            'retrying with token ID',
+            altId,
+          );
+          // Use unified API for update (retry)
+          response = await unifiedApi.updateUserProfile(body);
+          // Update finalUserId to altId for downstream logging
+          finalUserId = altId;
+        } else {
+          throw firstErr;
+        }
+      }
+
+      console.log(
+        '✅ ProfileScreen: API response received:',
+        response?.status,
+        response?.data,
+      );
 
       // Update cached data with new user data
       const updatedUser = { ...user, ...body };
@@ -229,20 +511,94 @@ const ProfileScreen = () => {
       globalUserCache = updatedUser;
 
       setUser(updatedUser);
+      setForm(updatedUser);
       setEditMode(false);
       setShowSuccess(true);
+
+      // Emit profile update event to notify other screens
+      console.log(
+        '📢 ProfileScreen: Emitting profile update event with data:',
+        {
+          businessName: updatedUser.businessName,
+          ownerName: updatedUser.ownerName,
+        },
+      );
+      profileUpdateManager.emitProfileUpdate();
+
+      // Also emit React Native DeviceEventEmitter event to update drawer instantly
+      try {
+        const payload = {
+          name: updatedUser.ownerName || '',
+          mobile:
+            updatedUser.mobileNumber ||
+            (updatedUser as any).phone ||
+            (updatedUser as any).phoneNumber ||
+            '',
+        };
+        console.log(
+          '📡 ProfileScreen: Emitting DeviceEvent profile-updated:',
+          payload,
+        );
+        DeviceEventEmitter.emit('profile-updated', payload);
+      } catch (emitErr) {
+        console.warn(
+          '⚠️ ProfileScreen: Failed to emit DeviceEvent profile-updated',
+          emitErr,
+        );
+      }
+
       setTimeout(() => setShowSuccess(false), 3000);
     } catch (err) {
       const error = err as any;
+      console.error('❌ ProfileScreen: Save error:', error);
+
       let message = 'Failed to update profile';
-      if (error.response?.data?.message) {
-        message = error.response.data.message;
+      let title = 'Error';
+
+      if (error.response) {
+        console.error('❌ API Error Response:', {
+          status: error.response.status,
+          statusText: error.response.statusText,
+          data: error.response.data,
+        });
+
+        if (error.response.status === 401) {
+          title = 'Authentication Error';
+          message = 'Your session has expired. Please login again.';
+        } else if (error.response.status === 403) {
+          title = 'Permission Denied';
+          message =
+            'You do not have permission to update this profile. Please check your role permissions.';
+        } else if (error.response.status === 404) {
+          title = 'User Not Found';
+          message = `User profile not found (ID: ${
+            finalUserId || 'unknown'
+          }). This might be a temporary issue. Please try refreshing the app or contact support if the problem persists.`;
+        } else if (error.response.status === 422) {
+          title = 'Validation Error';
+          message =
+            error.response.data?.message || 'Please check your input data.';
+        } else if (error.response.status >= 500) {
+          title = 'Server Error';
+          message = 'Server error occurred. Please try again later.';
+        } else if (error.response.data?.message) {
+          message = error.response.data.message;
+        }
+      } else if (
+        error.code === 'NETWORK_ERROR' ||
+        error.message?.includes('Network Error')
+      ) {
+        title = 'Network Error';
+        message = 'Please check your internet connection and try again.';
       } else if (error.message) {
         message = error.message;
       }
+
+      console.error('❌ Final error message:', { title, message });
+
       showAlert({
-        title: 'Error',
-        message: message,
+        title,
+        message,
         type: 'error',
       });
     } finally {
@@ -266,23 +622,19 @@ const ProfileScreen = () => {
 
   return (
     <View style={styles.container}>
-      <StatusBar
-        barStyle="light-content"
-        backgroundColor="transparent"
-        translucent
-      />
-
       {/* Seamless Header with Status Bar Integration */}
       <LinearGradient
         colors={GRADIENT}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 0 }}
-        style={styles.header}
+        style={[
+          styles.header,
+          getGradientHeaderStyle(
+            preciseStatusBarHeight || statusBarSpacer.height,
+          ),
+        ]}
       >
-        {/* Status Bar Spacer */}
-        <View style={styles.statusBarSpacer} />
-
-        <View style={styles.headerTop}>
+        <View style={[styles.headerTop, { height: HEADER_CONTENT_HEIGHT }]}>
           <TouchableOpacity
             style={styles.backButton}
             onPress={() => navigation.goBack()}
@@ -356,7 +708,7 @@ const ProfileScreen = () => {
             <View style={styles.completionHeader}>
               <MaterialCommunityIcons
                 name="account-check"
-                size={24}
+                size={20}
                 color="#4f8cff"
               />
               <Text style={styles.completionTitle}>Profile Completion</Text>
@@ -485,6 +837,15 @@ const ProfileScreen = () => {
                     setActiveField={setActiveField}
                     fieldKey="currentAccountingSoftware"
                   />
+                  <FormField
+                    label="GST Number"
+                    value={form.gstNumber}
+                    onChangeText={value => handleChange('gstNumber', value)}
+                    placeholder="Enter your GST number (optional)"
+                    activeField={activeField}
+                    setActiveField={setActiveField}
+                    fieldKey="gstNumber"
+                  />
                 </>
               ) : (
                 <>
@@ -505,6 +866,7 @@ const ProfileScreen = () => {
                     label="Accounting Software"
                     value={user?.currentAccountingSoftware || '-'}
                   />
+                  <InfoRow label="GST Number" value={user?.gstNumber || '-'} />
                 </>
               )}
             </View>
@@ -711,28 +1073,39 @@ const FormField = ({
   editable?: boolean;
   multiline?: boolean;
   numberOfLines?: number;
-}) => (
-  <View style={styles.formField}>
-    <Text style={styles.formLabel}>{label}</Text>
-    <TextInput
-      style={[
-        styles.formInput,
-        activeField === fieldKey && styles.formInputActive,
-        !editable && styles.formInputDisabled,
-        multiline && styles.formInputMultiline,
-      ]}
-      value={value}
-      onChangeText={onChangeText}
-      placeholder={placeholder}
-      placeholderTextColor="#8a94a6"
-      editable={editable}
-      multiline={multiline}
-      numberOfLines={numberOfLines}
-      onFocus={() => setActiveField(fieldKey)}
-      onBlur={() => setActiveField('')}
-    />
-  </View>
-);
+}) => {
+  const handleTextChange = (text: string) => {
+    console.log(
+      `🔄 FormField: ${fieldKey} changed from "${value}" to "${text}"`,
+    );
+    if (onChangeText) {
+      onChangeText(text);
+    }
+  };
+
+  return (
+    <View style={styles.formField}>
+      <Text style={styles.formLabel}>{label}</Text>
+      <TextInput
+        style={[
+          styles.formInput,
+          activeField === fieldKey && styles.formInputActive,
+          !editable && styles.formInputDisabled,
+          multiline && styles.formInputMultiline,
+        ]}
+        value={value}
+        onChangeText={handleTextChange}
+        placeholder={placeholder}
+        placeholderTextColor="#8a94a6"
+        editable={editable}
+        multiline={multiline}
+        numberOfLines={numberOfLines}
+        onFocus={() => setActiveField(fieldKey)}
+        onBlur={() => setActiveField('')}
+      />
+    </View>
+  );
+};
 
 // Component: Dropdown Field
 const DropdownField = ({
@@ -747,30 +1120,44 @@ const DropdownField = ({
   data: Array<{ label: string; value: string }>;
   onChange: (item: { label: string; value: string }) => void;
   placeholder: string;
-}) => (
-  <View style={styles.formField}>
-    <Text style={styles.formLabel}>{label}</Text>
-    <Dropdown
-      style={styles.dropdown}
-      placeholderStyle={styles.dropdownPlaceholder}
-      selectedTextStyle={styles.dropdownSelectedText}
-      data={data}
-      maxHeight={200}
-      labelField="label"
-      valueField="value"
-      placeholder={placeholder}
-      value={value}
-      onChange={onChange}
-      containerStyle={styles.dropdownContainer}
-    />
-  </View>
-);
+}) => {
+  const handleDropdownChange = (item: { label: string; value: string }) => {
+    console.log(
+      `🔄 DropdownField: ${label} changed from "${value}" to "${item.value}"`,
+    );
+    onChange(item);
+  };
+
+  return (
+    <View style={styles.formField}>
+      <Text style={styles.formLabel}>{label}</Text>
+      <Dropdown
+        style={styles.dropdown}
+        placeholderStyle={styles.dropdownPlaceholder}
+        selectedTextStyle={styles.dropdownSelectedText}
+        itemTextStyle={{ color: '#333333', fontFamily: 'Roboto-Medium' }}
+        data={data}
+        maxHeight={200}
+        labelField="label"
+        valueField="value"
+        placeholder={placeholder}
+        value={value}
+        onChange={handleDropdownChange}
+        containerStyle={styles.dropdownContainer}
+      />
+    </View>
+  );
+};
 
 // Component: Info Row
 const InfoRow = ({ label, value }: { label: string; value: string }) => (
   <View style={styles.infoRow}>
-    <Text style={styles.infoLabel}>{label}</Text>
-    <Text style={styles.infoValue}>{value}</Text>
+    <Text style={styles.infoLabel} numberOfLines={1} ellipsizeMode="tail">
+      {label}
+    </Text>
+    <Text style={styles.infoValue} numberOfLines={1} ellipsizeMode="tail">
+      {value}
+    </Text>
   </View>
 );
 
@@ -792,9 +1179,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#f6fafc',
   },
   header: {
-    paddingTop: 0,
-    paddingBottom: 24,
-    paddingHorizontal: 20,
     borderBottomLeftRadius: 32,
     borderBottomRightRadius: 32,
     shadowColor: '#000',
@@ -804,7 +1188,7 @@ const styles = StyleSheet.create({
     elevation: 8,
   },
   statusBarSpacer: {
-    height: 44, // Standard status bar height for most devices
+    height: 0,
   },
   scrollContainer: {
     flex: 1,
@@ -819,19 +1203,26 @@ const styles = StyleSheet.create({
   backButton: {
     padding: 8,
     borderRadius: 8,
-    backgroundColor: 'rgba(255,255,255,0.2)',
+    // fontWeight: '900',
   },
   headerTitle: {
     color: '#fff',
     fontSize: 20,
-    fontWeight: 'bold',
     flex: 1,
     textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '800',
   },
+
   editButton: {
     padding: 8,
     borderRadius: 8,
     backgroundColor: 'rgba(255,255,255,0.2)',
+  },
+  editButtonDisabled: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    opacity: 0.5,
   },
   editModeButtons: {
     flexDirection: 'row',
@@ -846,8 +1237,9 @@ const styles = StyleSheet.create({
   cancelButtonText: {
     color: '#fff',
     fontSize: 14,
-    fontWeight: '600',
+    fontFamily: 'Roboto-Medium',
   },
+
   saveButton: {
     paddingHorizontal: 16,
     paddingVertical: 8,
@@ -860,8 +1252,9 @@ const styles = StyleSheet.create({
   saveButtonText: {
     color: GRADIENT[0],
     fontSize: 14,
-    fontWeight: '600',
+    fontFamily: 'Roboto-Medium',
   },
+
   profileHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -914,18 +1307,21 @@ const styles = StyleSheet.create({
   profileName: {
     color: '#fff',
     fontSize: 20,
-    fontWeight: 'bold',
     marginBottom: 6,
     textShadowColor: 'rgba(0,0,0,0.1)',
     textShadowOffset: { width: 0, height: 1 },
+    fontFamily: 'Roboto-Medium',
+
     textShadowRadius: 2,
   },
   profileBusiness: {
     color: 'rgba(255,255,255,0.95)',
     fontSize: 15,
     marginBottom: 8,
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   profileBadge: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -943,9 +1339,11 @@ const styles = StyleSheet.create({
   profileBadgeText: {
     color: '#fff',
     fontSize: 13,
-    fontWeight: '600',
     marginLeft: 6,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   scrollView: {
     flex: 1,
   },
@@ -963,9 +1361,28 @@ const styles = StyleSheet.create({
   successText: {
     color: '#fff',
     fontSize: 14,
-    fontWeight: '600',
     marginLeft: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
+  errorMessage: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#dc3545',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 8,
+    marginHorizontal: 16,
+    marginBottom: 16,
+  },
+  errorText: {
+    color: '#fff',
+    fontSize: 14,
+    marginLeft: 8,
+    fontFamily: 'Roboto-Medium',
+  },
+
   completionCard: {
     backgroundColor: '#fff',
     borderRadius: 16,
@@ -983,11 +1400,12 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   completionTitle: {
-    fontSize: 16,
-    fontWeight: 'bold',
+    fontSize: 18,
     color: '#222',
     marginLeft: 8,
+    fontFamily: 'Roboto-Medium',
   },
+
   progressContainer: {
     alignItems: 'center',
   },
@@ -1004,11 +1422,8 @@ const styles = StyleSheet.create({
     backgroundColor: GRADIENT[0],
     borderRadius: 4,
   },
-  progressText: {
-    fontSize: 14,
-    color: '#666',
-    fontWeight: '500',
-  },
+  progressText: { fontSize: 14, color: '#666', fontFamily: 'Roboto-Medium' },
+
   section: {
     marginBottom: 20,
   },
@@ -1020,10 +1435,12 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     fontSize: 18,
-    fontWeight: 'bold',
     color: '#222',
     marginLeft: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   card: {
     backgroundColor: '#fff',
     borderRadius: 16,
@@ -1039,10 +1456,12 @@ const styles = StyleSheet.create({
   },
   formLabel: {
     fontSize: 14,
-    fontWeight: '600',
     color: '#333',
     marginBottom: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   formInput: {
     borderWidth: 1,
     borderColor: '#e3e7ee',
@@ -1050,9 +1469,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
     fontSize: 15,
-    color: '#222',
+    color: '#333333',
     backgroundColor: '#f8fafc',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   formInputActive: {
     borderColor: GRADIENT[0],
     borderWidth: 2,
@@ -1066,6 +1488,8 @@ const styles = StyleSheet.create({
   formInputDisabled: {
     backgroundColor: '#f0f0f0',
     color: '#888',
+
+    fontFamily: 'Roboto-Medium',
   },
   formInputMultiline: {
     minHeight: 80,
@@ -1082,11 +1506,15 @@ const styles = StyleSheet.create({
   dropdownPlaceholder: {
     color: '#8a94a6',
     fontSize: 15,
+    fontFamily: 'Roboto-Medium',
   },
+
   dropdownSelectedText: {
-    color: '#222',
+    color: '#333333',
     fontSize: 15,
+    fontFamily: 'Roboto-Medium',
   },
+
   dropdownContainer: {
     borderRadius: 12,
     borderColor: '#e3e7ee',
@@ -1108,16 +1536,20 @@ const styles = StyleSheet.create({
   infoLabel: {
     fontSize: 14,
     color: '#666',
-    fontWeight: '500',
-    flex: 1,
+    flexShrink: 0,
+    width: '60%',
+    fontFamily: 'Roboto-Medium',
   },
+
   infoValue: {
     fontSize: 14,
     color: '#222',
-    fontWeight: '400',
-    flex: 2,
+    flexGrow: 1,
     textAlign: 'right',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   featureChips: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -1136,9 +1568,11 @@ const styles = StyleSheet.create({
   featureChipText: {
     fontSize: 12,
     color: '#1976d2',
-    fontWeight: '500',
     marginLeft: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   bottomSpacing: {
     height: 40,
   },
@@ -1175,8 +1609,9 @@ const styles = StyleSheet.create({
   actionCancelText: {
     color: '#666',
     fontSize: 14,
-    fontWeight: '600',
+    fontFamily: 'Roboto-Medium',
   },
+
   actionSaveButton: {
     flex: 1,
     paddingVertical: 10,
@@ -1190,11 +1625,7 @@ const styles = StyleSheet.create({
   actionSaveButtonDisabled: {
     opacity: 0.7,
   },
-  actionSaveText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
-  },
+  actionSaveText: { color: '#fff', fontSize: 14, fontFamily: 'Roboto-Medium' },
 });
 
 export default ProfileScreen;

@@ -102,11 +102,13 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 22,
-    fontWeight: '700',
     color: '#1a202c',
     textAlign: 'center',
     marginBottom: 12,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   message: {
     fontSize: 16,
     color: '#718096',
@@ -114,7 +116,10 @@ const styles = StyleSheet.create({
     lineHeight: 24,
     marginBottom: 32,
     paddingHorizontal: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   buttonGradient: {
     borderRadius: 12,
     width: '100%',
@@ -137,8 +142,9 @@ const styles = StyleSheet.create({
   buttonText: {
     color: '#fff',
     fontSize: 16,
-    fontWeight: '600',
     textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
   },
 });
 

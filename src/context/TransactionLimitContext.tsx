@@ -74,21 +74,27 @@ export const TransactionLimitProvider: React.FC<
 
   const startLimitMonitoring = async () => {
     try {
+      console.log('🚀 Starting transaction limit monitoring...');
       await transactionLimitService.startLimitMonitoring();
-      console.log('✅ Transaction limit monitoring started');
+      console.log('✅ Transaction limit monitoring started successfully');
     } catch (error) {
       console.error('❌ Error starting transaction limit monitoring:', error);
+      // Don't block the app if monitoring fails to start
     }
   };
 
   const stopLimitMonitoring = async () => {
     try {
+      console.log('🛑 Stopping transaction limit monitoring...');
       await transactionLimitService.stopLimitMonitoring();
       setShowLimitPopup(false);
       setLimitData(null);
       console.log('✅ Transaction limit monitoring stopped');
     } catch (error) {
       console.error('❌ Error stopping transaction limit monitoring:', error);
+      // Still clear the UI state even if service stop fails
+      setShowLimitPopup(false);
+      setLimitData(null);
     }
   };
 
@@ -102,15 +108,19 @@ export const TransactionLimitProvider: React.FC<
 
   const forceCheckTransactionLimit = async () => {
     try {
-      await transactionLimitService.checkAndShowPopup();
+      console.log('🔍 Force checking transaction limit...');
+      await transactionLimitService.forceCheckTransactionLimit();
+      console.log('✅ Transaction limit check completed');
     } catch (error) {
-      console.error('❌ Error checking transaction limit:', error);
+      console.error('❌ Error force checking transaction limit:', error);
     }
   };
 
   const forceShowPopup = async () => {
     try {
+      console.log('🎯 Force showing transaction limit popup...');
       await transactionLimitService.forceShowPopup();
+      console.log('✅ Transaction limit popup triggered');
     } catch (error) {
       console.error('❌ Error force showing popup:', error);
     }

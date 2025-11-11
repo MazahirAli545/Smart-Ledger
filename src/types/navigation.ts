@@ -41,6 +41,8 @@ export type AppStackParamList = {
   DailyLedger: undefined; // Added for Daily Ledger screen
   Notifications: undefined; // Added for Notifications screen
   NotificationTest: undefined; // Added for Notification Test screen
+  Report: undefined; // Added for Reports screen
+  LinkToCA: undefined; // Added for Link to CA screen
 };
 
 export type RootStackParamList = {

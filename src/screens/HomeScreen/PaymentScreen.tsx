@@ -1,19 +1,29 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, {
+  useState,
+  useRef,
+  useEffect,
+  useMemo,
+  useCallback,
+} from 'react';
 import {
   View,
   Text,
   StyleSheet,
-  StatusBar,
   TouchableOpacity,
-  TouchableWithoutFeedback,
   ScrollView,
   TextInput,
   ViewStyle,
   TextStyle,
   FlatList,
   ActivityIndicator,
+  PermissionsAndroid,
+  Platform,
+  Alert,
+  StatusBar,
+  Modal as RNModal,
 } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { Dropdown } from 'react-native-element-dropdown';
@@ -22,7 +32,8 @@ import { Picker } from '@react-native-picker/picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import Modal from 'react-native-modal'; // Add this import for bottom sheet modal
 import axios from 'axios';
-import { BASE_URL } from '../../api';
+import { unifiedApi } from '../../api/unifiedApiService';
+import { useAlert } from '../../context/AlertContext';
 import { getToken, getUserIdFromToken } from '../../utils/storage';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { launchImageLibrary } from 'react-native-image-picker';
@@ -33,13 +44,18 @@ import {
 import RNFS from 'react-native-fs';
 import XLSX from 'xlsx';
 import { OCRService } from '../../services/ocrService';
-
 import { RootStackParamList } from '../../types/navigation';
-import UploadDocument from '../../components/UploadDocument';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import CustomerSelector from '../../components/CustomerSelector';
-import { useCustomerContext } from '../../context/CustomerContext';
+// Removed SafeAreaView to allow full control over StatusBar area
+import SupplierSelector from '../../components/SupplierSelector';
+import { useSupplierContext } from '../../context/SupplierContext';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
+import { getStatusBarHeight } from 'react-native-status-bar-height';
+import { getStatusBarSpacerHeight } from '../../utils/statusBarManager';
+import {
+  HEADER_CONTENT_HEIGHT,
+  getSolidHeaderStyle,
+} from '../../utils/headerLayout';
+import StableStatusBar from '../../components/StableStatusBar';
 import SearchAndFilter, {
   PaymentSearchFilterState,
   RecentSearch,
@@ -47,15 +63,29 @@ import SearchAndFilter, {
 import StatusBadge from '../../components/StatusBadge';
 import { useVouchers } from '../../context/VoucherContext';
 import { useTransactionLimit } from '../../context/TransactionLimitContext';
-import { generateNextDocumentNumber } from '../../utils/autoNumberGenerator';
+import { uiColors, uiFonts } from '../../config/uiSizing';
+import {
+  generateNextDocumentNumber,
+  getDocumentNumberStorageKey,
+} from '../../utils/autoNumberGenerator';
+import AudioRecorderPlayer from 'react-native-audio-recorder-player';
+import { parseInvoiceVoiceText } from '../../utils/voiceParser';
 
 interface FolderProp {
   folder?: { id?: number; title?: string; icon?: string };
 }
 
 const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
+  const { showAlert } = useAlert();
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
   const folderName = folder?.title || 'Payment';
+
+  // Simple StatusBar configuration - let ForceStatusBar handle it
+  const preciseStatusBarHeight = getStatusBarHeight(true);
+  const effectiveStatusBarHeight = Math.max(
+    preciseStatusBarHeight || 0,
+    getStatusBarSpacerHeight(),
+  );
 
   // Add safety check and logging
   console.log(
@@ -64,6 +94,13 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     'folderName:',
     folderName,
   );
+
+  // Test function to verify scrolling works (can be removed in production)
+  const testScrollToField = (fieldName: string) => {
+    console.log(`Testing scroll to field: ${fieldName}`);
+    scrollToErrorField('test', fieldName);
+  };
+
   // Helper for pluralizing folder name
   const pluralize = (name: string) => {
     if (!name) return '';
@@ -93,13 +130,32 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   const [triedSubmit, setTriedSubmit] = useState(false);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [searchText, setSearchText] = useState('');
-  const [showPaymentMethodDropdown, setShowPaymentMethodDropdown] =
-    useState(false);
-  const [showCategoryDropdown, setShowCategoryDropdown] = useState(false);
+  const [openDropdown, setOpenDropdown] = useState<
+    'method' | 'category' | null
+  >(null);
+  const [showPaymentMethodModal, setShowPaymentMethodModal] = useState(false);
+  const [showCategoryModal, setShowCategoryModal] = useState(false);
   const paymentMethodInputRef = useRef<TextInput>(null);
-  // Add two loading states
+  // Add loading state
   const [loadingSave, setLoadingSave] = useState(false);
-  const [loadingDraft, setLoadingDraft] = useState(false);
+
+  // Helper function to format date as YYYY-MM-DD using local time (no timezone conversion)
+  const formatDateLocal = (date: Date): string => {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  // Helper function to parse YYYY-MM-DD string to Date without timezone issues
+  const parseDateLocal = (dateString: string): Date => {
+    if (!dateString || dateString.trim() === '') {
+      return new Date();
+    }
+    // Parse YYYY-MM-DD format directly to avoid timezone conversion
+    const [year, month, day] = dateString.split('-').map(Number);
+    return new Date(year, month - 1, day);
+  };
   const [apiPayments, setApiPayments] = useState<any[]>([]);
   const [loadingApi, setLoadingApi] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
@@ -107,6 +163,21 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   const [editingItem, setEditingItem] = useState<any>(null);
   // FIX: Add the missing state variable and its setter function
   const [paymentNumber, setPaymentNumber] = useState('');
+  // Track the selected supplier to persist partyId and default contact details
+  const [selectedSupplier, setSelectedSupplier] = useState<{
+    id?: number;
+    name?: string;
+    partyName?: string;
+    phoneNumber?: string;
+    address?: string;
+  } | null>(null);
+
+  // Voice OCR state
+  const [isRecording, setIsRecording] = useState(false);
+  const [voiceLoading, setVoiceLoading] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [lastVoiceText, setLastVoiceText] = useState<string | null>(null);
+  const audioRecorderPlayer = useRef(new AudioRecorderPlayer()).current;
 
   // OCR and file upload state variables
   const [selectedFile, setSelectedFile] = useState<any>(null);
@@ -123,7 +194,453 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   const supplierPhoneRef = useRef<TextInput>(null);
   const supplierAddressRef = useRef<TextInput>(null);
   const notesRef = useRef<TextInput>(null);
+  const supplierInputRef = useRef<TextInput>(null);
+  const categoryRef = useRef<View>(null);
+  const paymentMethodRef = useRef<View>(null);
   const [syncYN, setSyncYN] = useState('N');
+  const [focusedField, setFocusedField] = useState<string | null>(null);
+
+  // Helper: fetch with timeout to avoid long-hanging network calls
+  const fetchWithTimeout = useCallback(
+    async (
+      url: string,
+      options: RequestInit = {},
+      timeoutMs: number = 15000,
+    ) => {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { ...options, signal: controller.signal });
+        return res;
+      } finally {
+        clearTimeout(id);
+      }
+    },
+    [],
+  );
+
+  // Helper: run async task in background without blocking the main flow
+  const runInBackground = useCallback((task: Promise<any>) => {
+    task.catch(() => {});
+  }, []);
+
+  // Enhanced validation helpers
+  const isFieldInvalid = (field: string, fieldType?: string) => {
+    if (!triedSubmit) return false;
+
+    if (fieldType === 'phone') {
+      // Phone validation: should be at least 10 digits and max 16 digits
+      const phoneDigits = field.replace(/\D/g, '');
+      if (!field || phoneDigits.length < 10 || phoneDigits.length > 16) {
+        return true;
+      }
+      // Indian mobile number validation: must start with 6, 7, 8, or 9
+      if (phoneDigits.length === 10) {
+        const firstDigit = phoneDigits.charAt(0);
+        return !['6', '7', '8', '9'].includes(firstDigit);
+      }
+      return false;
+    }
+
+    if (fieldType === 'address') {
+      // Address validation: should not be empty
+      return !field;
+    }
+
+    // Default validation: field should not be empty
+    return !field;
+  };
+
+  // Field refs mapping for error scrolling
+  const fieldRefs = {
+    paymentDate: paymentDateRef,
+    supplierInput: supplierInputRef,
+    supplierPhone: supplierPhoneRef,
+    supplierAddress: supplierAddressRef,
+    amount: amountRef,
+    paymentMethod: paymentMethodRef,
+    category: categoryRef,
+    notes: notesRef,
+  };
+
+  // Enhanced function to scroll to error field with improved reliability
+  const scrollToErrorField = useCallback(
+    (errorType?: string, fieldName?: string) => {
+      console.log('scrollToErrorField called with:', { errorType, fieldName });
+      if (!scrollRef.current) {
+        console.log('scrollRef.current is null, cannot scroll');
+        return;
+      }
+
+      // Field positions for reliable scrolling (in pixels from top)
+      const fieldScrollPositions = {
+        paymentDate: 100,
+        supplierInput: 200,
+        supplierPhone: 300,
+        supplierAddress: 400,
+        amount: 500,
+        paymentMethod: 600,
+        category: 700,
+        notes: 800,
+      };
+
+      let targetFieldName = fieldName || '';
+      let targetRef = null;
+
+      // If specific field name is provided, use it
+      if (fieldName && fieldRefs[fieldName as keyof typeof fieldRefs]) {
+        targetRef = fieldRefs[fieldName as keyof typeof fieldRefs];
+        targetFieldName = fieldName;
+        console.log(
+          `Target field specified: ${fieldName}, ref exists: ${!!targetRef}`,
+        );
+      } else {
+        // Find first invalid field based on current form state
+        const fieldPriority = [
+          'paymentDate',
+          'supplierInput',
+          'supplierPhone',
+          'supplierAddress',
+          'amount',
+          'paymentMethod',
+          'category',
+        ];
+
+        for (const field of fieldPriority) {
+          const ref = fieldRefs[field as keyof typeof fieldRefs];
+          let hasError = false;
+
+          // Check field-specific validation
+          switch (field) {
+            case 'paymentDate':
+              hasError = !paymentDate;
+              break;
+            case 'supplierInput':
+              hasError = !supplierInput;
+              break;
+            case 'supplierPhone':
+              hasError =
+                !supplierPhone ||
+                (supplierPhone
+                  ? isFieldInvalid(supplierPhone, 'phone')
+                  : false);
+              break;
+            case 'supplierAddress':
+              hasError =
+                !supplierAddress ||
+                (supplierAddress
+                  ? isFieldInvalid(supplierAddress, 'address')
+                  : false);
+              break;
+            case 'amount':
+              hasError =
+                !amount || isNaN(Number(amount)) || Number(amount) <= 0;
+              break;
+            case 'paymentMethod':
+              hasError = !paymentMethod;
+              break;
+            case 'category':
+              hasError = !category;
+              break;
+          }
+
+          if (hasError) {
+            targetRef = ref;
+            targetFieldName = field;
+            console.log(`Found ${field} error: ${hasError}`);
+            break;
+          }
+        }
+      }
+
+      // Scroll to the target field
+      if (targetFieldName) {
+        console.log(`Scrolling to field: ${targetFieldName}`);
+
+        // Try to focus the field if it has a ref and is focusable
+        if (targetRef && targetRef.current && 'focus' in targetRef.current) {
+          try {
+            (targetRef.current as any).focus();
+          } catch (focusError) {
+            console.log('Focus failed:', focusError);
+          }
+        }
+
+        // Use measure to get exact position if ref is available
+        if (targetRef && targetRef.current && 'measure' in targetRef.current) {
+          try {
+            (targetRef.current as any).measure(
+              (
+                x: number,
+                y: number,
+                width: number,
+                height: number,
+                pageX: number,
+                pageY: number,
+              ) => {
+                console.log(`Field position: x=${x}, y=${y}, pageY=${pageY}`);
+                if (scrollRef.current) {
+                  const scrollY = Math.max(0, pageY - 150);
+                  console.log(`Scrolling to position: ${scrollY}`);
+                  scrollRef.current.scrollToPosition(0, scrollY, true);
+                }
+              },
+            );
+            return; // Success, exit early
+          } catch (measureError) {
+            console.log('Measure failed, using fallback:', measureError);
+          }
+        }
+
+        // Fallback: use predefined positions
+        const scrollY =
+          fieldScrollPositions[
+            targetFieldName as keyof typeof fieldScrollPositions
+          ] || 200;
+        console.log(`Using fallback scroll position: ${scrollY}`);
+        try {
+          scrollRef.current.scrollToPosition(0, scrollY, true);
+        } catch (scrollError) {
+          console.log('ScrollToPosition failed:', scrollError);
+          // Final fallback: scroll to end
+          try {
+            scrollRef.current.scrollToEnd(true);
+          } catch (endError) {
+            console.log('ScrollToEnd also failed:', endError);
+          }
+        }
+      } else {
+        // No specific field found, scroll to end to show error message
+        console.log('No specific field found, scrolling to end');
+        try {
+          scrollRef.current.scrollToEnd(true);
+        } catch (error) {
+          console.log('scrollToEnd failed:', error);
+        }
+      }
+    },
+    [
+      paymentDate,
+      supplierInput,
+      supplierPhone,
+      supplierAddress,
+      amount,
+      paymentMethod,
+      category,
+      isFieldInvalid,
+    ],
+  );
+
+  // Validation helpers to avoid overwriting supplier with empty/placeholder data
+  const isValidPhoneValue = (val?: string) => {
+    if (!val) return false;
+    const digits = String(val).replace(/\D/g, '');
+    return digits.length >= 10 && digits.length <= 13; // Backend expects 10-13 digits
+  };
+  const isValidAddressValue = (val?: string) => {
+    if (!val) return false;
+    return String(val).trim().length >= 5;
+  };
+
+  // Normalize phone for UI display: prefer last 10 digits when available.
+  const normalizePhoneForUI = useCallback((val?: string) => {
+    if (!val) return '';
+    const digits = String(val).replace(/\D/g, '');
+    if (digits.length >= 10) return digits.slice(-10);
+    return '';
+  }, []);
+
+  // Helper: persist extended party info via backend enrichment endpoint
+  const persistSupplierAddInfo = useCallback(
+    async (
+      customerId?: number,
+      name?: string,
+      phone?: string,
+      address?: string,
+    ) => {
+      try {
+        if (!customerId) return;
+        const token = await AsyncStorage.getItem('accessToken');
+        if (!token) return;
+        const addInfoPayload: any = {
+          customerId,
+          partyName: name || '',
+          partyType: 'Supplier',
+        };
+        if (isValidPhoneValue(phone))
+          addInfoPayload.phoneNumber = String(phone).replace(/\D/g, '');
+        if (isValidAddressValue(address)) {
+          addInfoPayload.address = address;
+          addInfoPayload.addressLine1 = address;
+          addInfoPayload.addresses = [
+            { type: 'billing', flatBuildingNumber: address },
+          ];
+        }
+        if (addInfoPayload.phoneNumber || addInfoPayload.address) {
+          await unifiedApi.post('/customers/add-info', addInfoPayload);
+        }
+      } catch {}
+    },
+    [],
+  );
+
+  // Final fallback: patch /customers/:id directly if fields still missing
+  const persistSupplierDirectPatch = useCallback(
+    async (
+      customerId?: number,
+      name?: string,
+      phone?: string,
+      address?: string,
+    ) => {
+      try {
+        if (!customerId) return;
+        const token = await AsyncStorage.getItem('accessToken');
+        if (!token) return;
+        const payload: any = {};
+        if (name && String(name).trim()) {
+          const trimmed = String(name).trim();
+          payload.name = trimmed;
+          payload.partyName = trimmed; // ensure both fields update on backend
+        }
+        if (isValidPhoneValue(phone))
+          payload.phone = String(phone).replace(/\D/g, '');
+        if (isValidAddressValue(address)) {
+          payload.address = address;
+          payload.addressLine1 = address;
+          payload.addresses = [
+            { type: 'billing', flatBuildingNumber: address },
+          ];
+        }
+        if (Object.keys(payload).length === 0) return;
+        await unifiedApi.patch(`/customers/${customerId}`, payload);
+      } catch {}
+    },
+    [],
+  );
+
+  // Ensure backend actually stores phone/address before proceeding
+  const verifySupplierFields = useCallback(
+    async (
+      customerId?: number,
+      desiredPhone?: string,
+      desiredAddress?: string,
+    ) => {
+      try {
+        if (!customerId) return false;
+        const token = await AsyncStorage.getItem('accessToken');
+        if (!token) return false;
+        const res = (await unifiedApi.get(`/customers/${customerId}`)) as {
+          data: any;
+          status: number;
+          headers: Headers;
+        };
+        // unifiedApi returns { data, status, headers } structure
+        if (res.status < 200 || res.status >= 300) return false;
+        const raw = res.data || res;
+        const detail = raw?.data || raw || {};
+        const phoneVal = String(
+          detail?.phoneNumber || detail?.phone || detail?.phone_number || '',
+        );
+        const addrVal =
+          detail?.address ||
+          detail?.addressLine1 ||
+          detail?.address_line1 ||
+          (Array.isArray(detail?.addresses)
+            ? detail.addresses[0]?.addressLine1 ||
+              detail.addresses[0]?.address_line1
+            : '') ||
+          '';
+        const phoneOk = desiredPhone
+          ? phoneVal.replace(/\D/g, '') ===
+            String(desiredPhone).replace(/\D/g, '')
+          : true;
+        const addrOk = desiredAddress
+          ? String(addrVal).trim() === String(desiredAddress).trim()
+          : true;
+        return phoneOk && addrOk;
+      } catch {
+        return false;
+      }
+    },
+    [],
+  );
+
+  const persistAndConfirmSupplier = useCallback(
+    async (
+      supplierId?: number,
+      name?: string,
+      phone?: string,
+      address?: string,
+    ) => {
+      if (!supplierId) return;
+      // Persist via both helper paths
+      await persistSupplierAddInfo(supplierId, name, phone, address);
+      await persistSupplierDirectPatch(supplierId, name, phone, address);
+      // Poll until backend reflects fields (max 3 tries)
+      for (let i = 0; i < 3; i++) {
+        const ok = await verifySupplierFields(supplierId, phone, address);
+        if (ok) {
+          try {
+            const raw =
+              (await AsyncStorage.getItem('supplierOverrides')) || '{}';
+            const map = JSON.parse(raw);
+            map[String(supplierId)] = {
+              phoneNumber: phone || '',
+              address: address || '',
+              updatedAt: Date.now(),
+            };
+            await AsyncStorage.setItem(
+              'supplierOverrides',
+              JSON.stringify(map),
+            );
+          } catch {}
+          return;
+        }
+        await new Promise(r => setTimeout(r, 500));
+      }
+    },
+    [persistSupplierAddInfo, persistSupplierDirectPatch, verifySupplierFields],
+  );
+
+  // Helper: load supplier detail from backend if list lacks phone/address
+  const loadSupplierDetailAndFill = useCallback(
+    async (supplierId?: number) => {
+      try {
+        if (!supplierId) return;
+        const token = await AsyncStorage.getItem('accessToken');
+        if (!token) return;
+        const res = (await unifiedApi.get(`/customers/${supplierId}`)) as {
+          data: any;
+          status: number;
+          headers: Headers;
+        };
+        // unifiedApi returns { data, status, headers } structure
+        if (res.status < 200 || res.status >= 300) return;
+        const raw = res.data || res;
+        const detail = raw?.data || raw || {};
+        const phoneVal =
+          detail?.phoneNumber || detail?.phone || detail?.phone_number || '';
+        const addrVal =
+          detail?.address ||
+          detail?.addressLine1 ||
+          detail?.address_line1 ||
+          detail?.address1 ||
+          (Array.isArray(detail?.addresses)
+            ? detail.addresses[0]?.addressLine1 ||
+              detail.addresses[0]?.address_line1
+            : '') ||
+          '';
+        if (!isValidPhoneValue(supplierPhone) && isValidPhoneValue(phoneVal))
+          setSupplierPhone(normalizePhoneForUI(String(phoneVal)));
+        if (
+          !isValidAddressValue(supplierAddress) &&
+          isValidAddressValue(addrVal)
+        )
+          setSupplierAddress(String(addrVal));
+      } catch {}
+    },
+    [supplierPhone, supplierAddress],
+  );
 
   // Add filter state
   const [filterVisible, setFilterVisible] = useState(false);
@@ -131,7 +648,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     'none',
   );
   const [filterStatus, setFilterStatus] = useState<
-    'all' | 'complete' | 'draft' | 'overdue'
+    'all' | 'complete' | 'overdue'
   >('all');
   const [filterDateFrom, setFilterDateFrom] = useState<string | null>(null);
   const [filterDateTo, setFilterDateTo] = useState<string | null>(null);
@@ -163,10 +680,6 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   };
 
   // File upload and OCR processing functions
-  const handleUploadDocument = () => {
-    console.log('🔍 Upload Document button pressed');
-    setShowFileTypeModal(true);
-  };
 
   const handleFileTypeSelection = async (type: string) => {
     console.log('🔍 File type selection started:', type);
@@ -245,7 +758,8 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
 
           if (parsed.paymentNumber) setPaymentNumber(parsed.paymentNumber);
           if (parsed.supplierName) setSupplierInput(parsed.supplierName);
-          if (parsed.supplierPhone) setSupplierPhone(parsed.supplierPhone);
+          if (parsed.supplierPhone)
+            setSupplierPhone(normalizePhoneForUI(parsed.supplierPhone));
           if (parsed.supplierAddress) {
             console.log('📍 Setting supplier address:', parsed.supplierAddress);
             setSupplierAddress(parsed.supplierAddress);
@@ -307,7 +821,8 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
 
           if (parsed.paymentNumber) setPaymentNumber(parsed.paymentNumber);
           if (parsed.supplierName) setSupplierInput(parsed.supplierName);
-          if (parsed.supplierPhone) setSupplierPhone(parsed.supplierPhone);
+          if (parsed.supplierPhone)
+            setSupplierPhone(normalizePhoneForUI(parsed.supplierPhone));
           if (parsed.supplierAddress) {
             console.log(
               '📍 Setting supplier address from PDF:',
@@ -390,6 +905,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       ) {
         console.log('🔒 Permission denied');
         setError('Permission denied. Please check file access permissions.');
+        setTimeout(() => scrollToErrorField('file'), 100);
         return;
       }
 
@@ -401,6 +917,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       ) {
         console.log('🌐 Network error');
         setError('Network error. Please check your connection and try again.');
+        setTimeout(() => scrollToErrorField('file'), 100);
         return;
       }
 
@@ -412,6 +929,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       ) {
         console.log('📄 File format error');
         setError('Invalid file format. Please try a different file.');
+        setTimeout(() => scrollToErrorField('file'), 100);
         return;
       }
 
@@ -423,6 +941,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       ) {
         console.log('📏 File size error');
         setError('File too large. Please try a smaller file.');
+        setTimeout(() => scrollToErrorField('file'), 100);
         return;
       }
 
@@ -433,78 +952,51 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         stack: err?.stack || 'No stack trace',
       });
       setError('Failed to process the file. Please try again.');
+      setTimeout(() => scrollToErrorField('file'), 100);
     }
   };
 
-  const { customers, add, fetchAll } = useCustomerContext();
+  const {
+    suppliers,
+    add: addSupplierCtx,
+    fetchAll: fetchSuppliersCtx,
+    update: updateSupplierCtx,
+  } = useSupplierContext();
   const { appendVoucher } = useVouchers();
   const { forceCheckTransactionLimit, forceShowPopup, getServiceStatus } =
     useTransactionLimit();
 
   // Function to close dropdowns when clicking outside
-  const handleOutsideClick = () => {
-    setShowPaymentMethodDropdown(false);
-    setShowCategoryDropdown(false);
-  };
-
-  // Test function to debug transaction limit popup
-  const testTransactionLimitPopup = async () => {
-    try {
-      console.log('🧪 Testing transaction limit popup...');
-      const status = await getServiceStatus();
-      console.log('📊 Service status:', status);
-      await forceShowPopup();
-      console.log('✅ Force popup called');
-    } catch (error) {
-      console.error('❌ Test error:', error);
-    }
-  };
+  const handleOutsideClick = useCallback(() => setOpenDropdown(null), []);
 
   // Move fetchPayments to top-level so it can be called from handleSubmit
+  // Prevent overlapping fetches
+  const isFetchingPaymentsRef = useRef(false);
+
   const fetchPayments = async () => {
+    if (isFetchingPaymentsRef.current) return;
+    isFetchingPaymentsRef.current = true;
     setLoadingApi(true);
     setApiError(null);
     try {
       const token = await AsyncStorage.getItem('accessToken');
-
-      // First, fetch customers/suppliers to get party information
-      const customersRes = await fetch(`${BASE_URL}/customers`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+      const currentSuppliersAny: any[] = (suppliers as any[]) || [];
+      console.log('📊 Suppliers data:', {
+        totalSuppliers: currentSuppliersAny.length,
+        sampleSupplier: currentSuppliersAny[0] || 'No suppliers',
+        supplierFields: currentSuppliersAny[0]
+          ? Object.keys(currentSuppliersAny[0])
+          : [],
       });
 
-      if (!customersRes.ok) {
-        throw new Error(`Failed to fetch customers: ${customersRes.status}`);
-      }
-
-      const customersData = await customersRes.json();
-      const customers = customersData.data || [];
-
-      console.log('📊 Raw customers/suppliers data:', {
-        totalCustomers: customers.length,
-        sampleCustomer: customers[0] || 'No customers',
-        customerFields: customers[0] ? Object.keys(customers[0]) : [],
-      });
-
-      // Then fetch vouchers for payments
-      let query = `?type=${encodeURIComponent(folderName.toLowerCase())}`;
-      const res = await fetch(`${BASE_URL}/vouchers${query}`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(
-          err.message ||
-            `Failed to fetch ${folderName.toLowerCase()}s: ${res.status}`,
-        );
-      }
-
-      const data = await res.json();
-      const vouchers = data.data || [];
+      // Use unified API with pagination - optimized!
+      const response = (await unifiedApi.getPayments(1, 20)) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      }; // Paginated for better performance
+      const data = response?.data || response || {};
+      const vouchers = Array.isArray(data) ? data : data.data || [];
 
       console.log('📊 Raw vouchers data:', {
         totalVouchers: vouchers.length,
@@ -529,25 +1021,24 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         vouchersBeforeFilter: vouchers.length,
       });
 
-      // Filter customers to get suppliers for payments
-      const suppliers = customers.filter(
-        (c: any) => c.partyType === 'supplier' || c.voucherType === 'payment',
-      );
-      console.log('🔍 Suppliers found:', {
-        totalCustomers: customers.length,
-        totalSuppliers: suppliers.length,
-        supplierTypes: [...new Set(suppliers.map((s: any) => s.partyType))],
-      });
+      // Payments screen should always expect 'debit' transactions
+      const expectedType = 'debit';
 
-      // Merge customer/supplier data with vouchers
+      // Merge supplier data with vouchers
       const enrichedPayments = vouchers
         .filter((v: any) => {
-          const matches = v.type === folderName.toLowerCase();
+          const typeMatches = String(v.type).toLowerCase() === expectedType;
+          // Payments are debit without line items. Purchases have items
+          const isPaymentLike =
+            !Array.isArray(v.items) ||
+            (Array.isArray(v.items) && v.items.length === 0);
+          // Do not filter by method; payments may have method like Cash/UPI/etc.
+          const matches = typeMatches && isPaymentLike;
           if (!matches) {
             console.log('❌ Voucher filtered out:', {
               id: v.id,
               type: v.type,
-              expectedType: folderName.toLowerCase(),
+              expectedType,
               partyName: v.partyName,
             });
           }
@@ -566,36 +1057,34 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
 
           // Strategy 1: Try to match by partyName first (most reliable for vouchers)
           if (voucher.partyName) {
-            party = suppliers.find(
-              (c: any) =>
-                c.partyName?.toLowerCase() === voucher.partyName?.toLowerCase(),
+            party = currentSuppliersAny.find(
+              (s: any) =>
+                s.name?.toLowerCase() === voucher.partyName?.toLowerCase(),
             );
             if (party) {
-              console.log('✅ Matched by exact partyName:', party.partyName);
+              console.log('✅ Matched by exact partyName:', party.name);
             }
           }
 
           // Strategy 2: Try partial name matching if exact match didn't work
           if (!party && voucher.partyName) {
-            party = suppliers.find(
-              (c: any) =>
-                c.partyName
-                  ?.toLowerCase()
-                  .includes(voucher.partyName?.toLowerCase()) ||
-                voucher.partyName
-                  ?.toLowerCase()
-                  .includes(c.partyName?.toLowerCase()),
-            );
+            party = currentSuppliersAny.find((s: any) => {
+              const sName = s.name?.toLowerCase() || '';
+              const vName = voucher.partyName?.toLowerCase() || '';
+              return sName.includes(vName) || vName.includes(sName);
+            });
             if (party) {
-              console.log('✅ Matched by partial partyName:', party.partyName);
+              console.log('✅ Matched by partial partyName:', party.name);
             }
           }
 
           // Strategy 3: Try to match by partyId as fallback (if it exists)
           if (!party && voucher.partyId) {
-            party = suppliers.find((c: any) => c.id === voucher.partyId);
+            party = currentSuppliersAny.find(
+              (s: any) => s.id === voucher.partyId,
+            );
             if (party) {
-              console.log('✅ Matched by partyId:', party.partyName);
+              console.log('✅ Matched by partyId:', party.name);
             }
           }
 
@@ -614,17 +1103,36 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
 
           return {
             ...voucher,
-            partyName: party?.partyName || voucher.partyName || 'Unknown Party',
-            partyPhone: party?.phoneNumber || voucher.partyPhone || '',
-            partyAddress: party?.address || voucher.partyAddress || '',
-            partyType: party?.partyType || 'customer',
+            // Prefer the supplier's latest name first; fallback to transaction data only if supplier not found
+            partyName:
+              (party as any)?.name ||
+              (party as any)?.partyName ||
+              voucher.partyName ||
+              'Unknown Party',
+            partyId: voucher.partyId || (party as any)?.id,
+            partyPhone:
+              (party as any)?.phoneNumber ||
+              voucher.partyPhone ||
+              voucher.phone ||
+              voucher.phoneNumber ||
+              '',
+            partyAddress:
+              (party as any)?.address ||
+              voucher.partyAddress ||
+              voucher.address ||
+              '',
+            category: voucher.category || voucher.Category || voucher.cat || '',
+            notes: voucher.notes || voucher.note || voucher.remarks || '',
+            partyType: 'supplier',
             // Add debug info
             _debug: {
               matched: !!party,
               matchedPartyId: party?.id,
-              matchedPartyName: party?.partyName,
+              matchedPartyName: (party as any)?.name,
               originalPartyName: voucher.partyName,
             },
+            // keep original response for edit-time fallback
+            _raw: voucher,
           };
         });
 
@@ -637,46 +1145,190 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       console.error('❌ Error fetching payments:', e);
       setApiError(e.message || `Error fetching ${folderName.toLowerCase()}s`);
     } finally {
+      isFetchingPaymentsRef.current = false;
       setLoadingApi(false);
     }
   };
 
+  const didInitialLoadRef = useRef(false);
+
   useEffect(() => {
-    fetchPayments();
-    // Initialize payment number with auto-generated value
+    (async () => {
+      try {
+        // Load suppliers and payments in parallel to reduce total load time
+        await Promise.all([fetchSuppliersCtx(''), fetchPayments()]);
+      } catch (e) {
+        // If one fails, try to at least fetch payments
+        try {
+          await fetchPayments();
+        } catch {}
+      } finally {
+        didInitialLoadRef.current = true;
+      }
+    })();
+    // Initialize payment number with preview (don't store until transaction is saved)
     const initializePaymentNumber = async () => {
       try {
+        // Preview only - don't store until transaction is saved
         const nextNumber = await generateNextDocumentNumber(
           folderName.toLowerCase(),
+          false, // Don't store - this is just a preview
         );
         setPaymentNumber(nextNumber);
       } catch (error) {
         console.error('Error initializing payment number:', error);
-        // Fallback to default format
+        // Generator fallback will return 'PAY-001' for new users
         setPaymentNumber('PAY-001');
       }
     };
     initializePaymentNumber();
   }, []);
 
+  // Refresh data when screen regains focus to avoid stale supplier/payment info
+  useFocusEffect(
+    useCallback(() => {
+      (async () => {
+        // Avoid duplicating the initial load
+        if (!didInitialLoadRef.current) return;
+        await fetchPayments();
+      })();
+      return () => {};
+    }, []),
+  );
+
+  // When supplier context updates, sync phone/address into the form promptly
+  useEffect(() => {
+    try {
+      if (!selectedSupplier) return;
+      const currentSuppliersAny: any[] = (suppliers as any[]) || [];
+      const latest = currentSuppliersAny.find(
+        (s: any) => s.id === (selectedSupplier as any)?.id,
+      );
+      if (!latest) {
+        // If no selectedSupplier match, try resolve by typed name
+        const typedName = (supplierInput || '').trim().toLowerCase();
+        if (typedName) {
+          const byName = currentSuppliersAny.find(
+            (s: any) =>
+              ((s.name || s.partyName || '') as string).trim().toLowerCase() ===
+              typedName,
+          );
+          if (byName) {
+            setSelectedSupplier(byName as any);
+          }
+        }
+        return;
+      }
+      // If editing and the input still shows the old transaction partyName,
+      // replace it with the latest supplier name from context so the field reflects updates
+      try {
+        const latestDisplayName =
+          (latest as any).name || (latest as any).partyName || '';
+        if (
+          editingItem &&
+          latestDisplayName &&
+          String(supplierInput || '')
+            .trim()
+            .toLowerCase() ===
+            String(editingItem?.partyName || '')
+              .trim()
+              .toLowerCase() &&
+          latestDisplayName.trim().toLowerCase() !==
+            String(editingItem?.partyName || '')
+              .trim()
+              .toLowerCase()
+        ) {
+          setSupplierInput(latestDisplayName);
+        }
+      } catch {}
+      const latestPhone =
+        (latest as any).phoneNumber ||
+        (latest as any).phone ||
+        (latest as any).phone_number ||
+        '';
+      const latestAddress =
+        (latest as any).address ||
+        (latest as any).addressLine1 ||
+        (latest as any).address_line1 ||
+        (latest as any).address1 ||
+        '';
+
+      // Always update phone and address when supplier data changes
+      if (isValidPhoneValue(latestPhone)) {
+        setSupplierPhone(normalizePhoneForUI(String(latestPhone)));
+      }
+      if (isValidAddressValue(latestAddress)) {
+        setSupplierAddress(String(latestAddress));
+      }
+    } catch {}
+  }, [suppliers, selectedSupplier]);
+
+  // Immediate sync when selectedSupplier changes
+  useEffect(() => {
+    try {
+      if (!selectedSupplier) return;
+      const currentSuppliersAny: any[] = (suppliers as any[]) || [];
+      const latest = currentSuppliersAny.find(
+        (s: any) => s.id === (selectedSupplier as any)?.id,
+      );
+      if (!latest) return;
+
+      const latestPhone =
+        (latest as any).phoneNumber ||
+        (latest as any).phone ||
+        (latest as any).phone_number ||
+        '';
+      const latestAddress =
+        (latest as any).address ||
+        (latest as any).addressLine1 ||
+        (latest as any).address_line1 ||
+        (latest as any).address1 ||
+        '';
+
+      // Ensure the input field shows the latest supplier name during edit
+      try {
+        const latestDisplayName =
+          (latest as any).name || (latest as any).partyName || '';
+        if (
+          editingItem &&
+          latestDisplayName &&
+          String(supplierInput || '')
+            .trim()
+            .toLowerCase() ===
+            String(editingItem?.partyName || '')
+              .trim()
+              .toLowerCase() &&
+          latestDisplayName.trim().toLowerCase() !==
+            String(editingItem?.partyName || '')
+              .trim()
+              .toLowerCase()
+        ) {
+          setSupplierInput(latestDisplayName);
+        }
+      } catch {}
+
+      // Immediately update phone and address when supplier is selected
+      if (isValidPhoneValue(latestPhone)) {
+        setSupplierPhone(normalizePhoneForUI(String(latestPhone)));
+      }
+      if (isValidAddressValue(latestAddress)) {
+        setSupplierAddress(String(latestAddress));
+      }
+    } catch {}
+  }, [selectedSupplier?.id, suppliers, supplierInput]);
+
   // 1. Add deletePayment function
   const deletePayment = async (id: string) => {
     try {
-      const token = await AsyncStorage.getItem('accessToken');
-      const res = await fetch(`${BASE_URL}/vouchers/${id}`, {
-        method: 'DELETE',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-      if (!res.ok) {
-        const err = await res
-          .json()
-          .catch(() => ({ message: 'Unknown error occurred' }));
-        throw new Error(
-          err.message || `Failed to delete payment. Status: ${res.status}`,
-        );
+      // Block API when transaction limit reached
+      try {
+        await forceCheckTransactionLimit();
+      } catch {
+        await forceShowPopup();
+        return;
       }
+      // Use unified API for delete
+      await unifiedApi.deleteTransaction(Number(id) || parseInt(id, 10));
       await fetchPayments();
       setShowCreateForm(false);
       setEditingItem(null);
@@ -685,6 +1337,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       console.error('❌ Error deleting payment:', e);
       setError(e.message || 'Failed to delete payment.');
       setShowModal(true);
+      setTimeout(() => scrollToErrorField('api'), 100);
     }
   };
 
@@ -692,7 +1345,6 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   const handleEditItem = (item: any) => {
     setShowModal(false);
     setLoadingSave(false);
-    setLoadingDraft(false);
     setEditingItem(item);
     setShowCreateForm(true);
   };
@@ -706,16 +1358,126 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           ? editingItem.date.slice(0, 10)
           : new Date().toISOString().split('T')[0],
       );
-      setAmount(editingItem.amount ? String(editingItem.amount) : '');
-      setPaymentMethod(editingItem.method || '');
-      setDescription(editingItem.description || '');
+      // Show integer part only for amount when editing
+      setAmount(
+        editingItem.amount !== undefined && editingItem.amount !== null
+          ? String(Math.trunc(Number(editingItem.amount) || 0))
+          : '',
+      );
+      setPaymentMethod(editingItem.method || editingItem._raw?.method || '');
+      setDescription(
+        editingItem.description ||
+          editingItem._raw?.description ||
+          editingItem._raw?.narration ||
+          '',
+      );
       setReference(editingItem.reference || '');
-      setCategory(editingItem.category || '');
+      setCategory(
+        editingItem.category ||
+          editingItem._raw?.category ||
+          editingItem._raw?.Category ||
+          editingItem._raw?.cat ||
+          '',
+      );
       setPaymentNumber(editingItem.billNumber || '');
       setSupplierInput(editingItem.partyName || '');
-      setSupplierPhone(editingItem.partyPhone || '');
-      setSupplierAddress(editingItem.partyAddress || '');
-      setNotes(editingItem.notes || '');
+
+      console.log('🔍 PaymentScreen: Setting form values for editing:', {
+        editingItemPartyName: editingItem.partyName,
+        editingItemPartyAddress: editingItem.partyAddress,
+        editingItemPartyPhone: editingItem.partyPhone,
+        rawData: editingItem._raw,
+      });
+      const prefillPhoneRaw =
+        editingItem.partyPhone ||
+        editingItem._raw?.partyPhone ||
+        editingItem._raw?.phone ||
+        editingItem._raw?.phoneNumber ||
+        '';
+      if (isValidPhoneValue(prefillPhoneRaw)) {
+        setSupplierPhone(normalizePhoneForUI(prefillPhoneRaw));
+      }
+      const prefillAddressRaw =
+        editingItem.partyAddress ||
+        editingItem._raw?.partyAddress ||
+        editingItem._raw?.address ||
+        editingItem._raw?.addressLine1 ||
+        editingItem._raw?.address_line1 ||
+        editingItem._raw?.address1 ||
+        '';
+      if (isValidAddressValue(prefillAddressRaw)) {
+        setSupplierAddress(prefillAddressRaw);
+        console.log(
+          '🔍 PaymentScreen: Set supplier address from editing item:',
+          prefillAddressRaw,
+        );
+      } else {
+        console.log(
+          '🔍 PaymentScreen: Address not valid, not setting:',
+          prefillAddressRaw,
+        );
+      }
+      // Notes should not mirror description; only use explicit notes fields
+      setNotes(editingItem.notes || editingItem._raw?.notes || '');
+
+      // If phone/address missing or invalid (e.g., '+91'), fetch full supplier detail by id
+      (async () => {
+        try {
+          const currentSuppliersAny: any[] = (suppliers as any[]) || [];
+          const resolvedId =
+            editingItem.partyId ||
+            currentSuppliersAny.find(
+              (s: any) =>
+                (s.name || s.partyName || '').toLowerCase() ===
+                (editingItem.partyName || '').toLowerCase(),
+            )?.id;
+          const needPhone = !isValidPhoneValue(prefillPhoneRaw);
+          const needAddress = !isValidAddressValue(prefillAddressRaw);
+          if ((needPhone || needAddress) && resolvedId) {
+            await loadSupplierDetailAndFill(resolvedId);
+          }
+          // If still invalid after detail fetch, fall back to last typed values saved in voucher
+          setSupplierPhone(prev =>
+            isValidPhoneValue(prev)
+              ? normalizePhoneForUI(prev)
+              : isValidPhoneValue(
+                  editingItem._raw?.partyPhone || editingItem._raw?.phone,
+                )
+              ? normalizePhoneForUI(
+                  String(
+                    editingItem._raw?.partyPhone || editingItem._raw?.phone,
+                  ),
+                )
+              : prev,
+          );
+          setSupplierAddress(prev =>
+            isValidAddressValue(prev)
+              ? prev
+              : isValidAddressValue(
+                  editingItem._raw?.partyAddress ||
+                    editingItem._raw?.address ||
+                    editingItem._raw?.addressLine1,
+                )
+              ? String(
+                  editingItem._raw?.partyAddress ||
+                    editingItem._raw?.address ||
+                    editingItem._raw?.addressLine1,
+                )
+              : prev,
+          );
+        } catch {}
+      })();
+      // Seed selected supplier if we can match from current supplier list
+      try {
+        const currentSuppliersAny: any[] = (suppliers as any[]) || [];
+        const matched = currentSuppliersAny.find(
+          (s: any) =>
+            s.id === editingItem.partyId ||
+            (s.name || s.partyName || '').toLowerCase() ===
+              (editingItem.partyName || '').toLowerCase(),
+        );
+        if (matched) setSelectedSupplier(matched);
+      } catch {}
     } else {
       setPartyName('');
       setPaymentDate(new Date().toISOString().split('T')[0]);
@@ -730,17 +1492,42 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       setSupplierPhone('');
       setSupplierAddress('');
       setNotes('');
+      setSelectedSupplier(null);
     }
   }, [editingItem, showCreateForm]);
 
   const paymentMethods = [
-    'Cash',
-    'Bank Transfer',
-    'UPI',
-    'Cheque',
-    'Credit Card',
+    { name: 'Cash', icon: 'wallet', description: 'Physical cash payment' },
+    {
+      name: 'Bank Transfer',
+      icon: 'bank',
+      description: 'Direct bank transfer',
+    },
+    { name: 'UPI', icon: 'cellphone', description: 'UPI payment method' },
+    { name: 'Cheque', icon: 'file-document', description: 'Cheque payment' },
+    {
+      name: 'Credit Card',
+      icon: 'credit-card',
+      description: 'Credit card payment',
+    },
+    {
+      name: 'Debit Card',
+      icon: 'credit-card-outline',
+      description: 'Debit card payment',
+    },
   ];
-  const categories = ['Supplier', 'Expense', 'Salary', 'Rent', 'Other'];
+  const categories = [
+    { name: 'Supplier', icon: 'truck', description: 'Supplier payments' },
+    { name: 'Expense', icon: 'receipt', description: 'General expenses' },
+    { name: 'Salary', icon: 'account', description: 'Employee salary' },
+    { name: 'Rent', icon: 'home', description: 'Rent payments' },
+    { name: 'Utilities', icon: 'lightbulb', description: 'Utility bills' },
+    { name: 'Maintenance', icon: 'wrench', description: 'Maintenance costs' },
+    { name: 'Marketing', icon: 'bullhorn', description: 'Marketing expenses' },
+    { name: 'Travel', icon: 'airplane', description: 'Travel expenses' },
+    { name: 'Office Supplies', icon: 'desk', description: 'Office supplies' },
+    { name: 'Other', icon: 'dots-horizontal', description: 'Other expenses' },
+  ];
 
   // Mock data for past payments
   const pastPayments = [
@@ -818,9 +1605,9 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       /(?:Customer|Supplier)\s*[:\-]?\s*([A-Za-z ]+)/i,
     );
     // Description
-    const descMatch = text.match(/Description\s*[:\-]?\s*([A-Za-z0-9 ,.-]+)/i);
+    const descMatch = text.match(/Description\s*[:\-]?\s*([A-Za-z0-9.-]+)/i);
     // Notes
-    const notesMatch = text.match(/Notes\s*[:\-]?\s*([A-Za-z0-9 ,.-]+)/i);
+    const notesMatch = text.match(/Notes\s*[:\-]?\s*([A-Za-z0-9.-]+)/i);
     // Payment Method
     const paymentMethodMatch = text.match(
       /Payment Method\s*[:\-]?\s*([A-Za-z ]+)/i,
@@ -832,51 +1619,118 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       // Convert 'July 7, 2025' to '2025-07-07'
       const dateObj = new Date(dateMatch[1]);
       if (!isNaN(dateObj.getTime())) {
-        setPaymentDate(dateObj.toISOString().split('T')[0]);
+        setPaymentDate(formatDateLocal(dateObj));
       }
     }
     if (supplierMatch && supplierMatch[1])
       setSupplierInput(supplierMatch[1].trim());
     if (descMatch && descMatch[1]) setDescription(descMatch[1].trim());
     if (notesMatch && notesMatch[1]) setNotes(notesMatch[1].trim());
-    if (paymentMethodMatch && paymentMethodMatch[1])
-      setPaymentMethod(paymentMethodMatch[1].trim());
+    if (paymentMethodMatch && paymentMethodMatch[1]) {
+      const matchedMethod = paymentMethods.find(
+        method =>
+          method.name.toLowerCase() ===
+          paymentMethodMatch[1].trim().toLowerCase(),
+      );
+      if (matchedMethod) {
+        setPaymentMethod(matchedMethod.name);
+      } else {
+        setPaymentMethod(paymentMethodMatch[1].trim());
+      }
+    }
   };
 
-  // Add validation function before handleSavePayment
+  // Enhanced validation function that returns first invalid field
   const validatePayment = () => {
-    if (
-      !paymentDate ||
-      !supplierInput ||
-      !amount ||
-      !paymentMethod ||
-      !category
-    ) {
-      return 'Please fill in all required fields.';
+    const validationErrors: { field: string; message: string }[] = [];
+
+    // Check required fields in order
+    if (!paymentDate) {
+      validationErrors.push({
+        field: 'paymentDate',
+        message: 'Date is required.',
+      });
     }
+    if (!supplierInput) {
+      validationErrors.push({
+        field: 'supplierInput',
+        message: `${folderName} Supplier is required.`,
+      });
+    }
+    if (!supplierPhone) {
+      validationErrors.push({
+        field: 'supplierPhone',
+        message: 'Phone is required.',
+      });
+    }
+    if (!supplierAddress) {
+      validationErrors.push({
+        field: 'supplierAddress',
+        message: 'Address is required.',
+      });
+    }
+    if (!amount) {
+      validationErrors.push({
+        field: 'amount',
+        message: 'Amount is required.',
+      });
+    }
+    if (!paymentMethod) {
+      validationErrors.push({
+        field: 'paymentMethod',
+        message: 'Payment method is required.',
+      });
+    }
+    if (!category) {
+      validationErrors.push({
+        field: 'category',
+        message: 'Category is required.',
+      });
+    }
+
+    // Return first error if any required fields are missing
+    if (validationErrors.length > 0) {
+      return {
+        field: validationErrors[0].field,
+        message: validationErrors[0].message,
+      };
+    }
+
+    // Validate amount format
     if (isNaN(Number(amount)) || Number(amount) <= 0) {
-      return 'Amount must be a positive number.';
+      return { field: 'amount', message: 'Amount must be a positive number.' };
     }
+
+    // Validate phone number format
+    if (supplierPhone) {
+      const phoneDigits = supplierPhone.replace(/\D/g, '');
+      if (phoneDigits.length < 10 || phoneDigits.length > 13) {
+        return {
+          field: 'supplierPhone',
+          message: 'Phone number must be between 10-13 digits.',
+        };
+      }
+      // Indian mobile number validation: must start with 6, 7, 8, or 9
+      if (phoneDigits.length === 10) {
+        const firstDigit = phoneDigits.charAt(0);
+        if (!['6', '7', '8', '9'].includes(firstDigit)) {
+          return {
+            field: 'supplierPhone',
+            message: 'Indian mobile number must start with 6, 7, 8, or 9',
+          };
+        }
+      }
+    }
+
+    // Validate address length
+    if (supplierAddress && !supplierAddress.trim()) {
+      return {
+        field: 'supplierAddress',
+        message: 'Address is required.',
+      };
+    }
+
     return null;
-  };
-
-  // Enhanced validation helpers
-  const isFieldInvalid = (field: string, fieldType?: string) => {
-    if (!triedSubmit) return false;
-
-    if (fieldType === 'phone') {
-      // Phone validation: should be at least 10 digits and max 16 digits
-      const phoneDigits = field.replace(/\D/g, '');
-      return !field || phoneDigits.length < 10 || phoneDigits.length > 16;
-    }
-
-    if (fieldType === 'address') {
-      // Address validation: should be at least 10 characters
-      return !field || field.trim().length < 10;
-    }
-
-    // Default validation: field should not be empty
-    return !field;
   };
 
   // Add a helper for field-specific error messages
@@ -898,13 +1752,18 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         const phoneDigits = supplierPhone.replace(/\D/g, '');
         if (phoneDigits.length < 10)
           return 'Phone number must be at least 10 digits';
-        if (phoneDigits.length > 16)
-          return 'Phone number cannot exceed 16 digits';
+        if (phoneDigits.length > 13)
+          return 'Phone number cannot exceed 13 digits';
+        // Indian mobile number validation: must start with 6, 7, 8, or 9
+        if (phoneDigits.length === 10) {
+          const firstDigit = phoneDigits.charAt(0);
+          if (!['6', '7', '8', '9'].includes(firstDigit)) {
+            return 'Indian mobile number must start with 6, 7, 8, or 9';
+          }
+        }
         return '';
       case 'supplierAddress':
         if (!supplierAddress) return 'Address is required';
-        if (supplierAddress.trim().length < 10)
-          return 'Address must be at least 10 characters';
         return '';
       default:
         return '';
@@ -913,9 +1772,29 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
 
   // API submit handler
   const handleSubmit = async (
-    status: 'complete' | 'draft',
+    status: 'complete',
     syncYNOverride?: 'Y' | 'N',
   ) => {
+    // Guard: block submit if monthly limit reached
+    try {
+      const token = await AsyncStorage.getItem('accessToken');
+      if (token) {
+        // Use unified API for transaction limits
+        const limitsData = (await unifiedApi.getTransactionLimits()) as {
+          canCreate?: boolean;
+        };
+        if (limitsData && limitsData.canCreate === false) {
+          await forceShowPopup();
+          showAlert({
+            title: 'Monthly Limit Reached',
+            message:
+              'You have reached your monthly transaction limit. Please upgrade your plan to continue.',
+            type: 'error',
+          });
+          return;
+        }
+      }
+    } catch {}
     console.log('handleSubmit called with status:', status);
     setTriedSubmit(true);
     setError(null);
@@ -930,202 +1809,744 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       // Continue with API call if limit check fails
     }
 
-    // Validate required fields BEFORE showing loader or calling API
+    // Validate all required fields BEFORE showing loader or calling API
     console.log('Validating fields:', {
       paymentDate,
       supplierInput,
+      supplierPhone,
+      supplierAddress,
       amount,
       paymentMethod,
       category,
-      supplierPhone,
-      supplierAddress,
     });
 
-    if (
-      !paymentDate ||
-      !supplierInput ||
-      !amount ||
-      !paymentMethod ||
-      !category
-    ) {
-      console.log('Required fields validation failed');
-      setError('Please fill all required fields correctly.');
-      // triedSubmit will trigger red borders and error messages below fields
-      return;
-    }
+    // Use comprehensive validation function
+    const validationResult = validatePayment();
+    if (validationResult) {
+      console.log('Validation failed:', validationResult);
+      setError(validationResult.message);
 
-    // Validate optional fields if they have values
-    if (supplierPhone && isFieldInvalid(supplierPhone, 'phone')) {
-      setError(
-        'Phone number must be at least 10 digits and cannot exceed 16 digits.',
+      // Scroll to the first invalid field
+      setTimeout(
+        () => scrollToErrorField('validation', validationResult.field),
+        200,
       );
       return;
     }
 
-    if (supplierAddress && isFieldInvalid(supplierAddress, 'address')) {
-      setError('Address must be at least 10 characters.');
+    // Final validation check before API call
+    if (
+      !paymentDate ||
+      !supplierInput ||
+      !supplierPhone ||
+      !supplierAddress ||
+      !amount ||
+      !paymentMethod ||
+      !category
+    ) {
+      const missingFields = [];
+      if (!paymentDate) missingFields.push('Payment Date');
+      if (!supplierInput) missingFields.push('Supplier Name');
+      if (!supplierPhone) missingFields.push('Phone');
+      if (!supplierAddress) missingFields.push('Address');
+      if (!amount) missingFields.push('Amount');
+      if (!paymentMethod) missingFields.push('Payment Method');
+      if (!category) missingFields.push('Category');
+
+      console.log(
+        '❌ Final validation check failed - blocking API call. Missing fields:',
+        missingFields,
+      );
+      setError(`Missing required fields: ${missingFields.join(', ')}`);
       return;
     }
-    if (status === 'complete') setLoadingSave(true);
-    if (status === 'draft') setLoadingDraft(true);
+
+    setLoadingSave(true);
+    console.log('✅ All validation passed - proceeding with API call');
+    let didRefreshSuppliers = false;
     try {
       // Check if supplier exists, if not, create
       let supplierNameToUse = supplierInput.trim();
-      let existingSupplier = customers.find(
-        c =>
-          c.partyName?.trim().toLowerCase() === supplierNameToUse.toLowerCase(),
+      let existingSupplier = suppliers.find(
+        s =>
+          s.name?.trim().toLowerCase() === supplierNameToUse.toLowerCase() ||
+          (editingItem && (s as any).id === (editingItem as any).partyId) ||
+          (editingItem && (s as any).id === (editingItem as any).customer_id),
       );
-      if (!existingSupplier) {
-        const newSupplier = await add({ partyName: supplierNameToUse });
-        if (newSupplier) {
-          supplierNameToUse = newSupplier.partyName || '';
-          await fetchAll('');
-        }
-      }
-      const userId = await getUserIdFromToken();
-      if (!userId) {
-        setError('User not authenticated. Please login again.');
-        return;
-      }
-      // API body
-      const body = {
-        user_id: userId,
-        createdBy: userId,
-        updatedBy: userId,
-        type: folderName.toLowerCase(),
-        amount: parseFloat(amount).toFixed(2),
-        date: new Date(paymentDate).toISOString(),
-        status,
-        description: description || '',
-        notes: notes || '',
-        partyName: supplierNameToUse,
-        partyPhone: supplierPhone || '',
-        partyAddress: supplierAddress || '',
-        method: paymentMethod,
-        category: category || '',
-        items: [],
-      };
 
-      // Clean the body object to only include fields that exist in backend schema
-      const cleanBody = {
-        user_id: body.user_id,
-        type: body.type,
-        amount: body.amount,
-        date: body.date,
-        status: body.status,
-        description: body.description,
-        notes: body.notes,
-        partyName: body.partyName,
-        partyPhone: body.partyPhone,
-        partyAddress: body.partyAddress,
-        method: body.method,
-        category: body.category,
-        items: body.items,
-        createdBy: body.createdBy,
-        updatedBy: body.updatedBy,
-      };
-      const token = await AsyncStorage.getItem('accessToken');
-      if (!token) {
-        setError('Authentication token not found. Please login again.');
-        return;
-      }
-      let res;
-      if (editingItem) {
-        // PATCH update: only send updatable, non-empty fields
-        const patchBody: any = {};
-        if (body.user_id) patchBody.user_id = body.user_id;
-        if (body.type) patchBody.type = body.type;
-        if (body.date) patchBody.date = body.date;
-        if (body.amount) patchBody.amount = body.amount;
-        if (body.status) patchBody.status = body.status;
-        if (body.partyName) patchBody.partyName = body.partyName;
-        if (body.partyPhone) patchBody.partyPhone = body.partyPhone;
-        if (body.partyAddress) patchBody.partyAddress = body.partyAddress;
-        if (cleanBody.method) patchBody.method = cleanBody.method;
-        if (cleanBody.category) patchBody.category = cleanBody.category;
-        if (cleanBody.description)
-          patchBody.description = cleanBody.description;
-        if (cleanBody.notes) patchBody.notes = cleanBody.notes;
-        res = await fetch(`${BASE_URL}/vouchers/${editingItem.id}`, {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(patchBody),
+      if (!existingSupplier && !editingItem) {
+        console.log('🔍 PaymentScreen: Creating new supplier with data:', {
+          name: supplierNameToUse,
+          phoneNumber: supplierPhone,
+          address: supplierAddress,
+          isValidPhone: isValidPhoneValue(supplierPhone),
+          isValidAddress: isValidAddressValue(supplierAddress),
         });
-      } else {
-        // POST create: send full body
-        res = await fetch(`${BASE_URL}/vouchers`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(cleanBody),
-        });
-        if (res.ok) {
-          const newVoucher = await res.json();
-          appendVoucher(newVoucher.data || newVoucher);
-        }
-      }
-      if (!res.ok) {
-        const err = await res
-          .json()
-          .catch(() => ({ message: 'Unknown error occurred' }));
 
-        // Check if it's a transaction limit error
-        if (
-          err.message?.includes('transaction limit') ||
-          err.message?.includes('limit exceeded') ||
-          err.message?.includes('Internal server error')
-        ) {
-          // Trigger transaction limit popup
-          await forceShowPopup();
-          setError(
-            'Transaction limit reached. Please upgrade your plan to continue.',
-          );
+        const newSupplier = await addSupplierCtx({
+          name: supplierNameToUse,
+          partyName: supplierNameToUse,
+          phoneNumber: isValidPhoneValue(supplierPhone)
+            ? supplierPhone
+            : undefined,
+          address: isValidAddressValue(supplierAddress)
+            ? supplierAddress
+            : undefined,
+        } as any);
+
+        console.log('🔍 PaymentScreen: Created supplier result:', newSupplier);
+
+        if (!newSupplier || !(newSupplier as any)?.id) {
+          setError('Failed to create supplier. Please try again.');
+          setTimeout(() => scrollToErrorField('api', 'supplierInput'), 100);
           return;
         }
 
-        throw new Error(
-          err.message || `Failed to save payment. Status: ${res.status}`,
+        supplierNameToUse = newSupplier.name || '';
+        existingSupplier = newSupplier as any;
+
+        // Immediate UI sync: select newly created supplier and update fields
+        try {
+          setSelectedSupplier(existingSupplier as any);
+          if (isValidPhoneValue(supplierPhone)) {
+            setSupplierPhone(normalizePhoneForUI(String(supplierPhone)));
+          }
+          if (isValidAddressValue(supplierAddress)) {
+            setSupplierAddress(String(supplierAddress));
+          }
+        } catch {}
+
+        // Ensure newly created supplier also persists phone/address via explicit update
+        try {
+          if ((newSupplier as any)?.id) {
+            const updatePayload: any = {
+              name: supplierNameToUse,
+              partyName: supplierNameToUse,
+            };
+            if (isValidPhoneValue(supplierPhone)) {
+              updatePayload.phoneNumber = supplierPhone;
+              updatePayload.phone = supplierPhone; // backend alt key
+            }
+            if (isValidAddressValue(supplierAddress)) {
+              updatePayload.address = supplierAddress;
+              updatePayload.addressLine1 = supplierAddress; // backend alt key
+              updatePayload.addresses = [
+                { type: 'billing', flatBuildingNumber: supplierAddress },
+              ];
+            }
+            await updateSupplierCtx?.((newSupplier as any).id, updatePayload);
+          }
+        } catch (error) {
+          console.error('❌ Error updating supplier:', error);
+        }
+
+        await persistAndConfirmSupplier(
+          (newSupplier as any)?.id,
+          supplierNameToUse,
+          supplierPhone,
+          supplierAddress,
         );
       }
-      setSuccess(
-        editingItem
-          ? 'Payment updated successfully!'
-          : 'Payment saved successfully!',
-      );
-      // After success, refresh list, reset editingItem, and close form
-      await fetchPayments();
-      setEditingItem(null);
-      setShowCreateForm(false);
-      resetForm();
-    } catch (e: any) {
-      setError(e.message || 'An error occurred.');
-      setShowModal(true);
-    } finally {
-      if (status === 'complete') setLoadingSave(false);
-      if (status === 'draft') setLoadingDraft(false);
-    }
-  };
+      // If user changed any of these fields from the selected supplier, push an update
+      try {
+        if (existingSupplier && !editingItem) {
+          const needsNameUpdate =
+            supplierNameToUse.trim() !== (existingSupplier as any).name?.trim();
+          const needsPhoneUpdate =
+            isValidPhoneValue(supplierPhone) &&
+            supplierPhone !== ((existingSupplier as any).phoneNumber || '');
+          const needsAddressUpdate =
+            isValidAddressValue(supplierAddress) &&
+            supplierAddress !== ((existingSupplier as any).address || '');
+          if (needsNameUpdate || needsPhoneUpdate || needsAddressUpdate) {
+            const updatePayload: any = {
+              name: supplierNameToUse,
+              partyName: supplierNameToUse,
+            };
+            if (needsPhoneUpdate) {
+              updatePayload.phoneNumber = supplierPhone;
+              updatePayload.phone = supplierPhone;
+            }
+            if (needsAddressUpdate) {
+              updatePayload.address = supplierAddress;
+              updatePayload.addressLine1 = supplierAddress;
+              updatePayload.addresses = [
+                { type: 'billing', flatBuildingNumber: supplierAddress },
+              ];
+            }
+            await updateSupplierCtx?.(
+              (existingSupplier as any).id,
+              updatePayload,
+            );
+            await persistAndConfirmSupplier(
+              (existingSupplier as any)?.id,
+              supplierNameToUse,
+              needsPhoneUpdate ? supplierPhone : undefined,
+              needsAddressUpdate ? supplierAddress : undefined,
+            );
+            if (!didRefreshSuppliers) {
+              await fetchSuppliersCtx('');
+              didRefreshSuppliers = true;
+            }
+            // Immediate UI sync after update
+            try {
+              setSelectedSupplier(existingSupplier as any);
+              if (isValidPhoneValue(supplierPhone)) {
+                setSupplierPhone(normalizePhoneForUI(String(supplierPhone)));
+              }
+              if (isValidAddressValue(supplierAddress)) {
+                setSupplierAddress(String(supplierAddress));
+              }
+            } catch {}
+          }
+        }
+      } catch {}
 
-  const handlePreview = () => {
-    setError(null);
-    setSuccess(null);
-    setTriedSubmit(true);
-    if (
-      !paymentDate ||
-      !supplierInput ||
-      !amount ||
-      !paymentMethod ||
-      !category
-    ) {
-      setError('Please fill all required fields before previewing.');
-      return;
+      // Opening balance creation temporarily disabled here to avoid extra
+      // /transactions POSTs during Payment creation. If needed, we can
+      // move this to a dedicated flow (e.g., AddParty) or enable behind a flag.
+      const userId = await getUserIdFromToken();
+      if (!userId) {
+        setError('User not authenticated. Please login again.');
+        setTimeout(() => scrollToErrorField('api'), 100);
+        return;
+      }
+
+      // Always regenerate document number on submit based on current backend state
+      // This ensures accuracy even if other transactions were created since initialization
+      let finalPaymentNumber = '';
+      try {
+        // Generate and store the number now (transaction is being saved)
+        // This will check backend for highest number and increment from there
+        finalPaymentNumber = await generateNextDocumentNumber(
+          folderName.toLowerCase(),
+          true, // Store now - transaction is being saved
+        );
+        setPaymentNumber(finalPaymentNumber);
+        console.log(
+          '🔍 Generated paymentNumber on submit:',
+          finalPaymentNumber,
+        );
+      } catch (error) {
+        console.error('Error generating payment number:', error);
+        // Fallback: use preview number if available, otherwise default to PAY-001
+        finalPaymentNumber = paymentNumber || 'PAY-001';
+      }
+      // Map UI folder to backend transaction type (credit/debit)
+      const transactionType = ['payment', 'purchase'].includes(
+        (folderName || '').toLowerCase(),
+      )
+        ? 'debit'
+        : 'credit';
+      // Normalize status to requested values
+      const statusToSend = 'Complete';
+
+      // Resolve party/customer ids consistently
+      const resolvedPartyId =
+        (existingSupplier as any)?.id ||
+        (selectedSupplier as any)?.id ||
+        (editingItem as any)?.partyId ||
+        (editingItem as any)?.customer_id;
+      const resolvedCustomerId = resolvedPartyId
+        ? Number(resolvedPartyId)
+        : undefined;
+
+      console.log('🔍 PaymentScreen: Resolved IDs:', {
+        resolvedPartyId,
+        resolvedCustomerId,
+        existingSupplier: existingSupplier
+          ? (existingSupplier as any).id
+          : null,
+        selectedSupplier: selectedSupplier
+          ? (selectedSupplier as any).id
+          : null,
+      });
+
+      // Ensure we have a valid customer ID before proceeding
+      if (!resolvedCustomerId) {
+        setError('Failed to create supplier. Please try again.');
+        setTimeout(() => scrollToErrorField('api', 'supplierInput'), 100);
+        return;
+      }
+
+      // Defer supplier patch/refresh to background to avoid blocking save
+      runInBackground(
+        (async () => {
+          try {
+            await persistSupplierDirectPatch(
+              resolvedCustomerId,
+              supplierInput?.trim() || undefined,
+              undefined,
+              isValidAddressValue(supplierAddress)
+                ? supplierAddress
+                : undefined,
+            );
+            if (!didRefreshSuppliers) {
+              await fetchSuppliersCtx('');
+              didRefreshSuppliers = true;
+            }
+            try {
+              const currentSuppliersAny: any[] = (suppliers as any[]) || [];
+              const latestSel = currentSuppliersAny.find(
+                (s: any) => Number(s.id) === Number(resolvedCustomerId),
+              );
+              if (latestSel) setSelectedSupplier(latestSel);
+              if (isValidAddressValue(supplierAddress)) {
+                setSupplierAddress(String(supplierAddress));
+              }
+            } catch {}
+          } catch {}
+        })(),
+      );
+
+      // If user changed name/address from the selected supplier, push an update
+      // For editing: always check for updates. For creating: only when manually typing
+      try {
+        if (existingSupplier && (editingItem || !selectedSupplier)) {
+          // When editing, compare against original values from editingItem
+          // When creating, compare against existing supplier values
+          const originalName = editingItem
+            ? editingItem.partyName || editingItem.supplierName || ''
+            : (existingSupplier as any).name ||
+              (existingSupplier as any).partyName ||
+              '';
+
+          const originalAddress = editingItem
+            ? editingItem.partyAddress || editingItem.supplierAddress || ''
+            : (existingSupplier as any).address || '';
+
+          const needsNameUpdate = supplierInput.trim() !== originalName.trim();
+          const needsAddressUpdate =
+            isValidAddressValue(supplierAddress) &&
+            supplierAddress !== originalAddress;
+
+          console.log('🔍 PaymentScreen: Checking supplier updates:', {
+            supplierId: (existingSupplier as any).id,
+            originalName,
+            originalAddress,
+            currentName: supplierInput.trim(),
+            currentAddress: supplierAddress,
+            needsNameUpdate,
+            needsAddressUpdate,
+            selectedSupplier: !!selectedSupplier,
+            editingItem: !!editingItem,
+            existingSupplierName: (existingSupplier as any).name,
+            existingSupplierPartyName: (existingSupplier as any).partyName,
+            existingSupplierAddress: (existingSupplier as any).address,
+          });
+
+          // Update supplier details when editing or creating
+          if (editingItem) {
+            if (needsNameUpdate || needsAddressUpdate) {
+              console.log(
+                '🔍 PaymentScreen: Updating supplier details (editing):',
+                {
+                  supplierId: (existingSupplier as any).id,
+                  needsNameUpdate,
+                  needsAddressUpdate,
+                  newName: supplierInput.trim(),
+                  newAddress: supplierAddress,
+                },
+              );
+              runInBackground(
+                (async () => {
+                  try {
+                    await persistSupplierDirectPatch(
+                      (existingSupplier as any).id,
+                      needsNameUpdate ? supplierInput.trim() : undefined,
+                      undefined,
+                      needsAddressUpdate ? supplierAddress : undefined,
+                    );
+                    if (!didRefreshSuppliers) {
+                      await fetchSuppliersCtx('');
+                      didRefreshSuppliers = true;
+                    }
+                    try {
+                      setSelectedSupplier(existingSupplier as any);
+                      if (isValidAddressValue(supplierAddress)) {
+                        setSupplierAddress(String(supplierAddress));
+                      }
+                    } catch {}
+                  } catch {}
+                })(),
+              );
+            }
+          } else {
+            // For creating: update both name and address if changed
+            if (needsNameUpdate || needsAddressUpdate) {
+              console.log(
+                '🔍 PaymentScreen: Updating supplier details (creating):',
+                {
+                  supplierId: (existingSupplier as any).id,
+                  needsNameUpdate,
+                  needsAddressUpdate,
+                  newName: supplierInput.trim(),
+                  newAddress: supplierAddress,
+                },
+              );
+              runInBackground(
+                (async () => {
+                  try {
+                    await persistSupplierDirectPatch(
+                      (existingSupplier as any).id,
+                      supplierInput.trim(),
+                      undefined,
+                      needsAddressUpdate ? supplierAddress : undefined,
+                    );
+                    if (!didRefreshSuppliers) {
+                      await fetchSuppliersCtx('');
+                      didRefreshSuppliers = true;
+                    }
+                    try {
+                      setSelectedSupplier(existingSupplier as any);
+                      if (isValidAddressValue(supplierAddress)) {
+                        setSupplierAddress(String(supplierAddress));
+                      }
+                    } catch {}
+                  } catch {}
+                })(),
+              );
+            }
+          }
+        }
+      } catch (error) {
+        console.error('❌ PaymentScreen: Error updating supplier:', error);
+      }
+
+      // API body - ensure paymentDate is preserved exactly as selected
+      console.log(
+        '📅 PaymentScreen: paymentDate state before API request:',
+        paymentDate,
+        'Type:',
+        typeof paymentDate,
+      );
+      // Ensure paymentDate is a valid YYYY-MM-DD string, preserve as-is
+      const finalPaymentDate =
+        paymentDate || new Date().toISOString().split('T')[0];
+      console.log(
+        '📅 PaymentScreen: Final paymentDate to send in API:',
+        finalPaymentDate,
+      );
+
+      try {
+        const body = {
+          user_id: userId,
+          createdBy: userId,
+          updatedBy: userId,
+          type: transactionType,
+          amount: Number(amount),
+          date: finalPaymentDate, // keep as YYYY-MM-DD to preserve exact selected date
+          transactionDate: finalPaymentDate,
+          paymentDate: finalPaymentDate,
+          // snake_case aliases
+          transaction_date: finalPaymentDate,
+          payment_date: finalPaymentDate,
+          status: statusToSend,
+          description: description || '',
+          notes: notes || '',
+          partyName: supplierInput.trim() || supplierNameToUse,
+          partyId: resolvedPartyId,
+          customer_id: resolvedCustomerId,
+          partyPhone: supplierPhone || '',
+          partyAddress: supplierAddress || '',
+          method: paymentMethod,
+          category: category || '',
+          items: [],
+          billNumber: finalPaymentNumber || '', // Include billNumber (payment number like "PAY-1336")
+        };
+
+        // Include user's primary role id for backend auditing/mapping
+        try {
+          const { addRoleIdToBody } = await import('../../utils/roleHelper');
+          await addRoleIdToBody(body);
+        } catch (e) {
+          console.warn('⚠️ PaymentScreen: Failed to add role ID:', e);
+        }
+
+        // Clean the body object to only include fields that exist in backend schema
+        const cleanBody = {
+          user_id: body.user_id,
+          type: body.type,
+          amount: body.amount,
+          date: body.date, // Ensure exact selected date is preserved in POST
+          transactionDate: body.transactionDate, // Include date mirrors for POST like PUT
+          paymentDate: body.paymentDate,
+          transaction_date: body.transaction_date,
+          payment_date: body.payment_date,
+          status: body.status,
+          description: body.description,
+          notes: body.notes,
+          partyName: body.partyName,
+          partyId: body.partyId,
+          customer_id: body.customer_id,
+          partyPhone: body.partyPhone,
+          partyAddress: body.partyAddress,
+          method: body.method,
+          category: body.category,
+          items: body.items,
+          billNumber: body.billNumber, // Include billNumber for backend
+          createdBy: body.createdBy,
+          updatedBy: body.updatedBy,
+        };
+        const token = await AsyncStorage.getItem('accessToken');
+        if (!token) {
+          setError('Authentication token not found. Please login again.');
+          setTimeout(() => scrollToErrorField('api'), 100);
+          return;
+        }
+        let res;
+        if (editingItem) {
+          // PUT update (backend supports PUT). Send all relevant fields to ensure updates persist.
+          console.log(
+            '📅 PaymentScreen: Using paymentDate in PUT request:',
+            paymentDate,
+          );
+          const putBody: any = {
+            user_id: body.user_id,
+            type: transactionType,
+            date: paymentDate, // ensure exact selected date is persisted
+            amount: Number(body.amount),
+            status: statusToSend,
+            partyName: body.partyName,
+            partyId: body.partyId,
+            customer_id: body.customer_id,
+            partyPhone: body.partyPhone,
+            partyAddress: body.partyAddress,
+            // include date mirrors
+            transactionDate: paymentDate,
+            paymentDate: paymentDate,
+            transaction_date: paymentDate,
+            payment_date: paymentDate,
+          };
+
+          console.log(
+            '🔍 PaymentScreen PUT request data (unconditional fields):',
+            {
+              editingItemId: editingItem.id,
+              formValues: {
+                supplierInput: supplierInput,
+                supplierAddress: supplierAddress,
+                supplierPhone: supplierPhone,
+              },
+              bodyValues: {
+                partyName: body.partyName,
+                partyAddress: body.partyAddress,
+                partyPhone: body.partyPhone,
+              },
+              putBody: putBody,
+              originalEditingItem: {
+                partyName: editingItem.partyName,
+                partyAddress: editingItem.partyAddress,
+                partyPhone: editingItem.partyPhone,
+              },
+            },
+          );
+          // Always include these optional fields too so edits persist consistently
+          putBody.method = cleanBody.method;
+          putBody.category = cleanBody.category;
+          putBody.description = cleanBody.description;
+          putBody.notes = cleanBody.notes;
+          // Ensure paymentNumber is set for updates too
+          let finalPaymentNumberForUpdate =
+            paymentNumber || editingItem.billNumber || '';
+          if (
+            !finalPaymentNumberForUpdate ||
+            finalPaymentNumberForUpdate.trim() === ''
+          ) {
+            try {
+              const nextNumber = await generateNextDocumentNumber(
+                folderName.toLowerCase(),
+              );
+              finalPaymentNumberForUpdate = nextNumber;
+              setPaymentNumber(nextNumber);
+            } catch (error) {
+              console.error(
+                'Error generating payment number for update:',
+                error,
+              );
+              // Fallback: use existing billNumber or generate new one
+              finalPaymentNumberForUpdate = editingItem.billNumber || 'PAY-001';
+            }
+          }
+          putBody.billNumber = finalPaymentNumberForUpdate; // Include billNumber for updates
+          // Use unified API for update
+          await unifiedApi.updateTransaction(editingItem.id, putBody);
+        } else {
+          // POST create: send full body with all date fields
+          console.log(
+            '📅 PaymentScreen: POST request cleanBody with dates:',
+            JSON.stringify(cleanBody, null, 2),
+          );
+          console.log(
+            '📅 PaymentScreen: POST request date field value:',
+            cleanBody.date,
+            'transactionDate:',
+            cleanBody.transactionDate,
+            'paymentDate:',
+            cleanBody.paymentDate,
+          );
+          // Use unified API for create
+          const newVoucher = (await unifiedApi.createTransaction(
+            cleanBody,
+          )) as {
+            data: any;
+            status: number;
+            headers: Headers;
+          };
+          appendVoucher(newVoucher?.data || newVoucher);
+        }
+
+        // Optimistically update the local list so changes appear immediately
+        try {
+          if (editingItem) {
+            const updatedFields = {
+              partyName: cleanBody.partyName,
+              partyAddress: cleanBody.partyAddress,
+              partyPhone: cleanBody.partyPhone,
+              method: cleanBody.method,
+              category: cleanBody.category,
+              description: cleanBody.description,
+              notes: cleanBody.notes,
+              amount: Number(cleanBody.amount || body.amount),
+              date: body.date,
+              status: statusToSend,
+              partyId: cleanBody.partyId || body.partyId,
+              customer_id: cleanBody.customer_id || body.customer_id,
+            } as any;
+
+            // For updates, we use the putBody response if available
+            const serverItem = updatedFields;
+            if (serverItem && serverItem.id) {
+              setApiPayments(prev =>
+                (prev || []).map(p =>
+                  String(p.id) === String(editingItem.id)
+                    ? {
+                        ...p,
+                        ...serverItem,
+                        partyName:
+                          serverItem.partyName ||
+                          cleanBody.partyName ||
+                          p.partyName ||
+                          '',
+                        partyAddress:
+                          serverItem.partyAddress ||
+                          cleanBody.partyAddress ||
+                          p.partyAddress ||
+                          '',
+                        partyPhone:
+                          serverItem.partyPhone ||
+                          cleanBody.partyPhone ||
+                          p.partyPhone ||
+                          '',
+                        _raw: { ...(p._raw || {}), ...serverItem },
+                      }
+                    : p,
+                ),
+              );
+            } else {
+              // Fallback to optimistic update if no server response
+              setApiPayments(prev =>
+                (prev || []).map(p =>
+                  String(p.id) === String(editingItem.id)
+                    ? {
+                        ...p,
+                        ...updatedFields,
+                        _raw: { ...(p._raw || {}), ...updatedFields },
+                      }
+                    : p,
+                ),
+              );
+            }
+          }
+        } catch {}
+
+        // Success - no popup needed
+
+        // For edits, don't refetch from server - use local state with latest supplier info
+        if (editingItem) {
+          // Update the local state with the form data that was just saved
+          setApiPayments(prev =>
+            (prev || []).map(p => {
+              if (String(p.id) === String(editingItem.id)) {
+                return {
+                  ...p,
+                  // Use the form data that was just saved (this is the updated data)
+                  partyName: cleanBody.partyName || p.partyName,
+                  partyAddress: cleanBody.partyAddress || p.partyAddress,
+                  partyPhone: cleanBody.partyPhone || p.partyPhone,
+                  method: cleanBody.method || p.method,
+                  category: cleanBody.category || p.category,
+                  description: cleanBody.description || p.description,
+                  notes: cleanBody.notes || p.notes,
+                  amount: Number(cleanBody.amount || body.amount) || p.amount,
+                  date: body.date || p.date,
+                  status: statusToSend || p.status,
+                  partyId: cleanBody.partyId || body.partyId || p.partyId,
+                  customer_id:
+                    cleanBody.customer_id || body.customer_id || p.customer_id,
+                  // Update the raw data too
+                  _raw: {
+                    ...(p._raw || {}),
+                    partyName: cleanBody.partyName || p.partyName,
+                    partyAddress: cleanBody.partyAddress || p.partyAddress,
+                    partyPhone: cleanBody.partyPhone || p.partyPhone,
+                  },
+                };
+              }
+              return p;
+            }),
+          );
+        } else {
+          // For new payments, refresh from server
+          await fetchPayments();
+        }
+
+        setEditingItem(null);
+        setShowCreateForm(false);
+        resetForm();
+      } catch (apiError: any) {
+        // Re-throw to outer catch
+        throw apiError;
+      }
+    } catch (e: any) {
+      // Import error handler
+      const { handleApiError } = require('../../utils/apiErrorHandler');
+      const errorInfo = handleApiError(e);
+
+      // Check if it's a transaction limit error
+      const errorMessage = e?.message || String(e) || 'Unknown error occurred';
+      if (
+        errorMessage.includes('transaction limit') ||
+        errorMessage.includes('limit exceeded') ||
+        errorMessage.includes('Internal server error')
+      ) {
+        // Trigger transaction limit popup
+        await forceShowPopup();
+        setError(
+          'Transaction limit reached. Please upgrade your plan to continue.',
+        );
+        setTimeout(() => scrollToErrorField('api'), 100);
+        return;
+      }
+
+      // Handle 403 Forbidden errors with user-friendly message
+      if (errorInfo.isForbidden) {
+        showAlert({
+          title: 'Access Denied',
+          message: errorInfo.message,
+          type: 'error',
+        });
+        setError(errorInfo.message);
+        setTimeout(() => scrollToErrorField('api'), 100);
+        return;
+      }
+
+      setError(errorInfo.message || 'An error occurred.');
+      setShowModal(true);
+      setTimeout(() => scrollToErrorField('api'), 100);
+    } finally {
+      setLoadingSave(false);
     }
-    setSuccess('Preview ready! (Implement preview logic here)');
   };
 
   // Utility: Fuzzy match helper
@@ -1377,86 +2798,92 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   }
 
   // Advanced fuzzy search and filter logic
-  const filteredPayments = apiPayments.filter(pay => {
-    // Fuzzy search across all fields
-    const s = searchFilter.searchText?.trim().toLowerCase();
-    const matchesFuzzy =
-      !s ||
-      [
-        pay.paymentNumber,
-        pay.billNumber,
-        pay.partyName,
-        pay.supplierName,
-        pay.amount?.toString(),
-        pay.date,
-        pay.method,
-        pay.status,
-        pay.description,
-        pay.notes,
-        pay.reference,
-        pay.category,
-      ].some(field => field && field.toString().toLowerCase().includes(s));
+  const filteredPayments = useMemo(
+    () =>
+      apiPayments.filter(pay => {
+        // Fuzzy search across all fields
+        const s = searchFilter.searchText?.trim().toLowerCase();
+        const matchesFuzzy =
+          !s ||
+          [
+            pay.paymentNumber,
+            pay.billNumber,
+            pay.partyName,
+            pay.supplierName,
+            pay.amount?.toString(),
+            pay.date,
+            pay.method,
+            pay.status,
+            pay.description,
+            pay.notes,
+            pay.reference,
+            pay.category,
+          ].some(field => field && field.toString().toLowerCase().includes(s));
 
-    // Individual field filters
-    const matchesPaymentNumber =
-      !searchFilter.paymentNumber ||
-      fuzzyMatch(
-        pay.paymentNumber || pay.billNumber || '',
-        searchFilter.paymentNumber,
-      );
-    const matchesSupplier =
-      !searchFilter.supplierName ||
-      fuzzyMatch(
-        pay.partyName || pay.supplierName || '',
-        searchFilter.supplierName,
-      );
-    const matchesAmount = inRange(
-      Number(pay.amount),
-      searchFilter.amountMin,
-      searchFilter.amountMax,
-    );
-    const matchesDate = inDateRange(
-      pay.date,
-      searchFilter.dateFrom,
-      searchFilter.dateTo,
-    );
-    const matchesMethod =
-      !searchFilter.paymentMethod || pay.method === searchFilter.paymentMethod;
-    const matchesStatus =
-      !searchFilter.status || pay.status === searchFilter.status;
-    const matchesCategory =
-      !searchFilter.category || pay.category === searchFilter.category;
-    // Reference number can be in pay.reference, pay.billNumber, or pay.paymentNumber
-    const matchesReference =
-      !searchFilter.reference ||
-      [pay.reference, pay.billNumber, pay.paymentNumber].some(ref =>
-        fuzzyMatch(ref || '', searchFilter.reference!),
-      );
-    const matchesDescription =
-      !searchFilter.description ||
-      fuzzyMatch(pay.description || pay.notes || '', searchFilter.description);
+        // Individual field filters
+        const matchesPaymentNumber =
+          !searchFilter.paymentNumber ||
+          fuzzyMatch(
+            pay.paymentNumber || pay.billNumber || '',
+            searchFilter.paymentNumber,
+          );
+        const matchesSupplier =
+          !searchFilter.supplierName ||
+          fuzzyMatch(
+            pay.partyName || pay.supplierName || '',
+            searchFilter.supplierName,
+          );
+        const matchesAmount = inRange(
+          Number(pay.amount),
+          searchFilter.amountMin,
+          searchFilter.amountMax,
+        );
+        const matchesDate = inDateRange(
+          pay.date,
+          searchFilter.dateFrom,
+          searchFilter.dateTo,
+        );
+        const matchesMethod =
+          !searchFilter.paymentMethod ||
+          pay.method === searchFilter.paymentMethod;
+        const matchesStatus =
+          !searchFilter.status || pay.status === searchFilter.status;
+        const matchesCategory =
+          !searchFilter.category || pay.category === searchFilter.category;
+        // Reference number can be in pay.reference, pay.billNumber, or pay.paymentNumber
+        const matchesReference =
+          !searchFilter.reference ||
+          [pay.reference, pay.billNumber, pay.paymentNumber].some(ref =>
+            fuzzyMatch(ref || '', searchFilter.reference!),
+          );
+        const matchesDescription =
+          !searchFilter.description ||
+          fuzzyMatch(
+            pay.description || pay.notes || '',
+            searchFilter.description,
+          );
 
-    return (
-      matchesFuzzy &&
-      matchesPaymentNumber &&
-      matchesSupplier &&
-      matchesAmount &&
-      matchesDate &&
-      matchesMethod &&
-      matchesStatus &&
-      matchesCategory &&
-      matchesReference &&
-      matchesDescription
-    );
-  });
+        return (
+          matchesFuzzy &&
+          matchesPaymentNumber &&
+          matchesSupplier &&
+          matchesAmount &&
+          matchesDate &&
+          matchesMethod &&
+          matchesStatus &&
+          matchesCategory &&
+          matchesReference &&
+          matchesDescription
+        );
+      }),
+    [apiPayments, searchFilter],
+  );
 
   // Map API status to badge color and label
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'complete':
         return '#28a745'; // Paid
-      case 'draft':
-        return '#ffc107'; // Pending
       case 'overdue':
         return '#dc3545'; // Overdue
       default:
@@ -1467,8 +2894,6 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     switch (status) {
       case 'complete':
         return 'Paid';
-      case 'draft':
-        return 'Pending';
       case 'overdue':
         return 'Overdue';
       default:
@@ -1498,94 +2923,303 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   // Add handleSync function
   const handleSync = async (item: any) => {
     try {
-      const token = await AsyncStorage.getItem('accessToken');
-      const patchBody = { syncYN: 'Y' };
-      const res = await fetch(`${BASE_URL}/vouchers/${item.id}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(patchBody),
-      });
-      if (!res.ok) {
-        const err = await res
-          .json()
-          .catch(() => ({ message: 'Unknown error occurred' }));
-        throw new Error(err.message || `Failed to sync. Status: ${res.status}`);
+      // Block API when transaction limit reached
+      try {
+        await forceCheckTransactionLimit();
+      } catch {
+        await forceShowPopup();
+        return;
       }
+      const token = await AsyncStorage.getItem('accessToken');
+      if (!token) {
+        throw new Error('Authentication token not found. Please login again.');
+      }
+
+      // Use PUT instead of PATCH - backend requires full transaction object
+      // Get userId for the update
+      const userId = await getUserIdFromToken();
+      if (!userId) {
+        throw new Error('User not authenticated. Please login again.');
+      }
+
+      // Use raw data if available (original transaction data), otherwise use enriched data
+      const rawData = item._raw || item;
+
+      // Build PUT body with all required fields plus syncYN
+      const putBody: any = {
+        user_id: rawData.user_id || userId,
+        createdBy: rawData.createdBy || rawData.user_id || userId,
+        updatedBy: userId,
+        type: rawData.type || 'debit',
+        amount: Number(rawData.amount || item.amount || 0),
+        date:
+          rawData.date ||
+          rawData.paymentDate ||
+          rawData.transactionDate ||
+          item.date ||
+          new Date().toISOString().split('T')[0],
+        transactionDate:
+          rawData.transactionDate ||
+          rawData.date ||
+          rawData.paymentDate ||
+          item.transactionDate ||
+          item.date ||
+          new Date().toISOString().split('T')[0],
+        paymentDate:
+          rawData.paymentDate ||
+          rawData.date ||
+          rawData.transactionDate ||
+          item.paymentDate ||
+          item.date ||
+          new Date().toISOString().split('T')[0],
+        transaction_date:
+          rawData.transaction_date ||
+          rawData.date ||
+          new Date().toISOString().split('T')[0],
+        payment_date:
+          rawData.payment_date ||
+          rawData.date ||
+          new Date().toISOString().split('T')[0],
+        status: rawData.status || item.status || 'Complete',
+        description: rawData.description || item.description || '',
+        notes: rawData.notes || item.notes || '',
+        partyName: rawData.partyName || item.partyName || '',
+        partyId:
+          rawData.partyId ||
+          rawData.customer_id ||
+          item.partyId ||
+          item.customer_id ||
+          null,
+        customer_id:
+          rawData.customer_id ||
+          rawData.partyId ||
+          item.customer_id ||
+          item.partyId ||
+          null,
+        partyPhone:
+          rawData.partyPhone ||
+          rawData.phone ||
+          rawData.phoneNumber ||
+          item.partyPhone ||
+          '',
+        partyAddress:
+          rawData.partyAddress ||
+          rawData.address ||
+          rawData.addressLine1 ||
+          item.partyAddress ||
+          '',
+        method: rawData.method || item.method || '',
+        category:
+          rawData.category ||
+          rawData.Category ||
+          rawData.cat ||
+          item.category ||
+          '',
+        items: rawData.items || item.items || [],
+        billNumber:
+          rawData.billNumber || item.billNumber || item.paymentNumber || '', // Include billNumber for sync
+        syncYN: 'Y', // Set sync flag
+      };
+
+      // Use unified API for sync
+      await unifiedApi.updateTransaction(item.id, putBody);
       await fetchPayments();
       console.log('✅ Payment synced successfully');
     } catch (e: any) {
       console.error('❌ Sync error:', e.message);
       // Optionally show error to user
       setError(e.message || 'Failed to sync payment.');
+      setTimeout(() => scrollToErrorField('api'), 100);
+    }
+  };
+
+  // Voice-to-Text: Start Recording
+  const startVoiceRecording = async () => {
+    setVoiceError(null);
+    try {
+      if (Platform.OS === 'android') {
+        const granted = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          {
+            title: 'Microphone Permission',
+            message:
+              'This app needs access to your microphone to record audio.',
+            buttonNeutral: 'Ask Me Later',
+            buttonNegative: 'Cancel',
+            buttonPositive: 'OK',
+          },
+        );
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+          setVoiceError(
+            'Microphone permission is required for voice recording.',
+          );
+          return;
+        }
+      }
+
+      setIsRecording(true);
+      const result = await audioRecorderPlayer.startRecorder();
+      console.log('Recording started:', result);
+    } catch (error) {
+      console.error('Error starting recording:', error);
+      setVoiceError('Failed to start recording');
+      setIsRecording(false);
+    }
+  };
+
+  // Voice-to-Text: Stop Recording
+  const stopVoiceRecording = async () => {
+    try {
+      const result = await audioRecorderPlayer.stopRecorder();
+      setIsRecording(false);
+      if (result) {
+        await sendAudioForTranscription(result);
+      }
+    } catch (err) {
+      setVoiceError(
+        'Failed to stop recording: ' +
+          (err instanceof Error ? err.message : String(err)),
+      );
+      setIsRecording(false);
+    }
+  };
+
+  // Voice-to-Text: Send audio to backend
+  const sendAudioForTranscription = async (
+    uri: string,
+    mimeType: string = 'audio/wav',
+    fileName: string = 'audio.wav',
+  ) => {
+    setVoiceLoading(true);
+    setVoiceError(null);
+    try {
+      const formData = new FormData();
+      formData.append('audio', {
+        uri: Platform.OS === 'android' ? uri : uri.replace('file://', ''),
+        name: fileName,
+        type: mimeType,
+      } as any);
+      const token = await AsyncStorage.getItem('accessToken');
+      if (!token) throw new Error('Not authenticated');
+      const res = (await unifiedApi.post(
+        '/api/whisper/transcribe',
+        formData,
+      )) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
+      // unifiedApi returns { data, status, headers } structure
+      const data = res.data || res;
+      if (res.status < 200 || res.status >= 300) {
+        throw new Error(data?.message || 'Speech recognition failed');
+      }
+
+      // Show last voice response
+      setLastVoiceText(data.englishText || data.text || null);
+
+      // Parse voice text and fill form fields
+      if (data.englishText || data.text) {
+        const voiceText = data.englishText || data.text;
+        const setters = {
+          setInvoiceNumber: setPaymentNumber,
+          setSelectedCustomer: setSupplierInput,
+          setGstPct: () => {}, // Payments don't have GST
+          setInvoiceDate: setPaymentDate,
+          setNotes: setNotes,
+          setItems: () => {}, // Payments don't have items
+          setDescription: setDescription,
+        };
+
+        const updatedFields = parseInvoiceVoiceText(voiceText, setters);
+        console.log('Voice parsing updated fields:', updatedFields);
+      }
+    } catch (error: any) {
+      console.error('Voice transcription error:', error);
+      setVoiceError(error.message || 'Voice recognition failed');
+    } finally {
+      setVoiceLoading(false);
     }
   };
 
   // Ensure renderPaymentItem is defined before FlatList usage
-  const renderPaymentItem = ({ item }: { item: any }) => (
-    <View
-      style={[
-        styles.invoiceCard,
-        {
-          flexDirection: 'row',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-        },
-      ]}
-    >
-      <TouchableOpacity
-        style={{ flex: 1 }}
-        onPress={() => handleEditItem(item)}
-        activeOpacity={0.8}
-      >
-        <View style={styles.invoiceHeader}>
-          <Text style={styles.invoiceNumber}>
-            {item.billNumber || `PAY-${item.id}`}
-          </Text>
-          <StatusBadge status={item.status} />
-        </View>
-        <Text style={styles.customerName}>{item.partyName}</Text>
-        <View style={styles.invoiceDetails}>
-          <Text style={styles.invoiceDate}>{item.date?.slice(0, 10)}</Text>
-          <Text style={styles.invoiceAmount}>
-            {`₹${Number(item.amount).toLocaleString('en-IN')}`}
-          </Text>
-        </View>
-      </TouchableOpacity>
-      <TouchableOpacity
+  const renderPaymentItem = useCallback(
+    ({ item }: { item: any }) => (
+      <View
         style={[
-          styles.syncButton,
-          item.syncYN === 'Y' && {
-            backgroundColor: '#bdbdbd',
-            borderColor: '#bdbdbd',
+          styles.invoiceCard,
+          {
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
           },
         ]}
-        onPress={() => handleSync(item)}
-        activeOpacity={0.85}
-        disabled={item.syncYN === 'Y'}
       >
-        <Text style={styles.syncButtonText}>Sync</Text>
-      </TouchableOpacity>
-    </View>
+        <TouchableOpacity
+          style={{ flex: 1 }}
+          onPress={() => handleEditItem(item)}
+          activeOpacity={0.8}
+        >
+          <View style={styles.invoiceHeader}>
+            <Text style={styles.invoiceNumber}>
+              {item.billNumber || `PAY-${item.id}`}
+            </Text>
+            <StatusBadge status={item.status} />
+          </View>
+          <Text style={styles.customerName}>{item.partyName}</Text>
+          <View style={styles.invoiceDetails}>
+            <Text style={styles.invoiceDate}>{item.date?.slice(0, 10)}</Text>
+            <Text style={styles.invoiceAmount}>
+              {`₹${Number(item.amount).toLocaleString('en-IN')}`}
+            </Text>
+          </View>
+        </TouchableOpacity>
+        {/* Sync button hidden as requested */}
+        {false && (
+          <TouchableOpacity
+            style={[
+              styles.syncButton,
+              item.syncYN === 'Y' && {
+                backgroundColor: '#bdbdbd',
+                borderColor: '#bdbdbd',
+              },
+            ]}
+            onPress={() => handleSync(item)}
+            activeOpacity={0.85}
+            disabled={item.syncYN === 'Y'}
+          >
+            <Text style={styles.syncButtonText}>Sync</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    ),
+    [],
   );
 
   if (showCreateForm) {
     return (
-      <SafeAreaView style={styles.safeArea}>
-        <StatusBar barStyle="dark-content" backgroundColor="#f6fafc" />
+      <SafeAreaView style={styles.safeArea} edges={['bottom']}>
+        <StableStatusBar
+          backgroundColor="#4f8cff"
+          barStyle="light-content"
+          translucent={false}
+          animated={true}
+        />
         {/* Header */}
-        <View style={styles.header}>
+        <View
+          style={[styles.header, getSolidHeaderStyle(effectiveStatusBarHeight)]}
+        >
+          <View style={{ height: HEADER_CONTENT_HEIGHT }} />
           <View style={styles.headerLeft}>
             <TouchableOpacity
               style={styles.backButton}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               onPress={handleBackToList}
             >
               <MaterialCommunityIcons
                 name="arrow-left"
-                size={24}
-                color="#222"
+                size={25}
+                color="#fff"
               />
             </TouchableOpacity>
             <Text style={styles.headerTitle}>
@@ -1596,7 +3230,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         <KeyboardAwareScrollView
           ref={scrollRef}
           style={styles.container}
-          contentContainerStyle={{ paddingBottom: 32 }}
+          contentContainerStyle={{ paddingBottom: openDropdown ? 300 : 100 }}
           keyboardShouldPersistTaps="handled"
           enableOnAndroid
           extraScrollHeight={120}
@@ -1604,15 +3238,6 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           enableResetScrollToCoords={false}
           keyboardOpeningTime={0}
         >
-          {/* Upload Document Component */}
-          <UploadDocument
-            onUploadDocument={handleUploadDocument}
-            onVoiceHelper={() => {
-              console.log('Voice helper pressed');
-            }}
-            folderName={folderName}
-          />
-
           {/* OCR Loading and Error States */}
           {ocrLoading && (
             <View
@@ -1634,9 +3259,94 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                 style={{ marginRight: 8 }}
               />
               <Text
-                style={{ color: '#856404', fontSize: 14, fontWeight: '500' }}
+                style={{
+                  color: '#856404',
+                  fontSize: 16,
+                  fontFamily: 'Roboto-Medium',
+                }}
               >
                 Processing document with OCR...
+              </Text>
+            </View>
+          )}
+
+          {/* Voice Loading and Error States */}
+          {voiceLoading && (
+            <View
+              style={{
+                backgroundColor: '#e3f2fd',
+                borderRadius: 8,
+                padding: 12,
+                marginTop: 16,
+                marginBottom: 8,
+                borderWidth: 1,
+                borderColor: '#90caf9',
+                flexDirection: 'row',
+                alignItems: 'center',
+              }}
+            >
+              <ActivityIndicator
+                size="small"
+                color="#1976d2"
+                style={{ marginRight: 8 }}
+              />
+              <Text
+                style={{
+                  color: '#1976d2',
+                  fontSize: 16,
+                  fontFamily: 'Roboto-Medium',
+                }}
+              >
+                Processing voice input...
+              </Text>
+            </View>
+          )}
+
+          {voiceError && (
+            <View
+              style={{
+                backgroundColor: '#ffebee',
+                borderRadius: 8,
+                padding: 12,
+                marginTop: 16,
+                marginBottom: 8,
+                borderWidth: 1,
+                borderColor: '#ffcdd2',
+              }}
+            >
+              <Text
+                style={{
+                  color: '#c62828',
+                  fontSize: 16,
+                  fontFamily: 'Roboto-Medium',
+                }}
+              >
+                Voice Error: {voiceError}
+              </Text>
+            </View>
+          )}
+
+          {/* Show last voice response */}
+          {lastVoiceText && (
+            <View
+              style={{
+                backgroundColor: '#f0f6ff',
+                borderRadius: 8,
+                padding: 12,
+                marginTop: 16,
+                marginBottom: 8,
+                borderWidth: 1,
+                borderColor: '#4f8cff',
+              }}
+            >
+              <Text
+                style={{
+                  color: '#1e40af',
+                  fontSize: 16,
+                  fontFamily: 'Roboto-Medium',
+                }}
+              >
+                Voice Input: {lastVoiceText}
               </Text>
             </View>
           )}
@@ -1652,504 +3362,498 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                 borderColor: '#f5c6cb',
               }}
             >
-              <Text style={{ color: '#721c24', fontSize: 14 }}>
-                <Text style={{ fontWeight: 'bold' }}>OCR Error: </Text>
+              <Text
+                style={{
+                  color: '#721c24',
+                  fontSize: 14,
+                  fontFamily: 'Roboto-Medium',
+                }}
+              >
+                <Text style={{ fontFamily: 'Roboto-Medium' }}>OCR Error: </Text>
                 {ocrError}
               </Text>
             </View>
           )}
           {/* Payment Details Card */}
-          <TouchableWithoutFeedback onPress={handleOutsideClick}>
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>{folderName} Details</Text>
-              <View style={{ flexDirection: 'row', marginBottom: 16 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.inputLabel}>{folderName} Date</Text>
-                  <TouchableOpacity onPress={() => setShowDatePicker(true)}>
-                    <TextInput
-                      ref={paymentDateRef}
-                      style={[
-                        styles.input,
-                        isFieldInvalid(paymentDate) && { borderColor: 'red' },
-                      ]}
-                      value={paymentDate}
-                      editable={false}
-                      pointerEvents="none"
-                      onFocus={() => {
-                        if (scrollRef.current && paymentDateRef.current) {
-                          scrollRef.current.scrollToFocusedInput(
-                            paymentDateRef.current,
-                            120,
-                          );
-                        }
-                      }}
-                    />
-                  </TouchableOpacity>
-                  {triedSubmit && !paymentDate && (
-                    <Text style={styles.errorTextField}>Date is required.</Text>
-                  )}
-                  {showDatePicker && (
-                    <DateTimePicker
-                      value={new Date(paymentDate)}
-                      mode="date"
-                      display="default"
-                      onChange={(event: unknown, date?: Date | undefined) => {
-                        setShowDatePicker(false);
-                        if (date)
-                          setPaymentDate(date.toISOString().split('T')[0]);
-                      }}
-                    />
-                  )}
-                </View>
-              </View>
-              <View style={styles.fieldWrapper}>
-                <Text style={styles.inputLabel}>{folderName} Supplier</Text>
-                <View
-                  style={{
-                    borderWidth: 1,
-                    zIndex: 999999999,
-                    borderColor: isFieldInvalid(supplierInput)
-                      ? 'red'
-                      : '#e0e0e0',
-                    borderRadius: 8,
-                    // overflow: 'hidden',
-                  }}
-                >
-                  <CustomerSelector
-                    value={supplierInput}
-                    onChange={(name, obj) => setSupplierInput(name)}
-                    placeholder={`Type or search supplier`}
-                    scrollRef={scrollRef}
-                    onCustomerSelect={supplier => {
-                      console.log(
-                        '🔍 PaymentScreen: onCustomerSelect called with:',
-                        supplier,
-                      );
-                      console.log(
-                        '🔍 PaymentScreen: Setting supplierInput to:',
-                        supplier.partyName,
-                      );
-                      console.log(
-                        '🔍 PaymentScreen: Setting supplierPhone to:',
-                        supplier.phoneNumber,
-                      );
-                      console.log(
-                        '🔍 PaymentScreen: Setting supplierAddress to:',
-                        supplier.address,
-                      );
+          <View style={styles.card}>
+            <View style={{ flexDirection: 'row', marginBottom: 16 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.inputLabel}>
+                  {folderName} Date
+                  <Text
+                    style={{
+                      color: '#d32f2f',
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
+                    {' '}
+                    *
+                  </Text>{' '}
+                  {/* Required asterisk - darker red */}
+                </Text>
+                <TouchableOpacity onPress={() => setShowDatePicker(true)}>
+                  <TextInput
+                    ref={paymentDateRef}
+                    style={[
+                      styles.input,
+                      isFieldInvalid(paymentDate) && { borderColor: 'red' },
 
-                      setSupplierInput(supplier.partyName || '');
-                      setSupplierPhone(supplier.phoneNumber || '');
-                      setSupplierAddress(supplier.address || '');
+                      focusedField === 'paymentDate' && styles.inputFocused,
+                    ]}
+                    value={paymentDate}
+                    editable={false}
+                    pointerEvents="none"
+                    onFocus={() => {
+                      setFocusedField('paymentDate');
+                      if (scrollRef.current && paymentDateRef.current) {
+                        scrollRef.current.scrollToFocusedInput(
+                          paymentDateRef.current,
+                          120,
+                        );
+                      }
+                    }}
+                    onBlur={() => setFocusedField(null)}
+                  />
+                </TouchableOpacity>
+                {triedSubmit && !paymentDate && (
+                  <Text style={styles.errorTextField}>Date is required.</Text>
+                )}
+                {showDatePicker && (
+                  <DateTimePicker
+                    value={parseDateLocal(paymentDate)}
+                    mode="date"
+                    display="default"
+                    onChange={(event: unknown, date?: Date | undefined) => {
+                      setShowDatePicker(false);
+                      if (date) {
+                        // Format date using local methods to preserve exact selected date (no timezone conversion)
+                        const formattedDate = formatDateLocal(date);
+                        setPaymentDate(formattedDate);
+                        console.log('📅 Selected payment date:', formattedDate);
+                        console.log(
+                          '📅 DateTimePicker onChange - date object:',
+                          date,
+                        );
+                        console.log(
+                          '📅 DateTimePicker onChange - formatted:',
+                          formattedDate,
+                        );
+                      }
                     }}
                   />
-                </View>
-                {isFieldInvalid(supplierInput) && (
-                  <Text style={styles.errorTextField}>
-                    Supplier is required.
-                  </Text>
                 )}
               </View>
-              <View style={styles.fieldWrapper}>
-                <Text style={styles.inputLabel}>Phone</Text>
-                <TextInput
-                  ref={supplierPhoneRef}
-                  style={[
-                    styles.input,
-                    isFieldInvalid(supplierPhone, 'phone') && {
-                      borderColor: 'red',
-                    },
-                  ]}
-                  value={supplierPhone}
-                  onChangeText={setSupplierPhone}
-                  placeholder="+91 98765 43210"
-                  keyboardType="phone-pad"
-                  maxLength={16}
-                  onFocus={() => {
+            </View>
+            <View style={styles.fieldWrapper}>
+              <Text style={styles.inputLabel}>
+                {folderName} Supplier
+                <Text
+                  style={{
+                    color: '#dc3545',
+                    fontFamily: 'Roboto-Medium',
+                  }}
+                >
+                  {' '}
+                  *
+                </Text>
+              </Text>
+              <View
+                ref={supplierInputRef}
+                style={{
+                  borderWidth: 1,
+                  zIndex: 999999999,
+                  borderColor: isFieldInvalid(supplierInput)
+                    ? 'red'
+                    : '#e0e0e0',
+                  borderRadius: 8,
+                  // overflow: 'hidden',
+                }}
+              >
+                <SupplierSelector
+                  value={supplierInput}
+                  onChange={(name, supplierObj) => {
+                    // Always update the supplier input field
+                    setSupplierInput(name);
+
+                    // If a supplier object is provided (from dropdown selection), populate all fields
+                    if (supplierObj) {
+                      // Update all supplier-related fields immediately
+                      const phoneValue =
+                        (supplierObj as any).phoneNumber ||
+                        (supplierObj as any).phone ||
+                        (supplierObj as any).phone_number ||
+                        '';
+                      const addressValue =
+                        (supplierObj as any).address ||
+                        (supplierObj as any).addressLine1 ||
+                        (supplierObj as any).address_line1 ||
+                        (supplierObj as any).address1 ||
+                        '';
+
+                      setSupplierPhone(normalizePhoneForUI(phoneValue));
+                      setSupplierAddress(addressValue);
+                      setSelectedSupplier(supplierObj as any);
+                    } else {
+                      // If user is typing (no supplier object), clear selection and allow editing
+                      if (
+                        selectedSupplier &&
+                        name.trim().toLowerCase() !==
+                          (
+                            selectedSupplier.name ||
+                            selectedSupplier.partyName ||
+                            ''
+                          )
+                            .trim()
+                            .toLowerCase()
+                      ) {
+                        setSelectedSupplier(null);
+                        // Only clear phone/address when creating new payment, not when editing
+                        if (!editingItem) {
+                          setSupplierPhone('');
+                          setSupplierAddress('');
+                        }
+                        // During editing, preserve existing values when user types
+                      }
+                    }
+                  }}
+                  placeholder={`Search Supplier`}
+                  scrollRef={scrollRef}
+                  onSupplierSelect={async supplier => {
+                    // This callback is called after onChange, so we don't need to duplicate the logic
+                    // Just ensure the selected supplier is properly set
+                    const selectedName =
+                      supplier.name || supplier.partyName || '';
+
+                    // Double-check that all fields are set correctly
+                    setSupplierInput(selectedName);
+                    setSupplierPhone(
+                      normalizePhoneForUI(
+                        (supplier as any).phoneNumber ||
+                          (supplier as any).phone ||
+                          (supplier as any).phone_number ||
+                          '',
+                      ),
+                    );
+                    setSupplierAddress(
+                      (supplier as any).address ||
+                        (supplier as any).addressLine1 ||
+                        (supplier as any).address_line1 ||
+                        (supplier as any).address1 ||
+                        '',
+                    );
+                    setSelectedSupplier(supplier as any);
+                    // If phone/address missing on selection, fetch full detail
+                    if (
+                      !(
+                        (supplier as any).phoneNumber || (supplier as any).phone
+                      ) ||
+                      !(
+                        (supplier as any).address ||
+                        (supplier as any).addressLine1 ||
+                        (supplier as any).address_line1 ||
+                        (supplier as any).address1
+                      )
+                    ) {
+                      await loadSupplierDetailAndFill((supplier as any).id);
+                    }
+                  }}
+                />
+              </View>
+              {isFieldInvalid(supplierInput) && (
+                <Text style={styles.errorTextField}>Supplier is required.</Text>
+              )}
+            </View>
+            <View style={styles.fieldWrapper}>
+              <Text style={styles.inputLabel}>
+                Phone
+                <Text
+                  style={{
+                    color: '#dc3545',
+                    fontFamily: 'Roboto-Medium',
+                  }}
+                >
+                  {' '}
+                  *
+                </Text>
+              </Text>
+              <TextInput
+                ref={supplierPhoneRef}
+                style={[
+                  styles.input,
+                  { color: '#333333' },
+                  isFieldInvalid(supplierPhone, 'phone') && {
+                    borderColor: 'red',
+                  },
+                  focusedField === 'supplierPhone' && styles.inputFocused,
+                  editingItem && {
+                    backgroundColor: '#f5f5f5',
+                    color: '#666666',
+                  },
+                ]}
+                value={supplierPhone}
+                onChangeText={editingItem ? undefined : setSupplierPhone}
+                placeholder="9876543210"
+                placeholderTextColor="#666666"
+                keyboardType="phone-pad"
+                maxLength={10}
+                editable={!editingItem}
+                pointerEvents={editingItem ? 'none' : 'auto'}
+                onFocus={() => {
+                  if (!editingItem) {
+                    setFocusedField('supplierPhone');
                     if (scrollRef.current && supplierPhoneRef.current) {
                       scrollRef.current.scrollToFocusedInput(
                         supplierPhoneRef.current,
                         120,
                       );
                     }
+                  }
+                }}
+                onBlur={() => setFocusedField(null)}
+              />
+              {getFieldError('supplierPhone') ? (
+                <Text style={styles.errorTextField}>
+                  {getFieldError('supplierPhone')}
+                </Text>
+              ) : null}
+            </View>
+            <View style={styles.fieldWrapper}>
+              <Text style={styles.inputLabel}>
+                Address
+                <Text
+                  style={{
+                    color: '#dc3545',
+                    fontFamily: 'Roboto-Medium',
                   }}
-                />
-                {getFieldError('supplierPhone') ? (
-                  <Text style={styles.errorTextField}>
-                    {getFieldError('supplierPhone')}
-                  </Text>
-                ) : null}
-              </View>
-              <View style={styles.fieldWrapper}>
-                <Text style={styles.inputLabel}>Address</Text>
-                <TextInput
-                  ref={supplierAddressRef}
+                >
+                  {' '}
+                  *
+                </Text>
+              </Text>
+              <TextInput
+                ref={supplierAddressRef}
+                style={[
+                  styles.input,
+                  { minHeight: 80, textAlignVertical: 'top', color: '#333333' },
+                  isFieldInvalid(supplierAddress, 'address') && {
+                    borderColor: 'red',
+                  },
+                  focusedField === 'supplierAddress' && styles.inputFocused,
+                ]}
+                value={supplierAddress}
+                onChangeText={setSupplierAddress}
+                placeholder="Supplier address"
+                placeholderTextColor="#666666"
+                multiline
+                editable={true}
+                pointerEvents="auto"
+                onFocus={() => {
+                  setFocusedField('supplierAddress');
+                  if (scrollRef.current && supplierAddressRef.current) {
+                    scrollRef.current.scrollToFocusedInput(
+                      supplierAddressRef.current,
+                      120,
+                    );
+                  }
+                }}
+                onBlur={() => setFocusedField(null)}
+              />
+              {getFieldError('supplierAddress') ? (
+                <Text style={styles.errorTextField}>
+                  {getFieldError('supplierAddress')}
+                </Text>
+              ) : null}
+            </View>
+            <View style={styles.fieldWrapper}>
+              <Text style={styles.inputLabel}>
+                Amount (₹)
+                <Text
+                  style={{
+                    color: '#dc3545',
+                    fontFamily: 'Roboto-Medium',
+                  }}
+                >
+                  {' '}
+                  *
+                </Text>
+              </Text>
+              <TextInput
+                ref={amountRef}
+                style={[
+                  styles.input,
+                  isFieldInvalid(amount) && { borderColor: 'red' },
+                  focusedField === 'amount' && styles.inputFocused,
+                ]}
+                value={amount}
+                onChangeText={setAmount}
+                placeholder="0"
+                placeholderTextColor="#666666"
+                keyboardType="numeric"
+                onFocus={() => {
+                  setFocusedField('amount');
+                  if (scrollRef.current && amountRef.current) {
+                    scrollRef.current.scrollToFocusedInput(
+                      amountRef.current,
+                      120,
+                    );
+                  }
+                }}
+                onBlur={() => setFocusedField(null)}
+              />
+              {triedSubmit && !amount && (
+                <Text style={styles.errorTextField}>Amount is required.</Text>
+              )}
+            </View>
+            <View style={styles.fieldWrapper}>
+              <Text style={styles.inputLabel}>
+                Payment Method
+                <Text
+                  style={{
+                    color: '#dc3545',
+                    fontFamily: 'Roboto-Medium',
+                  }}
+                >
+                  {' '}
+                  *
+                </Text>
+              </Text>
+              <View ref={paymentMethodRef} style={{ position: 'relative' }}>
+                <TouchableOpacity
                   style={[
                     styles.input,
-                    { minHeight: 80, textAlignVertical: 'top' },
-                    isFieldInvalid(supplierAddress, 'address') && {
+                    {
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingHorizontal: scale(19),
+                      marginTop: 4,
+                    },
+                    isFieldInvalid(paymentMethod) && {
                       borderColor: 'red',
                     },
                   ]}
-                  value={supplierAddress}
-                  onChangeText={setSupplierAddress}
-                  placeholder="Supplier address"
-                  multiline
-                  onFocus={() => {
-                    if (scrollRef.current && supplierAddressRef.current) {
-                      scrollRef.current.scrollToFocusedInput(
-                        supplierAddressRef.current,
-                        120,
-                      );
-                    }
-                  }}
-                />
-                {getFieldError('supplierAddress') ? (
-                  <Text style={styles.errorTextField}>
-                    {getFieldError('supplierAddress')}
-                  </Text>
-                ) : null}
-              </View>
-              <View style={styles.fieldWrapper}>
-                <Text style={styles.inputLabel}>Amount (₹)</Text>
-                <TextInput
-                  ref={amountRef}
-                  style={[
-                    styles.input,
-                    isFieldInvalid(amount) && { borderColor: 'red' },
-                  ]}
-                  value={amount}
-                  onChangeText={setAmount}
-                  placeholder="0"
-                  keyboardType="numeric"
-                  onFocus={() => {
-                    if (scrollRef.current && amountRef.current) {
-                      scrollRef.current.scrollToFocusedInput(
-                        amountRef.current,
-                        120,
-                      );
-                    }
-                  }}
-                />
-                {triedSubmit && !amount && (
-                  <Text style={styles.errorTextField}>Amount is required.</Text>
-                )}
-              </View>
-              <View style={styles.fieldWrapper}>
-                <Text style={styles.inputLabel}>Payment Method</Text>
-                <View style={{ position: 'relative' }}>
-                  <TouchableOpacity
+                  onPress={() => setShowPaymentMethodModal(true)}
+                  activeOpacity={0.8}
+                >
+                  <Text
                     style={{
-                      flexDirection: 'row',
-                      alignItems: 'center',
-                      backgroundColor: '#fff',
-                      borderRadius: 8,
-                      borderWidth: 1,
-                      borderColor: isFieldInvalid(paymentMethod)
-                        ? 'red'
-                        : '#e0e0e0',
-                      paddingHorizontal: 10,
-                      height: 48,
-                      marginTop: 4,
-                      justifyContent: 'space-between',
+                      fontSize: scale(18),
+                      color: paymentMethod ? '#000' : '#666',
+                      flex: 1,
+                      fontFamily: 'Roboto-Medium',
                     }}
-                    onPress={() => {
-                      setShowCategoryDropdown(false);
-                      setShowPaymentMethodDropdown(!showPaymentMethodDropdown);
-                    }}
-                    activeOpacity={0.8}
                   >
-                    <Text
-                      style={{
-                        fontSize: 16,
-                        color: paymentMethod ? '#222' : '#8a94a6',
-                        flex: 1,
-                      }}
-                    >
-                      {paymentMethod ? paymentMethod : 'Select payment method'}
-                    </Text>
-                    <MaterialCommunityIcons
-                      name={
-                        showPaymentMethodDropdown
-                          ? 'chevron-up'
-                          : 'chevron-down'
-                      }
-                      size={24}
-                      color="#8a94a6"
-                    />
-                  </TouchableOpacity>
-                  {showPaymentMethodDropdown && (
-                    <View
-                      style={{
-                        position: 'absolute',
-                        top: 52,
-                        left: 0,
-                        right: 0,
-                        backgroundColor: '#fff',
-                        borderRadius: 12,
-                        borderWidth: 1,
-                        borderColor: '#e0e0e0',
-                        zIndex: 10,
-                        shadowColor: '#000',
-                        shadowOpacity: 0.1,
-                        shadowRadius: 12,
-                        shadowOffset: { width: 0, height: 4 },
-                        elevation: 8,
-                        maxHeight: 250,
-                      }}
-                    >
-                      <ScrollView
-                        nestedScrollEnabled={true}
-                        showsVerticalScrollIndicator={false}
-                        contentContainerStyle={{ paddingBottom: 8 }}
-                      >
-                        {[
-                          'Cash',
-                          'Bank Transfer',
-                          'UPI',
-                          'Credit Card',
-                          'Debit Card',
-                          'Cheque',
-                        ].map((method, index) => (
-                          <TouchableOpacity
-                            key={method}
-                            onPress={() => {
-                              setPaymentMethod(method);
-                              setShowPaymentMethodDropdown(false);
-                            }}
-                            style={{
-                              paddingVertical: 16,
-                              paddingHorizontal: 20,
-                              borderBottomWidth: index < 5 ? 1 : 0,
-                              borderBottomColor: '#f0f0f0',
-                              backgroundColor:
-                                paymentMethod === method
-                                  ? '#f0f6ff'
-                                  : 'transparent',
-                            }}
-                          >
-                            <Text
-                              style={{
-                                fontSize: 16,
-                                color:
-                                  paymentMethod === method ? '#4f8cff' : '#222',
-                                fontWeight:
-                                  paymentMethod === method ? '600' : '400',
-                              }}
-                            >
-                              {method}
-                            </Text>
-                          </TouchableOpacity>
-                        ))}
-                      </ScrollView>
-                    </View>
-                  )}
-                </View>
-                {isFieldInvalid(paymentMethod) && (
-                  <Text style={styles.errorTextField}>
-                    Payment method is required.
+                    {paymentMethod ? paymentMethod : 'Select payment method'}
                   </Text>
-                )}
+                  <MaterialCommunityIcons
+                    name="chevron-down"
+                    size={scale(24)}
+                    color="#666666"
+                  />
+                </TouchableOpacity>
               </View>
-              <View style={styles.fieldWrapper}>
-                <Text style={styles.inputLabel}>Category</Text>
-                <View style={{ position: 'relative' }}>
-                  <TouchableOpacity
-                    style={{
-                      flexDirection: 'row',
-                      alignItems: 'center',
-                      backgroundColor: '#fff',
-                      borderRadius: 8,
-                      borderWidth: 1,
-                      borderColor: isFieldInvalid(category) ? 'red' : '#e0e0e0',
-                      paddingHorizontal: 10,
-                      height: 48,
-                      marginTop: 4,
-                      justifyContent: 'space-between',
-                    }}
-                    onPress={() => {
-                      setShowPaymentMethodDropdown(false);
-                      setShowCategoryDropdown(!showCategoryDropdown);
-                    }}
-                    activeOpacity={0.8}
-                  >
-                    <Text
-                      style={{
-                        fontSize: 16,
-                        color: category ? '#222' : '#8a94a6',
-                        flex: 1,
-                      }}
-                    >
-                      {category ? category : 'Select category'}
-                    </Text>
-                    <MaterialCommunityIcons
-                      name={
-                        showCategoryDropdown ? 'chevron-up' : 'chevron-down'
-                      }
-                      size={24}
-                      color="#8a94a6"
-                    />
-                  </TouchableOpacity>
-                  {showCategoryDropdown && (
-                    <View
-                      style={{
-                        position: 'absolute',
-                        top: 52,
-                        left: 0,
-                        right: 0,
-                        backgroundColor: '#fff',
-                        borderRadius: 12,
-                        borderWidth: 1,
-                        borderColor: '#e0e0e0',
-                        zIndex: 10,
-                        shadowColor: '#000',
-                        shadowOpacity: 0.1,
-                        shadowRadius: 12,
-                        shadowOffset: { width: 0, height: 4 },
-                        elevation: 8,
-                        maxHeight: 250,
-                      }}
-                    >
-                      <ScrollView
-                        nestedScrollEnabled={true}
-                        showsVerticalScrollIndicator={false}
-                        contentContainerStyle={{ paddingBottom: 8 }}
-                      >
-                        {[
-                          'Supplier',
-                          'Expense',
-                          'Salary',
-                          'Rent',
-                          'Utilities',
-                          'Maintenance',
-                          'Marketing',
-                          'Travel',
-                          'Office Supplies',
-                          'Other',
-                        ].map((cat, index) => (
-                          <TouchableOpacity
-                            key={cat}
-                            onPress={() => {
-                              setCategory(cat);
-                              setShowCategoryDropdown(false);
-                            }}
-                            style={{
-                              paddingVertical: 16,
-                              paddingHorizontal: 20,
-                              borderBottomWidth: index < 9 ? 1 : 0,
-                              borderBottomColor: '#f0f0f0',
-                              backgroundColor:
-                                category === cat ? '#f0f6ff' : 'transparent',
-                            }}
-                          >
-                            <Text
-                              style={{
-                                fontSize: 16,
-                                color: category === cat ? '#4f8cff' : '#222',
-                                fontWeight: category === cat ? '600' : '400',
-                              }}
-                            >
-                              {cat}
-                            </Text>
-                          </TouchableOpacity>
-                        ))}
-                      </ScrollView>
-                    </View>
-                  )}
-                </View>
-                {isFieldInvalid(category) && (
-                  <Text style={styles.errorTextField}>
-                    Category is required.
-                  </Text>
-                )}
-              </View>
-              <View style={styles.fieldWrapper}>
-                <Text style={styles.inputLabel}>Description</Text>
-                <TextInput
-                  style={styles.input}
-                  value={description}
-                  onChangeText={setDescription}
-                  placeholder={`Payment description`}
-                />
-              </View>
-              <View style={styles.fieldWrapper}>
-                <Text style={styles.inputLabel}>Notes</Text>
-                <TextInput
-                  ref={notesRef}
-                  style={[
-                    styles.input,
-                    { minHeight: 60, textAlignVertical: 'top' },
-                  ]}
-                  value={notes}
-                  onChangeText={setNotes}
-                  placeholder={`Additional notes...`}
-                  multiline
-                  onFocus={() => {
-                    if (scrollRef.current && notesRef.current) {
-                      scrollRef.current.scrollToFocusedInput(
-                        notesRef.current,
-                        120,
-                      );
-                    }
-                  }}
-                />
-              </View>
+              {isFieldInvalid(paymentMethod) && (
+                <Text style={styles.errorTextField}>
+                  Payment method is required.
+                </Text>
+              )}
             </View>
-          </TouchableWithoutFeedback>
-
-          {/* Action Buttons */}
-          <View style={styles.actionButtonsBottom}>
-            <TouchableOpacity
-              style={styles.primaryButton}
-              onPress={() => handleSubmit('complete')}
-              disabled={loadingSave}
-            >
-              <Text style={styles.primaryButtonText}>
-                {loadingSave ? 'Saving...' : `Save ${folderName}`}
+            <View style={styles.fieldWrapper}>
+              <Text style={styles.inputLabel}>
+                Category
+                <Text
+                  style={{
+                    color: '#dc3545',
+                    fontFamily: 'Roboto-Medium',
+                  }}
+                >
+                  {' '}
+                  *
+                </Text>
               </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.secondaryButton}
-              onPress={() => handleSubmit('draft')}
-              disabled={loadingDraft}
-            >
-              <Text style={styles.secondaryButtonText}>
-                {loadingDraft ? 'Saving...' : 'Draft'}
-              </Text>
-            </TouchableOpacity>
+              <View ref={categoryRef} style={{ position: 'relative' }}>
+                <TouchableOpacity
+                  style={[
+                    styles.input,
+                    {
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      paddingHorizontal: scale(19),
+                      marginTop: 4,
+                    },
+                    isFieldInvalid(category) && {
+                      borderColor: 'red',
+                    },
+                  ]}
+                  onPress={() => setShowCategoryModal(true)}
+                  activeOpacity={0.8}
+                >
+                  <Text
+                    style={{
+                      fontSize: scale(18),
+                      color: category ? '#000' : '#666',
+                      flex: 1,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
+                    {category ? category : 'Select category'}
+                  </Text>
+                  <MaterialCommunityIcons
+                    name="chevron-down"
+                    size={scale(24)}
+                    color="#666666"
+                  />
+                </TouchableOpacity>
+              </View>
+              {isFieldInvalid(category) && (
+                <Text style={styles.errorTextField}>Category is required.</Text>
+              )}
+            </View>
+            <View style={styles.fieldWrapper}>
+              <Text style={styles.inputLabel}>Description</Text>
+              <TextInput
+                style={styles.input}
+                value={description}
+                onChangeText={setDescription}
+                placeholder={`Payment description`}
+                placeholderTextColor="#666666"
+              />
+            </View>
+            <View style={[styles.fieldWrapper, { marginBottom: scale(40) }]}>
+              <Text style={styles.inputLabel}>Notes</Text>
+              <TextInput
+                ref={notesRef}
+                style={[
+                  styles.input,
+                  { minHeight: 60, textAlignVertical: 'top' },
+                ]}
+                value={notes}
+                onChangeText={setNotes}
+                placeholder={`Additional notes...`}
+                placeholderTextColor="#666666"
+                multiline
+                onFocus={() => {
+                  if (scrollRef.current && notesRef.current) {
+                    scrollRef.current.scrollToFocusedInput(
+                      notesRef.current,
+                      120,
+                    );
+                  }
+                }}
+              />
+            </View>
           </View>
 
-          {/* Test Button for Transaction Limit Popup */}
-          <TouchableOpacity
-            style={[
-              styles.primaryButton,
-              { backgroundColor: '#ff6b6b', marginTop: 10 },
-            ]}
-            onPress={testTransactionLimitPopup}
-          >
-            <Text style={styles.primaryButtonText}>
-              🧪 Test Transaction Limit Popup
-            </Text>
-          </TouchableOpacity>
-          {editingItem && (
-            <TouchableOpacity
-              style={{
-                backgroundColor: '#000',
-                borderRadius: 8,
-                paddingVertical: 16,
-                alignItems: 'center',
-                marginTop: 8,
-                marginBottom: 16,
-              }}
-              onPress={() => deletePayment(editingItem.id)}
-            >
-              <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}>
-                Delete {folderName}
-              </Text>
-            </TouchableOpacity>
-          )}
           {success && (
-            <Text style={{ color: 'green', textAlign: 'center', marginTop: 8 }}>
+            <Text
+              style={{
+                color: 'green',
+                textAlign: 'center',
+                marginTop: 8,
+                fontFamily: 'Roboto-Medium',
+              }}
+            >
               {success}
             </Text>
           )}
@@ -2194,21 +3898,22 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
               >
                 <Text
                   style={{
-                    fontSize: 22,
-                    fontWeight: 'bold',
-                    color: '#222',
+                    fontSize: 24, // 22 + 2,
+                    color: '#333333', // Modal title - black for better readability
                     textAlign: 'center',
+                    fontFamily: 'Roboto-Medium',
                   }}
                 >
                   Choose File Type
                 </Text>
                 <Text
                   style={{
-                    fontSize: 14,
-                    color: '#666',
+                    fontSize: 16, // 14 + 2
+                    color: '#333', // Modal description - darker for better readability
                     textAlign: 'center',
-                    lineHeight: 20,
+                    lineHeight: 22, // 20 + 2
                     marginTop: 8,
+                    fontFamily: 'Roboto-Medium',
                   }}
                 >
                   Select the type of file you want to upload for OCR processing
@@ -2272,19 +3977,20 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                     <View style={{ flex: 1 }}>
                       <Text
                         style={{
-                          fontSize: 16,
-                          fontWeight: '600',
-                          color: '#222',
+                          fontSize: 18, // 16 + 2,
+                          color: '#333333', // File type titles - black for better readability
                           marginBottom: 4,
+                          fontFamily: 'Roboto-Medium',
                         }}
                       >
                         Image
                       </Text>
                       <Text
                         style={{
-                          fontSize: 14,
-                          color: '#666',
-                          lineHeight: 20,
+                          fontSize: 16, // 14 + 2
+                          color: '#333', // File type descriptions - darker for better readability
+                          lineHeight: 22, // 20 + 2
+                          fontFamily: 'Roboto-Medium',
                         }}
                       >
                         Upload payment images (JPG, PNG) for OCR processing
@@ -2337,19 +4043,20 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                     <View style={{ flex: 1 }}>
                       <Text
                         style={{
-                          fontSize: 16,
-                          fontWeight: '600',
-                          color: '#222',
+                          fontSize: 18, // 16 + 2,
+                          color: '#333333', // File type titles - black for better readability
                           marginBottom: 4,
+                          fontFamily: 'Roboto-Medium',
                         }}
                       >
                         PDF Document
                       </Text>
                       <Text
                         style={{
-                          fontSize: 14,
-                          color: '#666',
-                          lineHeight: 20,
+                          fontSize: 16, // 14 + 2
+                          color: '#333', // File type descriptions - darker for better readability
+                          lineHeight: 22, // 20 + 2
+                          fontFamily: 'Roboto-Medium',
                         }}
                       >
                         Upload PDF payments for text extraction and processing
@@ -2376,10 +4083,10 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                 >
                   <Text
                     style={{
-                      fontSize: 16,
-                      fontWeight: '600',
-                      color: '#222',
+                      fontSize: 18, // 16 + 2,
+                      color: '#333333', // Example title - black for better readability
                       marginBottom: 12,
+                      fontFamily: 'Roboto-Medium',
                     }}
                   >
                     Real Payment Example:
@@ -2395,40 +4102,87 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                   >
                     <Text
                       style={{
-                        fontSize: 14,
-                        fontWeight: 'bold',
-                        color: '#222',
+                        fontSize: 16, // 14 + 2,
+                        color: '#333333', // Payment title - black for better readability
                         marginBottom: 8,
                         textAlign: 'center',
+                        fontFamily: 'Roboto-Medium',
                       }}
                     >
                       Payment
                     </Text>
                     <View style={{ marginBottom: 8 }}>
                       <Text
-                        style={{ fontSize: 12, color: '#666', lineHeight: 18 }}
+                        style={{
+                          fontSize: 14,
+                          color: '#333',
+                          lineHeight: 18,
+                          fontFamily: 'Roboto-Medium',
+                        }} // Example text - darker for better readability
                       >
-                        <Text style={{ fontWeight: '600' }}>
+                        <Text
+                          style={{
+                            fontFamily: 'Roboto-Medium',
+                          }}
+                        >
                           Payment Number:
                         </Text>
                         <Text> PAY-76575{'\n'}</Text>
-                        <Text style={{ fontWeight: '600' }}>Payment Date:</Text>
+                        <Text
+                          style={{
+                            fontFamily: 'Roboto-Medium',
+                          }}
+                        >
+                          Payment Date:
+                        </Text>
                         <Text> 2025-07-15{'\n'}</Text>
-                        <Text style={{ fontWeight: '600' }}>
+                        <Text
+                          style={{
+                            fontFamily: 'Roboto-Medium',
+                          }}
+                        >
                           Supplier Name:
                         </Text>
                         <Text> Rajesh Singh{'\n'}</Text>
-                        <Text style={{ fontWeight: '600' }}>Phone:</Text>
+                        <Text
+                          style={{
+                            fontFamily: 'Roboto-Medium',
+                          }}
+                        >
+                          Phone:
+                        </Text>
                         <Text> 917865434576{'\n'}</Text>
-                        <Text style={{ fontWeight: '600' }}>Address:</Text>
+                        <Text
+                          style={{
+                            fontFamily: 'Roboto-Medium',
+                          }}
+                        >
+                          Address:
+                        </Text>
                         <Text> 404 Jack Palace, Switzerland{'\n'}</Text>
-                        <Text style={{ fontWeight: '600' }}>Amount:</Text>
+                        <Text
+                          style={{
+                            fontFamily: 'Roboto-Medium',
+                          }}
+                        >
+                          Amount:
+                        </Text>
                         <Text> 800{'\n'}</Text>
-                        <Text style={{ fontWeight: '600' }}>
+                        <Text
+                          style={{
+                            fontFamily: 'Roboto-Medium',
+                          }}
+                        >
                           Payment Method:
                         </Text>
                         <Text> Cash{'\n'}</Text>
-                        <Text style={{ fontWeight: '600' }}>Category:</Text>
+                        <Text
+                          style={{
+                            fontFamily: 'Roboto-Medium',
+                          }}
+                        >
+                          Category:
+                        </Text>
                         <Text> Sales</Text>
                       </Text>
                     </View>
@@ -2436,16 +4190,21 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                     <View style={{ marginBottom: 8 }}>
                       <Text
                         style={{
-                          fontSize: 12,
-                          fontWeight: '600',
-                          color: '#222',
+                          fontSize: 14, // 12 + 2,
+                          color: '#333333',
                           marginBottom: 4,
+                          fontFamily: 'Roboto-Medium',
                         }}
                       >
                         Description
                       </Text>
                       <Text
-                        style={{ fontSize: 11, color: '#666', lineHeight: 16 }}
+                        style={{
+                          fontSize: 13,
+                          color: '#333',
+                          lineHeight: 16,
+                          fontFamily: 'Roboto-Medium',
+                        }} // Example text - darker for better readability
                       >
                         That invoice is for basic thing that i sold
                       </Text>
@@ -2453,9 +4212,20 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                     {/* Notes */}
                     <View>
                       <Text
-                        style={{ fontSize: 11, color: '#666', lineHeight: 16 }}
+                        style={{
+                          fontSize: 13,
+                          color: '#333',
+                          lineHeight: 16,
+                          fontFamily: 'Roboto-Medium',
+                        }} // Example text - darker for better readability
                       >
-                        <Text style={{ fontWeight: '600' }}>Notes:</Text>
+                        <Text
+                          style={{
+                            fontFamily: 'Roboto-Medium',
+                          }}
+                        >
+                          Notes:
+                        </Text>
                         <Text> Weather is Clean, and air is fresh</Text>
                       </Text>
                     </View>
@@ -2481,11 +4251,12 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                     />
                     <Text
                       style={{
-                        fontSize: 12,
+                        fontSize: 14, // 12 + 2
                         color: '#856404',
                         marginLeft: 6,
                         flex: 1,
-                        lineHeight: 16,
+                        lineHeight: 20, // 18 + 2 // 16 + 2
+                        fontFamily: 'Roboto-Medium',
                       }}
                     >
                       Tip: Clear, well-lit images or text-based PDFs work best
@@ -2519,9 +4290,9 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                 >
                   <Text
                     style={{
-                      fontSize: 16,
-                      fontWeight: '600',
-                      color: '#666',
+                      fontSize: 18, // 16 + 2,
+                      color: '#333', // Cancel button text - darker for better readability
+                      fontFamily: 'Roboto-Medium',
                     }}
                   >
                     Cancel
@@ -2531,6 +4302,441 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
             </View>
           </Modal>
         </KeyboardAwareScrollView>
+
+        {/* Fixed Action Buttons at Bottom - matched to AddNewEntryScreen bottom buttons UI */}
+        <View style={styles.buttonContainer}>
+          {editingItem ? (
+            <View style={styles.buttonRow}>
+              <TouchableOpacity
+                style={[
+                  styles.updateButtonEdit,
+                  loadingSave ? styles.buttonDisabled : {},
+                ]}
+                onPress={() => handleSubmit('complete')}
+                disabled={loadingSave}
+              >
+                {loadingSave ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Text
+                    style={styles.submitButtonText}
+                  >{`Update ${folderName}`}</Text>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.deleteButtonEdit}
+                onPress={() => deletePayment(editingItem.id)}
+                disabled={loadingSave}
+              >
+                {loadingSave ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <>
+                    <MaterialCommunityIcons
+                      name="delete"
+                      size={20}
+                      color="#fff"
+                    />
+                    <Text style={styles.deleteButtonText}>DELETE</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <TouchableOpacity
+              style={[
+                styles.submitButton,
+                styles.submitButtonFullWidth,
+                loadingSave ? styles.buttonDisabled : {},
+              ]}
+              onPress={() => handleSubmit('complete')}
+              disabled={loadingSave}
+            >
+              {loadingSave ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Text
+                  style={styles.submitButtonText}
+                >{`Save ${folderName}`}</Text>
+              )}
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* Payment Method Modal */}
+        {showPaymentMethodModal && (
+          <View
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: 'rgba(0, 0, 0, 0.5)',
+              zIndex: 9999,
+            }}
+          >
+            <TouchableOpacity
+              style={{ flex: 1 }}
+              activeOpacity={1}
+              onPress={() => setShowPaymentMethodModal(false)}
+            />
+            <View
+              style={{
+                backgroundColor: '#fff',
+                borderTopLeftRadius: 20,
+                borderTopRightRadius: 20,
+                paddingTop: 12,
+                paddingBottom: 34,
+                height: '80%',
+                width: '100%',
+                position: 'absolute',
+                bottom: 0,
+                left: 0,
+                right: 0,
+              }}
+            >
+              {/* Drag Handle */}
+              <View
+                style={{
+                  width: 40,
+                  height: 4,
+                  backgroundColor: '#d1d5db',
+                  borderRadius: 2,
+                  alignSelf: 'center',
+                  marginBottom: 20,
+                  flexShrink: 0,
+                }}
+              />
+
+              {/* Header */}
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  paddingHorizontal: 24,
+                  marginBottom: 24,
+                  flexShrink: 0,
+                }}
+              >
+                <TouchableOpacity
+                  onPress={() => setShowPaymentMethodModal(false)}
+                  style={{
+                    width: 32,
+                    height: 32,
+                    borderRadius: 16,
+                    backgroundColor: '#f3f4f6',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <MaterialCommunityIcons
+                    name="close"
+                    size={20}
+                    color="#6b7280"
+                  />
+                </TouchableOpacity>
+                <View style={{ flex: 1, alignItems: 'center' }}>
+                  <Text
+                    style={{
+                      fontSize: 20,
+                      fontWeight: '600',
+                      color: '#111827',
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
+                    Select Payment Method
+                  </Text>
+                  <Text
+                    style={{
+                      fontSize: 14,
+                      color: '#6b7280',
+                      marginTop: 4,
+                      fontFamily: 'Roboto-Regular',
+                    }}
+                  >
+                    Choose your preferred payment method
+                  </Text>
+                </View>
+                <View style={{ width: 32 }} />
+              </View>
+
+              {/* Payment Methods List */}
+              <ScrollView
+                style={{ flex: 1 }}
+                showsVerticalScrollIndicator={true}
+                contentContainerStyle={{
+                  paddingHorizontal: 24,
+                  paddingBottom: 20,
+                  flexGrow: 1,
+                }}
+                nestedScrollEnabled={true}
+                scrollEnabled={true}
+                bounces={true}
+              >
+                {paymentMethods.map((method, index) => (
+                  <TouchableOpacity
+                    key={method.name}
+                    onPress={() => {
+                      setPaymentMethod(method.name);
+                      setShowPaymentMethodModal(false);
+                    }}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      paddingVertical: 16,
+                      paddingHorizontal: 16,
+                      marginBottom: 8,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor:
+                        paymentMethod === method.name ? '#3b82f6' : '#e5e7eb',
+                      backgroundColor:
+                        paymentMethod === method.name ? '#eff6ff' : '#fff',
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <View
+                      style={{
+                        width: 40,
+                        height: 40,
+                        borderRadius: 20,
+                        backgroundColor: '#3b82f6',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        marginRight: 16,
+                      }}
+                    >
+                      <MaterialCommunityIcons
+                        name={method.icon as any}
+                        size={20}
+                        color="#fff"
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={{
+                          fontSize: 16,
+                          fontWeight: '500',
+                          color: '#111827',
+                          marginBottom: 2,
+                          fontFamily: 'Roboto-Medium',
+                        }}
+                      >
+                        {method.name}
+                      </Text>
+                      <Text
+                        style={{
+                          fontSize: 14,
+                          color: '#6b7280',
+                          fontFamily: 'Roboto-Regular',
+                        }}
+                      >
+                        {method.description}
+                      </Text>
+                    </View>
+                    {paymentMethod === method.name && (
+                      <MaterialCommunityIcons
+                        name="check"
+                        size={20}
+                        color="#3b82f6"
+                      />
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+          </View>
+        )}
+
+        {/* Category Modal */}
+        {showCategoryModal && (
+          <View
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: 'rgba(0, 0, 0, 0.5)',
+              zIndex: 9999,
+            }}
+          >
+            <TouchableOpacity
+              style={{ flex: 1 }}
+              activeOpacity={1}
+              onPress={() => setShowCategoryModal(false)}
+            />
+            <View
+              style={{
+                backgroundColor: '#fff',
+                borderTopLeftRadius: 20,
+                borderTopRightRadius: 20,
+                paddingTop: 12,
+                paddingBottom: 34,
+                height: '80%',
+                width: '100%',
+                position: 'absolute',
+                bottom: 0,
+                left: 0,
+                right: 0,
+              }}
+            >
+              {/* Drag Handle */}
+              <View
+                style={{
+                  width: 40,
+                  height: 4,
+                  backgroundColor: '#d1d5db',
+                  borderRadius: 2,
+                  alignSelf: 'center',
+                  marginBottom: 20,
+                  flexShrink: 0,
+                }}
+              />
+
+              {/* Header */}
+              <View
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  paddingHorizontal: 24,
+                  marginBottom: 24,
+                  flexShrink: 0,
+                }}
+              >
+                <TouchableOpacity
+                  onPress={() => setShowCategoryModal(false)}
+                  style={{
+                    width: 32,
+                    height: 32,
+                    borderRadius: 16,
+                    backgroundColor: '#f3f4f6',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <MaterialCommunityIcons
+                    name="close"
+                    size={20}
+                    color="#6b7280"
+                  />
+                </TouchableOpacity>
+                <View style={{ flex: 1, alignItems: 'center' }}>
+                  <Text
+                    style={{
+                      fontSize: 20,
+                      fontWeight: '600',
+                      color: '#111827',
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
+                    Select Category
+                  </Text>
+                  <Text
+                    style={{
+                      fontSize: 14,
+                      color: '#6b7280',
+                      marginTop: 4,
+                      fontFamily: 'Roboto-Regular',
+                    }}
+                  >
+                    Choose the payment category
+                  </Text>
+                </View>
+                <View style={{ width: 32 }} />
+              </View>
+
+              {/* Categories List */}
+              <ScrollView
+                style={{ flex: 1 }}
+                showsVerticalScrollIndicator={true}
+                contentContainerStyle={{
+                  paddingHorizontal: 24,
+                  paddingBottom: 20,
+                  flexGrow: 1,
+                }}
+                nestedScrollEnabled={true}
+                scrollEnabled={true}
+                bounces={true}
+              >
+                {categories.map((cat, index) => (
+                  <TouchableOpacity
+                    key={cat.name}
+                    onPress={() => {
+                      setCategory(cat.name);
+                      setShowCategoryModal(false);
+                    }}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      paddingVertical: 16,
+                      paddingHorizontal: 16,
+                      marginBottom: 8,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor:
+                        category === cat.name ? '#3b82f6' : '#e5e7eb',
+                      backgroundColor:
+                        category === cat.name ? '#eff6ff' : '#fff',
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <View
+                      style={{
+                        width: 40,
+                        height: 40,
+                        borderRadius: 20,
+                        backgroundColor: '#3b82f6',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        marginRight: 16,
+                      }}
+                    >
+                      <MaterialCommunityIcons
+                        name={cat.icon as any}
+                        size={20}
+                        color="#fff"
+                      />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={{
+                          fontSize: 16,
+                          fontWeight: '500',
+                          color: '#111827',
+                          marginBottom: 2,
+                          fontFamily: 'Roboto-Medium',
+                        }}
+                      >
+                        {cat.name}
+                      </Text>
+                      <Text
+                        style={{
+                          fontSize: 14,
+                          color: '#6b7280',
+                          fontFamily: 'Roboto-Regular',
+                        }}
+                      >
+                        {cat.description}
+                      </Text>
+                    </View>
+                    {category === cat.name && (
+                      <MaterialCommunityIcons
+                        name="check"
+                        size={20}
+                        color="#3b82f6"
+                      />
+                    )}
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+          </View>
+        )}
+
         {/* Error/Success Modal */}
         <Modal isVisible={showModal}>
           <View
@@ -2575,20 +4781,21 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                     />
                     <Text
                       style={{
-                        color: '#dc3545',
-                        fontWeight: 'bold',
-                        fontSize: 18,
+                        color: '#d32f2f', // Error title - darker red for better visibility,
+                        fontSize: 18, // 16 + 2
                         marginBottom: 8,
+                        fontFamily: 'Roboto-Medium',
                       }}
                     >
                       Error
                     </Text>
                     <Text
                       style={{
-                        color: '#222',
-                        fontSize: 16,
+                        color: '#333333', // Error message - black for better readability
+                        fontSize: 18, // 16 + 2
                         marginBottom: 20,
                         textAlign: 'center',
+                        fontFamily: 'Roboto-Medium',
                       }}
                     >
                       {error}
@@ -2618,15 +4825,25 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
 
   // Main payment list view
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['bottom']}>
+      <StableStatusBar
+        backgroundColor="#4f8cff"
+        barStyle="light-content"
+        translucent={false}
+        animated={true}
+      />
       {/* Header */}
-      <View style={styles.header}>
+      <View
+        style={[styles.header, getSolidHeaderStyle(effectiveStatusBarHeight)]}
+      >
+        <View style={{ height: HEADER_CONTENT_HEIGHT }} />
         <View style={styles.headerLeft}>
           <TouchableOpacity
             style={styles.backButton}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             onPress={() => navigation.goBack()}
           >
-            <MaterialCommunityIcons name="arrow-left" size={24} color="#222" />
+            <MaterialCommunityIcons name="arrow-left" size={25} color="#fff" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>{pluralize(folderName)}</Text>
         </View>
@@ -2639,471 +4856,575 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         recentSearches={recentSearches}
         onRecentSearchPress={handleRecentSearchPress}
         filterBadgeCount={filterBadgeCount}
+        inputTextColor="#333333"
+        placeholderTextColor="#666666"
       />
 
       {/* Filter Bottom Sheet */}
       {/* In the Filter Bottom Sheet, update to control all advanced filter parameters */}
-      <Modal
-        isVisible={filterVisible}
-        onBackdropPress={() => setFilterVisible(false)}
-        style={{ justifyContent: 'flex-end', margin: 0, marginBottom: 0 }}
-      >
-        <KeyboardAwareScrollView
+      {filterVisible && (
+        <View
           style={{
-            backgroundColor: '#fff',
-            borderTopLeftRadius: 18,
-            borderTopRightRadius: 18,
-            maxHeight: '80%',
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            zIndex: 9999,
           }}
-          contentContainerStyle={{ padding: 20 }}
-          enableOnAndroid
-          extraScrollHeight={120}
-          keyboardShouldPersistTaps="handled"
         >
           <TouchableOpacity
+            style={{ flex: 1 }}
+            activeOpacity={1}
             onPress={() => setFilterVisible(false)}
-            style={{ position: 'absolute', left: 16, top: 16, zIndex: 10 }}
-          >
-            <MaterialCommunityIcons name="arrow-left" size={24} color="#222" />
-          </TouchableOpacity>
-          <Text
-            style={{
-              fontWeight: 'bold',
-              fontSize: 18,
-              marginBottom: 16,
-              marginLeft: 40,
-            }}
-          >
-            Filter Payments
-          </Text>
-          {/* Amount Range */}
-          <Text style={{ fontSize: 15, marginBottom: 6 }}>Amount Range</Text>
-          <View style={{ flexDirection: 'row', marginBottom: 16 }}>
-            <TextInput
-              style={{
-                flex: 1,
-                borderWidth: 1,
-                borderColor: '#e0e0e0',
-                borderRadius: 8,
-                padding: 10,
-                marginRight: 8,
-              }}
-              placeholder="Min"
-              keyboardType="numeric"
-              value={
-                searchFilter.amountMin !== undefined
-                  ? String(searchFilter.amountMin)
-                  : ''
-              }
-              onChangeText={v =>
-                setSearchFilter(f => ({
-                  ...f,
-                  amountMin: v ? Number(v) : undefined,
-                }))
-              }
-            />
-            <TextInput
-              style={{
-                flex: 1,
-                borderWidth: 1,
-                borderColor: '#e0e0e0',
-                borderRadius: 8,
-                padding: 10,
-              }}
-              placeholder="Max"
-              keyboardType="numeric"
-              value={
-                searchFilter.amountMax !== undefined
-                  ? String(searchFilter.amountMax)
-                  : ''
-              }
-              onChangeText={v =>
-                setSearchFilter(f => ({
-                  ...f,
-                  amountMax: v ? Number(v) : undefined,
-                }))
-              }
-            />
-          </View>
-          {/* Date Range */}
-          <Text style={{ fontSize: 15, marginBottom: 6 }}>Date Range</Text>
-          <View
-            style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              marginBottom: 16,
-            }}
-          >
-            <TouchableOpacity
-              style={{
-                flex: 1,
-                borderWidth: 1,
-                borderColor: '#e0e0e0',
-                borderRadius: 8,
-                padding: 10,
-                marginRight: 8,
-              }}
-              onPress={() => setShowDatePickerFrom(true)}
-            >
-              <Text
-                style={{ color: searchFilter.dateFrom ? '#222' : '#8a94a6' }}
-              >
-                {searchFilter.dateFrom || 'From'}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={{
-                flex: 1,
-                borderWidth: 1,
-                borderColor: '#e0e0e0',
-                borderRadius: 8,
-                padding: 10,
-              }}
-              onPress={() => setShowDatePickerTo(true)}
-            >
-              <Text style={{ color: searchFilter.dateTo ? '#222' : '#8a94a6' }}>
-                {searchFilter.dateTo || 'To'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-          {/* Date Pickers */}
-          {showDatePickerFrom && (
-            <DateTimePicker
-              value={
-                searchFilter.dateFrom
-                  ? new Date(searchFilter.dateFrom)
-                  : new Date()
-              }
-              mode="date"
-              display="default"
-              onChange={(event, date) => {
-                setShowDatePickerFrom(false);
-                if (date)
-                  setSearchFilter(f => ({
-                    ...f,
-                    dateFrom: date.toISOString().split('T')[0],
-                  }));
-              }}
-            />
-          )}
-          {showDatePickerTo && (
-            <DateTimePicker
-              value={
-                searchFilter.dateTo ? new Date(searchFilter.dateTo) : new Date()
-              }
-              mode="date"
-              display="default"
-              onChange={(event, date) => {
-                setShowDatePickerTo(false);
-                if (date)
-                  setSearchFilter(f => ({
-                    ...f,
-                    dateTo: date.toISOString().split('T')[0],
-                  }));
-              }}
-            />
-          )}
-          {/* Payment Method filter */}
-          <Text
-            style={{
-              fontSize: 16,
-              fontWeight: '600',
-              color: '#1f2937',
-              marginBottom: 12,
-              marginTop: 8,
-            }}
-          >
-            Payment Method
-          </Text>
-          <View
-            style={{
-              flexDirection: 'row',
-              flexWrap: 'wrap',
-              marginBottom: 20,
-              gap: 10,
-            }}
-          >
-            {[
-              'Cash',
-              'Bank Transfer',
-              'UPI',
-              'Credit Card',
-              'Debit Card',
-              'Cheque',
-            ].map((method, idx) => (
-              <TouchableOpacity
-                key={method}
-                style={{
-                  backgroundColor:
-                    searchFilter.paymentMethod === method
-                      ? '#e5e7eb'
-                      : '#ffffff',
-                  borderColor:
-                    searchFilter.paymentMethod === method
-                      ? '#9ca3af'
-                      : '#d1d5db',
-                  borderWidth: 1.5,
-                  borderRadius: 22,
-                  paddingVertical: 10,
-                  paddingHorizontal: 18,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  minWidth: 75,
-                }}
-                onPress={() =>
-                  setSearchFilter(f => ({
-                    ...f,
-                    paymentMethod: method,
-                  }))
-                }
-              >
-                <Text
-                  style={{
-                    color:
-                      searchFilter.paymentMethod === method
-                        ? '#1f2937'
-                        : '#6b7280',
-                    fontSize: 14,
-                    fontWeight:
-                      searchFilter.paymentMethod === method ? '600' : '500',
-                    textAlign: 'center',
-                  }}
-                >
-                  {method}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          {/* Status filter */}
-          <Text
-            style={{
-              fontSize: 16,
-              fontWeight: '600',
-              color: '#1f2937',
-              marginBottom: 12,
-            }}
-          >
-            Status
-          </Text>
-          <View
-            style={{
-              flexDirection: 'row',
-              marginBottom: 20,
-              gap: 12,
-            }}
-          >
-            {['', 'Paid', 'Pending'].map(status => (
-              <TouchableOpacity
-                key={status}
-                style={{
-                  flex: 1,
-                  backgroundColor:
-                    (status === '' && !searchFilter.status) ||
-                    searchFilter.status === status
-                      ? '#e5e7eb'
-                      : '#ffffff',
-                  borderColor:
-                    (status === '' && !searchFilter.status) ||
-                    searchFilter.status === status
-                      ? '#9ca3af'
-                      : '#d1d5db',
-                  borderWidth: 1.5,
-                  borderRadius: 22,
-                  paddingVertical: 10,
-                  paddingHorizontal: 16,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-                onPress={() =>
-                  setSearchFilter(f => ({ ...f, status: status || undefined }))
-                }
-              >
-                <Text
-                  style={{
-                    color:
-                      (status === '' && !searchFilter.status) ||
-                      searchFilter.status === status
-                        ? '#1f2937'
-                        : '#6b7280',
-                    fontSize: 14,
-                    fontWeight:
-                      (status === '' && !searchFilter.status) ||
-                      searchFilter.status === status
-                        ? '600'
-                        : '500',
-                    textTransform: 'capitalize',
-                    textAlign: 'center',
-                  }}
-                >
-                  {status || 'All'}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          {/* Category Filter */}
-          <Text
-            style={{
-              fontSize: 16,
-              fontWeight: '600',
-              color: '#1f2937',
-              marginBottom: 12,
-            }}
-          >
-            Category
-          </Text>
-          <View
-            style={{
-              flexDirection: 'row',
-              flexWrap: 'wrap',
-              marginBottom: 20,
-              gap: 10,
-            }}
-          >
-            {[
-              'Supplier',
-              'Expense',
-              'Salary',
-              'Rent',
-              'Utilities',
-              'Maintenance',
-              'Marketing',
-              'Travel',
-              'Office Supplies',
-              'Other',
-            ].map((cat, idx) => (
-              <TouchableOpacity
-                key={cat}
-                style={{
-                  backgroundColor:
-                    searchFilter.category === cat ? '#e5e7eb' : '#ffffff',
-                  borderColor:
-                    searchFilter.category === cat ? '#9ca3af' : '#d1d5db',
-                  borderWidth: 1.5,
-                  borderRadius: 22,
-                  paddingVertical: 10,
-                  paddingHorizontal: 18,
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  minWidth: 75,
-                }}
-                onPress={() =>
-                  setSearchFilter(f => ({
-                    ...f,
-                    category: cat,
-                  }))
-                }
-              >
-                <Text
-                  style={{
-                    color:
-                      searchFilter.category === cat ? '#1f2937' : '#6b7280',
-                    fontSize: 14,
-                    fontWeight: searchFilter.category === cat ? '600' : '500',
-                    textAlign: 'center',
-                  }}
-                >
-                  {cat}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          {/* Reference Number Filter */}
-          <Text style={{ fontSize: 15, marginBottom: 6 }}>
-            Reference Number
-          </Text>
-          <TextInput
-            style={{
-              borderWidth: 1,
-              borderColor: '#e0e0e0',
-              borderRadius: 8,
-              padding: 10,
-              marginBottom: 16,
-            }}
-            placeholder="Reference number"
-            value={searchFilter.reference || ''}
-            onChangeText={v =>
-              setSearchFilter(f => ({ ...f, reference: v || undefined }))
-            }
           />
-          {/* Description/Notes Filter */}
-          <Text style={{ fontSize: 15, marginBottom: 6 }}>
-            Description/Notes
-          </Text>
-          <TextInput
+          <KeyboardAwareScrollView
             style={{
-              borderWidth: 1,
-              borderColor: '#e0e0e0',
-              borderRadius: 8,
-              padding: 10,
-              marginBottom: 16,
+              backgroundColor: '#fff',
+              borderTopLeftRadius: scale(18),
+              borderTopRightRadius: scale(18),
+              height: '90%',
+              width: '100%',
+              position: 'absolute',
+              bottom: 0,
+              left: 0,
+              right: 0,
             }}
-            placeholder="Description or notes keywords"
-            value={searchFilter.description || ''}
-            onChangeText={v =>
-              setSearchFilter(f => ({ ...f, description: v || undefined }))
-            }
-          />
-          {/* Reset/Apply buttons */}
-          <View
-            style={{
-              flexDirection: 'row',
-              justifyContent: 'center',
-              marginBottom: 20,
-              marginTop: 12,
-              gap: 16,
-            }}
+            contentContainerStyle={{ padding: scale(20), flexGrow: 1 }}
+            enableOnAndroid
+            extraScrollHeight={120}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={true}
           >
-            <TouchableOpacity
-              onPress={() => setSearchFilter({ searchText: '' })}
-              style={{
-                backgroundColor: '#f8f9fa',
-                borderWidth: 1.5,
-                borderColor: '#dc3545',
-                borderRadius: 12,
-                paddingVertical: 14,
-                paddingHorizontal: 32,
-                alignItems: 'center',
-                justifyContent: 'center',
-                minWidth: 140,
-              }}
-            >
-              <Text
-                style={{
-                  color: '#dc3545',
-                  fontWeight: '600',
-                  fontSize: 16,
-                }}
-              >
-                Reset
-              </Text>
-            </TouchableOpacity>
             <TouchableOpacity
               onPress={() => setFilterVisible(false)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               style={{
-                backgroundColor: '#4f8cff',
-                borderWidth: 1.5,
-                borderColor: '#4f8cff',
-                borderRadius: 12,
-                paddingVertical: 14,
-                paddingHorizontal: 32,
-                alignItems: 'center',
-                justifyContent: 'center',
-                minWidth: 140,
+                position: 'absolute',
+                left: scale(16),
+                top: scale(16),
+                zIndex: 10,
+                padding: scale(8),
+                backgroundColor: 'rgba(0, 0, 0, 0.1)',
+                borderRadius: scale(20),
               }}
             >
-              <Text
+              <MaterialCommunityIcons
+                name="arrow-left"
+                size={24}
+                color="#333333"
+              />
+            </TouchableOpacity>
+            <Text
+              style={{
+                fontSize: 18,
+                marginBottom: scale(16),
+                marginLeft: 0,
+                textAlign: 'center',
+                color: '#333333',
+                fontFamily: 'Roboto-Medium',
+              }}
+            >
+              Filter Payments
+            </Text>
+            {/* Amount Range */}
+            <Text
+              style={{
+                fontSize: 14,
+                marginBottom: scale(6),
+                color: '#333333',
+                fontFamily: 'Roboto-Medium',
+              }}
+            >
+              Amount Range
+            </Text>
+            <View style={{ flexDirection: 'row', marginBottom: scale(16) }}>
+              <TextInput
                 style={{
-                  color: '#ffffff',
-                  fontWeight: '600',
-                  fontSize: 16,
+                  flex: 1,
+                  borderWidth: 1,
+                  borderColor: '#e0e0e0',
+                  borderRadius: scale(8),
+                  padding: scale(10),
+                  marginRight: scale(8),
+                  fontSize: 14,
+                  fontFamily: 'Roboto-Medium',
+                  color: '#333333',
+                }}
+                placeholder="Min"
+                placeholderTextColor="#666666"
+                keyboardType="numeric"
+                value={
+                  searchFilter.amountMin !== undefined
+                    ? String(searchFilter.amountMin)
+                    : ''
+                }
+                onChangeText={v =>
+                  setSearchFilter(f => ({
+                    ...f,
+                    amountMin: v ? Number(v) : undefined,
+                  }))
+                }
+              />
+              <TextInput
+                style={{
+                  flex: 1,
+                  borderWidth: 1,
+                  borderColor: '#e0e0e0',
+                  borderRadius: scale(8),
+                  padding: scale(10),
+                  fontSize: 14,
+                  fontFamily: 'Roboto-Medium',
+                  color: '#333333',
+                }}
+                placeholder="Max"
+                placeholderTextColor="#666666"
+                keyboardType="numeric"
+                value={
+                  searchFilter.amountMax !== undefined
+                    ? String(searchFilter.amountMax)
+                    : ''
+                }
+                onChangeText={v =>
+                  setSearchFilter(f => ({
+                    ...f,
+                    amountMax: v ? Number(v) : undefined,
+                  }))
+                }
+              />
+            </View>
+            {/* Date Range */}
+            <Text
+              style={{
+                fontSize: 14,
+                marginBottom: scale(6),
+                color: '#333333',
+                fontFamily: 'Roboto-Medium',
+              }}
+            >
+              Date Range
+            </Text>
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                marginBottom: scale(16),
+              }}
+            >
+              <TouchableOpacity
+                style={{
+                  flex: 1,
+                  borderWidth: 1,
+                  borderColor: '#e0e0e0',
+                  borderRadius: scale(8),
+                  padding: scale(10),
+                  marginRight: scale(8),
+                }}
+                onPress={() => setShowDatePickerFrom(true)}
+              >
+                <Text
+                  style={{
+                    color: searchFilter.dateFrom ? '#333333' : '#666666',
+                    fontSize: 14,
+                    fontFamily: 'Roboto-Medium',
+                  }}
+                >
+                  {searchFilter.dateFrom || 'From'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{
+                  flex: 1,
+                  borderWidth: 1,
+                  borderColor: '#e0e0e0',
+                  borderRadius: scale(8),
+                  padding: scale(10),
+                }}
+                onPress={() => setShowDatePickerTo(true)}
+              >
+                <Text
+                  style={{
+                    color: searchFilter.dateTo ? '#333333' : '#666666',
+                    fontSize: 14,
+                    fontFamily: 'Roboto-Medium',
+                  }}
+                >
+                  {searchFilter.dateTo || 'To'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+            {/* Date Pickers */}
+            {showDatePickerFrom && (
+              <DateTimePicker
+                value={
+                  searchFilter.dateFrom
+                    ? new Date(searchFilter.dateFrom)
+                    : new Date()
+                }
+                mode="date"
+                display="default"
+                onChange={(event, date) => {
+                  setShowDatePickerFrom(false);
+                  if (date)
+                    setSearchFilter(f => ({
+                      ...f,
+                      dateFrom: date.toISOString().split('T')[0],
+                    }));
+                }}
+              />
+            )}
+            {showDatePickerTo && (
+              <DateTimePicker
+                value={
+                  searchFilter.dateTo
+                    ? new Date(searchFilter.dateTo)
+                    : new Date()
+                }
+                mode="date"
+                display="default"
+                onChange={(event, date) => {
+                  setShowDatePickerTo(false);
+                  if (date)
+                    setSearchFilter(f => ({
+                      ...f,
+                      dateTo: date.toISOString().split('T')[0],
+                    }));
+                }}
+              />
+            )}
+            {/* Payment Method filter */}
+            <Text
+              style={{
+                fontSize: 14,
+                color: '#333333',
+                marginBottom: scale(12),
+                marginTop: scale(8),
+                fontFamily: 'Roboto-Medium',
+              }}
+            >
+              Payment Method
+            </Text>
+            <View
+              style={{
+                flexDirection: 'row',
+                flexWrap: 'wrap',
+                marginBottom: scale(20),
+                gap: scale(10),
+              }}
+            >
+              {[
+                'Cash',
+                'Bank Transfer',
+                'UPI',
+                'Credit Card',
+                'Debit Card',
+                'Cheque',
+              ].map((method, idx) => (
+                <TouchableOpacity
+                  key={method}
+                  style={{
+                    backgroundColor:
+                      searchFilter.paymentMethod === method
+                        ? '#e5e7eb'
+                        : '#ffffff',
+                    borderColor:
+                      searchFilter.paymentMethod === method
+                        ? '#9ca3af'
+                        : '#d1d5db',
+                    borderWidth: 1.5,
+                    borderRadius: scale(16),
+                    paddingVertical: scale(6),
+                    paddingHorizontal: scale(12),
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    minWidth: scale(68),
+                  }}
+                  onPress={() =>
+                    setSearchFilter(f => ({
+                      ...f,
+                      paymentMethod: method,
+                    }))
+                  }
+                >
+                  <Text
+                    style={{
+                      color:
+                        searchFilter.paymentMethod === method
+                          ? '#1f2937'
+                          : '#6b7280',
+                      fontSize: 13,
+                      fontWeight:
+                        searchFilter.paymentMethod === method ? '600' : '500',
+                      textAlign: 'center',
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
+                    {method}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            {/* Status filter */}
+            <Text
+              style={{
+                fontSize: 14,
+                color: '#333333',
+                marginBottom: scale(12),
+                fontFamily: 'Roboto-Medium',
+              }}
+            >
+              Status
+            </Text>
+            <View
+              style={{
+                flexDirection: 'row',
+                marginBottom: scale(20),
+                gap: scale(12),
+              }}
+            >
+              {['', 'Paid', 'Pending'].map(status => (
+                <TouchableOpacity
+                  key={status}
+                  style={{
+                    flex: 1,
+                    backgroundColor:
+                      (status === '' && !searchFilter.status) ||
+                      searchFilter.status === status
+                        ? '#e5e7eb'
+                        : '#ffffff',
+                    borderColor:
+                      (status === '' && !searchFilter.status) ||
+                      searchFilter.status === status
+                        ? '#9ca3af'
+                        : '#d1d5db',
+                    borderWidth: 1.5,
+                    borderRadius: scale(16),
+                    paddingVertical: scale(6),
+                    paddingHorizontal: scale(12),
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                  onPress={() =>
+                    setSearchFilter(f => ({
+                      ...f,
+                      status: status || undefined,
+                    }))
+                  }
+                >
+                  <Text
+                    style={{
+                      color:
+                        (status === '' && !searchFilter.status) ||
+                        searchFilter.status === status
+                          ? '#1f2937'
+                          : '#6b7280',
+                      fontSize: 13,
+                      fontWeight:
+                        (status === '' && !searchFilter.status) ||
+                        searchFilter.status === status
+                          ? '600'
+                          : '500',
+                      textTransform: 'capitalize',
+                      textAlign: 'center',
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
+                    {status || 'All'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            {/* Category Filter */}
+            <Text
+              style={{
+                fontSize: 14,
+                color: '#333333',
+                marginBottom: scale(12),
+                fontFamily: 'Roboto-Medium',
+              }}
+            >
+              Category
+            </Text>
+            <View
+              style={{
+                flexDirection: 'row',
+                flexWrap: 'wrap',
+                marginBottom: scale(20),
+                gap: scale(10),
+              }}
+            >
+              {[
+                'Supplier',
+                'Expense',
+                'Salary',
+                'Rent',
+                'Utilities',
+                'Maintenance',
+                'Marketing',
+                'Travel',
+                'Office Supplies',
+                'Other',
+              ].map((cat, idx) => (
+                <TouchableOpacity
+                  key={cat}
+                  style={{
+                    backgroundColor:
+                      searchFilter.category === cat ? '#e5e7eb' : '#ffffff',
+                    borderColor:
+                      searchFilter.category === cat ? '#9ca3af' : '#d1d5db',
+                    borderWidth: 1.5,
+                    borderRadius: scale(16),
+                    paddingVertical: scale(6),
+                    paddingHorizontal: scale(12),
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    minWidth: scale(68),
+                  }}
+                  onPress={() =>
+                    setSearchFilter(f => ({
+                      ...f,
+                      category: cat,
+                    }))
+                  }
+                >
+                  <Text
+                    style={{
+                      color:
+                        searchFilter.category === cat ? '#1f2937' : '#6b7280',
+                      fontSize: 13,
+                      fontWeight: searchFilter.category === cat ? '600' : '500',
+                      textAlign: 'center',
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
+                    {cat}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            {/* Reference Number Filter */}
+            <Text
+              style={{
+                fontSize: 14,
+                marginBottom: scale(6),
+                color: '#333333',
+                fontFamily: 'Roboto-Medium',
+              }}
+            >
+              Reference Number
+            </Text>
+            <TextInput
+              style={{
+                borderWidth: 1,
+                borderColor: '#e0e0e0',
+                borderRadius: scale(8),
+                padding: scale(10),
+                marginBottom: scale(16),
+                fontSize: 14,
+                fontFamily: 'Roboto-Medium',
+                color: '#333333',
+              }}
+              placeholder="Reference number"
+              placeholderTextColor="#666666"
+              value={searchFilter.reference || ''}
+              onChangeText={v =>
+                setSearchFilter(f => ({ ...f, reference: v || undefined }))
+              }
+            />
+            {/* Description/Notes Filter */}
+            <Text
+              style={{
+                fontSize: 14,
+                marginBottom: scale(6),
+                color: '#333333',
+                fontFamily: 'Roboto-Medium',
+              }}
+            >
+              Description/Notes
+            </Text>
+            <TextInput
+              style={{
+                borderWidth: 1,
+                borderColor: '#e0e0e0',
+                borderRadius: scale(8),
+                padding: scale(10),
+                marginBottom: scale(16),
+                fontSize: 14,
+                fontFamily: 'Roboto-Medium',
+                color: '#333333',
+              }}
+              placeholder="Description or notes keywords"
+              placeholderTextColor="#666666"
+              value={searchFilter.description || ''}
+              onChangeText={v =>
+                setSearchFilter(f => ({ ...f, description: v || undefined }))
+              }
+            />
+            {/* Reset/Apply buttons */}
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'center',
+                marginBottom: scale(20),
+                marginTop: scale(12),
+                gap: scale(16),
+              }}
+            >
+              <TouchableOpacity
+                onPress={() => setSearchFilter({ searchText: '' })}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={{
+                  backgroundColor: '#f8f9fa',
+                  borderWidth: 1.5,
+                  borderColor: '#dc3545',
+                  borderRadius: scale(12),
+                  paddingVertical: scale(16),
+                  paddingHorizontal: scale(36),
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  minWidth: scale(160),
                 }}
               >
-                Apply
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </KeyboardAwareScrollView>
-      </Modal>
+                <Text
+                  style={{
+                    color: '#dc3545',
+                    fontSize: 16,
+                    fontFamily: 'Roboto-Medium',
+                  }}
+                >
+                  Reset
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => setFilterVisible(false)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={{
+                  backgroundColor: '#4f8cff',
+                  borderWidth: 1.5,
+                  borderColor: '#4f8cff',
+                  borderRadius: scale(12),
+                  paddingVertical: scale(16),
+                  paddingHorizontal: scale(36),
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  minWidth: scale(160),
+                }}
+              >
+                <Text
+                  style={{
+                    color: '#ffffff',
+                    fontSize: 16,
+                    fontFamily: 'Roboto-Medium',
+                  }}
+                >
+                  Apply
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </KeyboardAwareScrollView>
+        </View>
+      )}
       {/* Payment List */}
       <View style={styles.listContainer}>
         {loadingApi ? (
@@ -3113,11 +5434,28 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
             style={{ marginTop: 40 }}
           />
         ) : apiError ? (
-          <Text style={{ color: 'red', textAlign: 'center', marginTop: 40 }}>
+          <Text
+            style={{
+              color: '#d32f2f',
+              textAlign: 'center',
+              marginTop: 40,
+              fontFamily: 'Roboto-Medium',
+            }}
+          >
+            {' '}
+            {/* Error text - darker red */}
             {apiError}
           </Text>
         ) : filteredPayments.length === 0 ? (
-          <Text style={{ color: '#888', textAlign: 'center', marginTop: 40 }}>
+          <Text
+            style={{
+              color: '#555', // No data message - darker for better readability
+              textAlign: 'center',
+              marginTop: scale(40),
+              fontSize: scale(18),
+              fontFamily: 'Roboto-Medium',
+            }}
+          >
             {`No ${pluralize(folderName).toLowerCase()} found.`}
           </Text>
         ) : (
@@ -3136,7 +5474,6 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         onPress={() => {
           setShowModal(false);
           setLoadingSave(false);
-          setLoadingDraft(false);
           setShowCreateForm(true);
         }}
       >
@@ -3147,10 +5484,15 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   );
 };
 
+// Global scale helper for UI scaling rule - increase all dimensions by 2 units
+const SCALE = 0.75; // Base scale to match reference screens
+const scale = (value: number) => Math.round(value * SCALE);
+
 const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
   container: {
     flex: 1,
-    padding: 16,
+    padding: scale(16),
+    paddingBottom: scale(120), // Adequate space for fixed buttons
   },
   card: {
     // backgroundColor: '#fff',
@@ -3158,21 +5500,22 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
     // padding: 16,
     // marginBottom: 16,
     backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 16,
+    borderRadius: scale(12),
+    padding: scale(16),
+    // marginBottom: scale(44),
     shadowColor: '#000',
     shadowOpacity: 0.05,
-    shadowRadius: 5,
-    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: scale(5),
+    shadowOffset: { width: 0, height: scale(2) },
     elevation: 2,
   },
   cardTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#222',
-    marginBottom: 16,
+    fontSize: scale(23.5), // 18 + 2
+
+    color: '#333333', // Card titles - black for maximum contrast
+    marginBottom: scale(16),
   },
+
   rowBetween: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -3182,58 +5525,96 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
   pickerWrapper: {
     borderWidth: 1,
     borderColor: '#e0e0e0',
-    borderRadius: 8,
+    borderRadius: scale(8),
     overflow: 'hidden',
     backgroundColor: '#f9f9f9',
-    height: 52,
+    height: scale(52),
     justifyContent: 'center',
   },
   picker: {
-    height: 52,
+    height: scale(52),
     width: '100%',
-    marginTop: -4,
-    marginBottom: -4,
+    marginTop: scale(-4),
+    marginBottom: scale(-4),
   },
-  actionButtonsBottom: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 8,
-    marginBottom: 24,
+  actionButtonsContainer: {
+    marginTop: scale(8),
+    marginBottom: scale(24),
+  },
+  fixedActionButtonsContainer: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: '#fff',
+    paddingHorizontal: scale(16),
+    paddingVertical: scale(8),
+    paddingBottom: scale(12),
+    borderTopWidth: 1,
+    borderTopColor: '#e0e0e0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 8,
+  },
+  fullWidthButton: {
+    backgroundColor: '#4f8cff',
+    paddingVertical: scale(12),
+    borderRadius: scale(8),
+    width: '100%',
+    alignItems: 'center',
+    marginBottom: scale(8),
+    borderWidth: 1,
+    borderColor: '#4f8cff',
+  },
+  deleteButton: {
+    backgroundColor: '#dc3545',
+    paddingVertical: scale(12),
+    borderRadius: scale(8),
+    width: '100%',
+    alignItems: 'center',
+    marginBottom: scale(8),
+    borderWidth: 1,
+    borderColor: '#dc3545',
   },
   primaryButton: {
-    backgroundColor: '#222',
-    paddingVertical: 16,
-    borderRadius: 8,
+    backgroundColor: '#000',
+    paddingVertical: scale(14),
+    borderRadius: scale(8),
     flex: 1,
     alignItems: 'center',
-    marginRight: 8,
+    marginRight: scale(8),
     borderWidth: 1,
-    borderColor: '#222',
+    borderColor: '#000',
   },
   primaryButtonText: {
     color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 16,
+    fontSize: scale(22),
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
+
   secondaryButton: {
     backgroundColor: '#fff',
-    paddingVertical: 16,
-    borderRadius: 8,
+    paddingVertical: scale(14),
+    borderRadius: scale(8),
     flex: 1,
     alignItems: 'center',
-    marginLeft: 8,
+    marginLeft: scale(8),
     borderWidth: 1,
     borderColor: '#222',
   },
   secondaryButtonText: {
-    color: '#222',
-    fontWeight: 'bold',
-    fontSize: 16,
+    color: '#333333',
+
+    fontSize: scale(18), // 16 + 2
   },
+
   iconButton: {
     backgroundColor: '#fff',
-    padding: 8,
-    borderRadius: 8,
+    padding: scale(8),
+    borderRadius: scale(8),
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
@@ -3242,106 +5623,125 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
   input: {
     borderWidth: 1,
     borderColor: '#e0e0e0',
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 16,
-    color: '#222',
+    borderRadius: scale(8),
+    paddingHorizontal: scale(12),
+    paddingVertical: scale(22),
+    fontSize: scale(18),
+    color: '#333333', // Input field text - black for better readability
     backgroundColor: '#f9f9f9',
+    fontFamily: 'Roboto-Medium',
   },
+
   inputLabel: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 8,
+    fontSize: 16,
+    color: '#333333',
+    marginBottom: scale(8),
+    fontFamily: 'Roboto-Medium',
   },
+
   invoiceCard: {
     backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
+    borderRadius: scale(12),
+    padding: scale(16),
+    marginBottom: scale(12),
   },
   invoiceHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: scale(8),
   },
   invoiceNumber: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#222',
+    fontSize: scale(18), // 16 + 2
+
+    color: '#333333', // Important text - black for maximum contrast
   },
+
   statusBadge: {
-    paddingVertical: 4,
-    paddingHorizontal: 8,
-    borderRadius: 5,
+    paddingVertical: scale(4),
+    paddingHorizontal: scale(8),
+    borderRadius: scale(5),
   },
   statusText: {
     color: '#fff',
-    fontSize: 12,
-    fontWeight: 'bold',
+    fontSize: scale(14), // 12 + 2
   },
+
   customerName: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 8,
+    fontSize: scale(16), // 14 + 2
+    color: '#333', // Card content - darker for better readability
+    marginBottom: scale(8),
     fontWeight: 'normal',
   },
+
   invoiceDetails: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
   invoiceDate: {
-    fontSize: 14,
-    color: '#666',
+    fontSize: scale(16), // 14 + 2
+    color: '#333', // Card content - darker for better readability
   },
+
   invoiceAmount: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#222',
+    fontSize: scale(18), // 16 + 2
+
+    color: '#333333', // Important text - black for maximum contrast
   },
+
   listContainer: {
     flex: 1,
-    padding: 16,
+    padding: scale(16),
   },
   addInvoiceButton: {
     position: 'absolute',
-    bottom: 20,
-    right: 20,
+    bottom: scale(30),
+    right: scale(30),
     backgroundColor: '#4f8cff',
-    borderRadius: 28,
-    paddingVertical: 16,
-    paddingHorizontal: 20,
+    borderRadius: scale(28),
+    paddingVertical: scale(16),
+    paddingHorizontal: scale(20),
     flexDirection: 'row',
     alignItems: 'center',
     shadowColor: '#000',
     shadowOpacity: 0.2,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
+    shadowRadius: scale(8),
+    shadowOffset: { width: 0, height: scale(4) },
   },
   addInvoiceText: {
     color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 16,
-    marginLeft: 8,
+    fontSize: scale(18), // 16 + 2
+    marginLeft: scale(8),
+    fontWeight: '700',
   },
+
   dropdownItem: {
-    padding: 12,
+    padding: scale(12),
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
   },
-  dropdownItemText: {
-    fontSize: 15,
-    color: '#222',
-    fontWeight: '500',
+  inputFocused: {
+    borderColor: '#4f8cff',
+    shadowColor: '#4f8cff',
+    shadowOpacity: 0.15,
+    shadowRadius: scale(6),
+    shadowOffset: { width: 0, height: scale(2) },
+    elevation: 2,
   },
+  dropdownItemText: {
+    fontSize: scale(14), // Match input field size
+    color: '#333333', // Dropdown text - black for better readability
+    fontFamily: 'Roboto-Medium',
+  },
+
   syncButton: {
     backgroundColor: '#4f8cff',
-    paddingVertical: 30, // further increased height
-    paddingHorizontal: 32,
-    marginLeft: 10,
-    borderRadius: 8,
+    paddingVertical: scale(36),
+    paddingHorizontal: scale(30),
+    marginLeft: scale(10),
+    borderRadius: scale(8),
     alignItems: 'center',
     justifyContent: 'center',
     borderWidth: 1,
@@ -3349,8 +5749,8 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
   },
   syncButtonText: {
     color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 14,
+
+    fontSize: scale(14),
   },
 };
 
@@ -3361,29 +5761,122 @@ const styles: StyleSheet.NamedStyles<any> = StyleSheet.create({
   },
   header: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
-    backgroundColor: '#fff',
+    paddingHorizontal: scale(16),
+    paddingVertical: scale(12),
+    borderBottomWidth: 0,
+    borderBottomColor: 'transparent',
+    backgroundColor: '#4f8cff',
   },
   headerLeft: {
     flexDirection: 'row',
     alignItems: 'center',
+    flex: 1,
   },
   backButton: {
-    padding: 8,
+    padding: scale(12),
   },
   headerTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#222',
-    marginLeft: 12,
+    fontSize: 19,
+    fontWeight: '800',
+    color: '#fff',
+    marginLeft: scale(12),
+    fontFamily: 'Roboto-Medium',
   },
 
   ...invoiceLikeStyles,
+  // Bottom buttons UI (matched to AddNewEntryScreen)
+  buttonContainer: {
+    paddingHorizontal: 12,
+    paddingVertical: 16,
+    backgroundColor: '#fff',
+    borderTopWidth: 1,
+    borderTopColor: '#e2e8f0',
+    alignItems: 'stretch',
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    gap: 9,
+    alignItems: 'center',
+    width: '100%',
+    paddingHorizontal: 0,
+  },
+  submitButton: {
+    backgroundColor: uiColors.primaryBlue,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flex: 1,
+    shadowColor: uiColors.primaryBlue,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  submitButtonFullWidth: {
+    width: '100%',
+    alignSelf: 'center',
+    flex: 0,
+    borderRadius: 8,
+    marginLeft: 0,
+    marginRight: 0,
+  },
+  updateButtonEdit: {
+    backgroundColor: uiColors.primaryBlue,
+    paddingVertical: 12,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flex: 2,
+    flexBasis: 0,
+    minWidth: 0,
+    flexShrink: 1,
+    shadowColor: uiColors.primaryBlue,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  buttonDisabled: {
+    backgroundColor: '#ccc',
+  },
+  submitButtonText: {
+    color: uiColors.textHeader,
+    fontSize: 14,
+    letterSpacing: 0.5,
+    fontFamily: uiFonts.family,
+    textTransform: 'uppercase',
+    fontWeight: '700',
+  },
+  deleteButtonEdit: {
+    backgroundColor: '#dc3545',
+    paddingVertical: 12,
+    borderRadius: 6,
+    flexDirection: 'row',
+    gap: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flex: 1,
+    flexBasis: 0,
+    minWidth: 0,
+    flexShrink: 1,
+    shadowColor: '#dc3545',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  deleteButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    letterSpacing: 0.5,
+    fontFamily: uiFonts.family,
+    textTransform: 'uppercase',
+    fontWeight: '700',
+  },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.3)',
@@ -3392,44 +5885,53 @@ const styles: StyleSheet.NamedStyles<any> = StyleSheet.create({
   },
   modalContent: {
     backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 32,
+    borderRadius: scale(16),
+    padding: scale(32),
     alignItems: 'center',
     shadowColor: '#000',
     shadowOpacity: 0.15,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
+    shadowRadius: scale(12),
+    shadowOffset: { width: 0, height: scale(4) },
   },
   modalTitle: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#28a745',
-    marginBottom: 8,
+    fontSize: scale(18),
+    color: '#28a745', // Keep success color for modal titles
+    marginBottom: scale(8),
+
+    fontFamily: 'Roboto-Medium',
   },
+
   modalMessage: {
-    fontSize: 16,
-    color: '#222',
-    marginBottom: 20,
+    fontSize: scale(14),
+    color: '#333333', // Modal content - black for better readability
+    marginBottom: scale(20),
     textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   modalButton: {
     backgroundColor: '#28a745',
-    borderRadius: 8,
-    paddingVertical: 10,
-    paddingHorizontal: 32,
+    borderRadius: scale(8),
+    paddingVertical: scale(10),
+    paddingHorizontal: scale(32),
   },
   modalButtonText: {
     color: '#fff',
-    fontWeight: 'bold',
-    fontSize: 16,
+    fontSize: scale(14),
+    fontFamily: 'Roboto-Medium',
   },
+
   errorTextField: {
-    color: 'red',
-    fontSize: 12,
-    marginTop: 4,
+    color: '#d32f2f', // Error text - darker red for better visibility
+    fontSize: scale(14), // 12 + 2
+    marginTop: scale(4),
+
+    fontFamily: 'Roboto-Medium',
   },
+
   fieldWrapper: {
-    marginBottom: 16,
+    marginBottom: scale(8),
     width: '100%',
   },
 });

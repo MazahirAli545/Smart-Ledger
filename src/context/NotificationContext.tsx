@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import NotificationService, {
   NotificationSettings,
 } from '../services/notificationService';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 interface NotificationContextType {
   notificationService: NotificationService;
@@ -46,6 +47,16 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const initializeNotifications = async (): Promise<boolean> => {
     try {
+      // Check if user has declined notification permission
+      const neverAsk = await AsyncStorage.getItem('notificationsNeverAsk');
+      if (neverAsk === 'true') {
+        console.log(
+          '⚠️ NotificationContext: Notification permission declined - skipping initialization',
+        );
+        setIsInitialized(false);
+        return false;
+      }
+
       console.log('🚀 Initializing notifications from context...');
       const success = await notificationService.initializeNotifications();
       setIsInitialized(success);

@@ -1,5 +1,9 @@
 import axios from 'axios';
+<<<<<<< Updated upstream
 import { useState } from 'react';
+
+export const BASE_URL = 'https://utility-apis.vercel.app';
+=======
 import { Platform } from 'react-native';
 import {
   getBaseUrl,
@@ -7,35 +11,10 @@ import {
   isRealDevice,
 } from '../config/network';
 import { getBaseUrl as getEnvBaseUrl } from '../config/env';
+import { getUserIdFromToken } from '../utils/storage';
 
 // Development vs Production URLs - Updated to use environment variables
 export const BASE_URL = getEnvBaseUrl();
-
-// Log the BASE_URL being used for debugging
-console.log('🌐 API Configuration:', {
-  isDev: __DEV__,
-  isRealDevice: isRealDevice(),
-  BASE_URL,
-  platform: Platform.OS,
-});
-
-// Test the BASE_URL connectivity
-if (__DEV__) {
-  fetch(`${BASE_URL}/health`)
-    .then(response => {
-      console.log('✅ API Health Check:', {
-        url: `${BASE_URL}/health`,
-        status: response.status,
-        ok: response.ok,
-      });
-    })
-    .catch(error => {
-      console.error('❌ API Health Check Failed:', {
-        url: `${BASE_URL}/health`,
-        error: error.message,
-      });
-    });
-}
 
 // Enhanced network configuration with fallback
 export const getDynamicBaseUrl = async (): Promise<string> => {
@@ -59,6 +38,7 @@ export const checkApiConnectivity = async () => {
 export const getApiHeaders = () => ({
   'Content-Type': 'application/json',
 });
+>>>>>>> Stashed changes
 
 export interface RegisterPayload {
   businessName: string;
@@ -69,10 +49,9 @@ export interface RegisterPayload {
 }
 
 export async function registerUser(payload: RegisterPayload) {
+<<<<<<< Updated upstream
   try {
-    const response = await axios.post(`${BASE_URL}/user/register`, payload, {
-      headers: getApiHeaders(),
-    });
+    const response = await axios.post(`${BASE_URL}/user/register`, payload);
     console.log('Register API response:', response);
     if (response?.data?.otp) {
       console.log('Register API OTP:', response.data.otp);
@@ -86,17 +65,20 @@ export async function registerUser(payload: RegisterPayload) {
 
 export async function sendOtpApi(payload: RegisterPayload) {
   try {
-    const response = await axios.post(
-      `${BASE_URL}/user/register-init`,
-      payload,
-      {
-        headers: getApiHeaders(),
-      },
-    );
+    const response = await axios.post(`${BASE_URL}/user/register-init`, payload);
     return response.data;
   } catch (error: any) {
     throw error.response?.data || error.message || 'Failed to send OTP';
   }
+=======
+  throw new Error(
+    'Registration is handled via /auth/send-otp and /auth/verify-otp',
+  );
+}
+
+export async function sendOtpApi() {
+  throw new Error('Use /auth/send-otp');
+>>>>>>> Stashed changes
 }
 
 // export async function verifyOtpApi({ mobileNumber, otp }: { mobileNumber: string; otp: string }) {
@@ -108,26 +90,19 @@ export async function sendOtpApi(payload: RegisterPayload) {
 //     throw error.response?.data || error.message || 'Failed to verify OTP';
 //   }
 // }
-export async function verifyOtpApi({
-  mobileNumber,
-  otp,
-}: {
-  mobileNumber: string;
-  otp: string;
-}) {
+<<<<<<< Updated upstream
+export async function verifyOtpApi({ mobileNumber, otp }: { mobileNumber: string; otp: string }) {
   try {
-    const response = await axios.post(
-      `${BASE_URL}/user/verify-otp`,
-      { mobileNumber, otp },
-      {
-        headers: getApiHeaders(),
-      },
-    );
+    const response = await axios.post(`${BASE_URL}/user/verify-otp`, { mobileNumber, otp });
     // Return the entire response data and let the component handle it
     return response.data;
   } catch (error: any) {
     throw error.response?.data || error.message || 'Failed to verify OTP';
   }
+=======
+export async function verifyOtpApi() {
+  throw new Error('Use /auth/verify-otp');
+>>>>>>> Stashed changes
 }
 
 // const handleResendOtp = () => {
@@ -136,24 +111,25 @@ export async function verifyOtpApi({
 //   setBackendOtp(null);
 // };
 
-// OTP from backend: <the_otp_value>
+// OTP from backend: <the_otp_value> 
 
-// const [backendOtp, setBackendOtp] = useState<string | null>(null);
+// const [backendOtp, setBackendOtp] = useState<string | null>(null); 
 
 // const response = await sendOtpApi(payload);
-// setBackendOtp(response?.data?.otp || null);
+// setBackendOtp(response?.data?.otp || null); 
 
+<<<<<<< Updated upstream
 export async function onboardingUser(payload: any) {
   try {
-    const response = await axios.post(`${BASE_URL}/user/onboarding`, payload, {
-      headers: getApiHeaders(),
-    });
+    const response = await axios.post(`${BASE_URL}/user/onboarding`, payload);
     return response.data;
   } catch (error: any) {
-    throw (
-      error.response?.data || error.message || 'Failed to complete onboarding'
-    );
+    throw error.response?.data || error.message || 'Failed to complete onboarding';
   }
+} 
+=======
+export async function onboardingUser() {
+  throw new Error('Onboarding endpoint is not available');
 }
 
 // Login API functions
@@ -161,15 +137,11 @@ export interface LoginPayload {
   mobileNumber: string;
 }
 
-export async function loginRequestOtp(payload: LoginPayload) {
+export async function loginRequestOtp(payload: { phone: string }) {
   try {
-    const response = await axios.post(
-      `${BASE_URL}/user/login/request-otp`,
-      payload,
-      {
-        headers: getApiHeaders(),
-      },
-    );
+    const response = await axios.post(`${BASE_URL}/auth/send-otp`, payload, {
+      headers: getApiHeaders(),
+    });
     return response.data;
   } catch (error: any) {
     throw (
@@ -178,18 +150,11 @@ export async function loginRequestOtp(payload: LoginPayload) {
   }
 }
 
-export async function loginVerifyOtp(payload: {
-  mobileNumber: string;
-  otp: string;
-}) {
+export async function loginVerifyOtp(payload: { phone: string; otp: string }) {
   try {
-    const response = await axios.post(
-      `${BASE_URL}/user/login/verify-otp`,
-      payload,
-      {
-        headers: getApiHeaders(),
-      },
-    );
+    const response = await axios.post(`${BASE_URL}/auth/verify-otp`, payload, {
+      headers: getApiHeaders(),
+    });
     return response.data;
   } catch (error: any) {
     throw error.response?.data || error.message || 'Failed to verify login OTP';
@@ -197,76 +162,224 @@ export async function loginVerifyOtp(payload: {
 }
 
 // Enhanced registration functions
-export async function registerInit(payload: RegisterPayload) {
-  try {
-    const response = await axios.post(
-      `${BASE_URL}/user/register-init`,
-      payload,
-      {
-        headers: getApiHeaders(),
-      },
-    );
-    return response.data;
-  } catch (error: any) {
-    throw (
-      error.response?.data ||
-      error.message ||
-      'Failed to initialize registration'
-    );
-  }
+export async function registerInit() {
+  throw new Error('Use /auth/send-otp');
 }
 
-export async function registerVerifyOtp(payload: {
-  mobileNumber: string;
-  otp: string;
-}) {
-  try {
-    const response = await axios.post(
-      `${BASE_URL}/user/register/verify-otp`,
-      payload,
-      {
-        headers: getApiHeaders(),
-      },
-    );
-    return response.data;
-  } catch (error: any) {
-    throw (
-      error.response?.data ||
-      error.message ||
-      'Failed to verify registration OTP'
-    );
-  }
+export async function registerVerifyOtp() {
+  throw new Error('Use /auth/verify-otp');
 }
 
 // User existence check function
-export async function checkUserExists(mobileNumber: string) {
-  try {
-    const response = await axios.get(
-      `${BASE_URL}/user/check-exists/${mobileNumber}`,
-      {
-        headers: getApiHeaders(),
-      },
-    );
-    return response.data;
-  } catch (error: any) {
-    // If user doesn't exist, this will typically return 404
-    throw (
-      error.response?.data || error.message || 'Failed to check user existence'
-    );
-  }
+export async function checkUserExists() {
+  throw new Error('User existence check endpoint is not available');
 }
 
 // Health check function
 export async function checkBackendHealth() {
+  return null;
+}
+
+// ========================================
+// USER PROFILE
+// ========================================
+export interface UserProfileResponse {
+  id: number;
+  name?: string;
+  mobileNumber?: string;
+  email?: string | null;
+  [key: string]: any;
+}
+
+// Update profile payload (all fields optional)
+export interface UpdateUserProfilePayload {
+  businessName?: string;
+  ownerName?: string;
+  businessType?: string;
+  gstNumber?: string;
+  businessSize?: string;
+  industry?: string;
+  monthlyTransactionVolume?: string;
+  currentAccountingSoftware?: string;
+  teamSize?: string;
+  preferredLanguage?: string;
+  features?: string[];
+  bankName?: string;
+  accountNumber?: string;
+  ifscCode?: string;
+  CAAccountID?: string;
+  primaryGoal?: string;
+  currentChallenges?: string;
+}
+
+export async function getCurrentUser(accessToken: string) {
   try {
-    const response = await axios.get(`${BASE_URL}/health`, {
-      headers: getApiHeaders(),
-      timeout: 5000,
+    const response = await axios.get<UserProfileResponse>(
+      `${BASE_URL}/users/profile`,
+      {
+        headers: {
+          ...getApiHeaders(),
+          Authorization: `Bearer ${accessToken}`,
+        },
+      },
+    );
+    return response.data;
+  } catch (error: any) {
+    throw error.response?.data || error.message || 'Failed to fetch profile';
+  }
+}
+
+export async function updateCurrentUser(
+  accessToken: string,
+  payload: UpdateUserProfilePayload,
+) {
+  try {
+    // Get user ID from token
+    const userId = await getUserIdFromToken();
+    if (!userId) {
+      throw new Error('User ID not found in token');
+    }
+
+    const response = await axios.patch(`${BASE_URL}/users/${userId}`, payload, {
+      headers: {
+        ...getApiHeaders(),
+        Authorization: `Bearer ${accessToken}`,
+      },
     });
     return response.data;
   } catch (error: any) {
-    throw (
-      error.response?.data || error.message || 'Backend health check failed'
-    );
+    throw error.response?.data || error.message || 'Failed to update profile';
   }
 }
+
+// ========================================
+// AUTHENTICATION ENDPOINTS (Postman Collection Match)
+// ========================================
+
+// 1. Send OTP - POST /auth/send-otp
+export interface SendOtpPayload {
+  phone: string;
+}
+
+export async function sendOtp(payload: SendOtpPayload) {
+  try {
+    console.log('📱 Sending OTP to:', payload.phone);
+    const response = await axios.post(`${BASE_URL}/auth/send-otp`, payload, {
+      headers: getApiHeaders(),
+    });
+    console.log('✅ OTP sent successfully:', response.data);
+    return response.data;
+  } catch (error: any) {
+    console.error('❌ Send OTP error:', error);
+    throw error.response?.data || error.message || 'Failed to send OTP';
+  }
+}
+
+// 2. Verify OTP - POST /auth/verify-otp
+export interface VerifyOtpPayload {
+  phone: string;
+  otp: string;
+}
+
+export async function verifyOtp(payload: VerifyOtpPayload) {
+  try {
+    console.log('🔐 Verifying OTP for:', payload.phone);
+    console.log('🔐 OTP being sent:', payload.otp);
+    console.log('🔐 Full payload:', payload);
+    console.log('🔐 Endpoint URL:', `${BASE_URL}/auth/verify-otp`);
+
+    const response = await axios.post(`${BASE_URL}/auth/verify-otp`, payload, {
+      headers: getApiHeaders(),
+    });
+
+    console.log('✅ OTP verification response status:', response.status);
+    console.log('✅ OTP verification response data:', response.data);
+    return response.data;
+  } catch (error: any) {
+    console.error('❌ Verify OTP error details:', {
+      message: error.message,
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      data: error.response?.data,
+      url: error.config?.url,
+      method: error.config?.method,
+      payload: payload,
+    });
+    throw error.response?.data || error.message || 'Failed to verify OTP';
+  }
+}
+
+// 3. SMS Status - GET /auth/sms-status
+export async function getSmsStatus() {
+  try {
+    console.log('📊 Checking SMS status');
+    const response = await axios.get(`${BASE_URL}/auth/sms-status`, {
+      headers: getApiHeaders(),
+    });
+    console.log('✅ SMS status retrieved:', response.data);
+    return response.data;
+  } catch (error: any) {
+    console.error('❌ Get SMS status error:', error);
+    throw error.response?.data || error.message || 'Failed to get SMS status';
+  }
+}
+
+// ========================================
+// EXPORT ALL API MODULES
+// ========================================
+
+// Re-export customer APIs
+export * from './customers';
+
+// Re-export transaction APIs
+export * from './transactions';
+
+// Re-export report APIs
+export * from './reports';
+
+// Re-export RBAC APIs
+export * from './rbac';
+
+// Re-export payment APIs
+export * from './payments';
+
+// Re-export supplier APIs
+export * from './suppliers';
+
+// Re-export contact APIs
+export * from './contact';
+
+// ========================================
+// UNIFIED API SERVICE (RECOMMENDED)
+// ========================================
+
+// Export unified API service - Use this for all new API calls
+export { unifiedApi, default as unifiedApiService } from './unifiedApiService';
+export type { RequestOptions, ApiResponse } from './unifiedApiService';
+
+// ========================================
+// ADDITIONAL EXPORTS FOR MISSING APIs
+// ========================================
+
+// Export new transaction functions
+export {
+  deleteTransactionById,
+  fetchTransactionsByCustomerId,
+} from './transactions';
+
+// Export new report functions
+export {
+  createNewReport,
+  fetchAllReports,
+  fetchReportById,
+  generateReport,
+  exportReportCSV,
+  exportReportPDF,
+  deleteReport,
+  fetchCustomerLedger,
+  fetchSupplierLedger,
+} from './reports';
+
+// Export updated customer function
+export { fetchCustomersOnly } from './customers';
+>>>>>>> Stashed changes

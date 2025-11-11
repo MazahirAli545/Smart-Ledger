@@ -1,250 +1,267 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
-  TextInput,
-  StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
+  StyleSheet,
+  Keyboard,
   ScrollView,
 } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useCustomerContext } from '../context/CustomerContext';
 import type { Customer } from '../api/customers';
 
+// Global scale helper aligned with other components
+const SCALE = 0.9;
+const scale = (value: number) => Math.round(value * SCALE);
+
 interface CustomerSelectorProps {
   value: string;
   onChange: (name: string, customer?: Customer) => void;
   placeholder?: string;
+  scrollRef?: any;
   onCustomerSelect?: (customer: Customer) => void;
 }
 
 const CustomerSelector: React.FC<CustomerSelectorProps> = ({
   value,
   onChange,
-  placeholder = 'Type or search customer',
+  placeholder = 'Search Customer',
+  scrollRef,
   onCustomerSelect,
 }) => {
-  const { customers, fetchAll } = useCustomerContext();
-  const [isFocus, setIsFocus] = useState(false);
-  const [inputValue, setInputValue] = useState(value);
+  const { customers, fetchAll, loading, error } = useCustomerContext();
+  const [searchText, setSearchText] = useState(value || '');
   const [showDropdown, setShowDropdown] = useState(false);
-  const [isScrolling, setIsScrolling] = useState(false);
+  const [filteredCustomers, setFilteredCustomers] = useState<Customer[]>([]);
+  const inputRef = useRef<TextInput>(null);
 
   useEffect(() => {
-    fetchAll();
-  }, [fetchAll]);
+    // Fetch customers only once on mount to avoid infinite re-fetch loops
+    // caused by changing function identities from context re-renders
+    const loadCustomers = async () => {
+      try {
+        console.log('🔍 CustomerSelector: Starting to load customers...');
+        console.log('🔍 CustomerSelector: Context state:', {
+          loading,
+          error,
+          customersCount: customers?.length || 0,
+        });
 
+        // Always try to fetch customers on mount to ensure they're loaded
+        console.log('🔍 CustomerSelector: Fetching customers...');
+        const result = await fetchAll('');
+        console.log(
+          '🔍 CustomerSelector: fetchAll result:',
+          result?.length || 0,
+          'customers',
+        );
+      } catch (error) {
+        console.error('❌ CustomerSelector: Error loading customers:', error);
+      }
+    };
+    loadCustomers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Sync searchText with value prop when it changes
   useEffect(() => {
-    setInputValue(value);
+    setSearchText(value || '');
   }, [value]);
 
-  const handleCustomerSelect = (customer: Customer) => {
-    console.log('🔍 CustomerSelector: Customer selected:', customer);
-    console.log('🔍 CustomerSelector: partyName:', customer.partyName);
-    console.log('🔍 CustomerSelector: phoneNumber:', customer.phoneNumber);
-    console.log('🔍 CustomerSelector: address:', customer.address);
-
-    // Call the optional callback first to populate fields
-    if (onCustomerSelect) {
-      console.log('🔍 CustomerSelector: Calling onCustomerSelect callback');
-      onCustomerSelect(customer);
-    } else {
-      console.log('🔍 CustomerSelector: No onCustomerSelect callback provided');
-    }
-
-    // Then update the input value
-    onChange(customer.partyName || '', customer);
-    setInputValue(customer.partyName || '');
-    setShowDropdown(false);
-    setIsFocus(false);
+  const getDisplayName = (c: Customer) => {
+    // Prefer the longer/more complete name between name and partyName
+    const name = (c.name || '').trim();
+    const partyName = (c.partyName || '').trim();
+    return name.length >= partyName.length ? name : partyName;
   };
 
-  const closeDropdown = () => {
-    // Don't close dropdown if user is actively scrolling
-    if (isScrolling) {
+  useEffect(() => {
+    console.log('🔍 CustomerSelector: useEffect triggered', {
+      customers: customers?.length || 0,
+      isArray: Array.isArray(customers),
+      searchText,
+    });
+
+    if (!customers || !Array.isArray(customers)) {
+      console.log(
+        '🔍 CustomerSelector: Setting filteredCustomers to empty array',
+      );
+      setFilteredCustomers([]);
       return;
     }
 
-    // Add a small delay to allow user interaction
-    setTimeout(() => {
-      if (!isScrolling) {
-        setShowDropdown(false);
-        setIsFocus(false);
-      }
-    }, 100);
+    if (searchText.trim() === '') {
+      console.log(
+        '🔍 CustomerSelector: Setting filteredCustomers to all customers',
+      );
+      console.log(
+        '🔍 CustomerSelector: Sample customer data:',
+        customers.slice(0, 2),
+      );
+      setFilteredCustomers(customers);
+    } else {
+      const needle = searchText.toLowerCase();
+      const filtered = customers.filter(customer => {
+        const name = getDisplayName(customer).toLowerCase();
+        const phone = (customer.phoneNumber || '').toLowerCase();
+        return name.includes(needle) || phone.includes(needle);
+      });
+      console.log(
+        '🔍 CustomerSelector: Setting filteredCustomers to filtered results',
+        filtered.length,
+      );
+      setFilteredCustomers(filtered);
+    }
+  }, [searchText, customers]);
+
+  const handleCustomerSelect = async (customer: Customer) => {
+    const selectedName = getDisplayName(customer);
+    let enriched: Customer = {
+      ...customer,
+      phoneNumber: customer.phoneNumber || '',
+      address: customer.address || '',
+    };
+    // Use the most complete name
+    const finalName = getDisplayName(enriched);
+    onChange(finalName, enriched);
+    setSearchText(finalName);
+    setShowDropdown(false);
+    Keyboard.dismiss();
+    if (onCustomerSelect) onCustomerSelect(enriched);
   };
 
-  // Safe cleanup to prevent memory leaks and errors
-  useEffect(() => {
-    return () => {
-      // Cleanup on unmount
-      setShowDropdown(false);
-      setIsFocus(false);
-      setIsScrolling(false);
-    };
-  }, []);
-
   const handleInputChange = (text: string) => {
-    console.log('🔍 CustomerSelector: Input changed to:', text);
-    setInputValue(text);
-    onChange(text); // Always update parent with current text
-
-    // Always show dropdown when typing, filter customers based on input
-    if (customers.length > 0) {
-      setShowDropdown(true);
-    }
+    setSearchText(text);
+    onChange(text, undefined);
+    setShowDropdown(true);
   };
 
   const handleInputFocus = () => {
-    setIsFocus(true);
+    console.log('🔍 CustomerSelector: Input focused, showing dropdown');
+    console.log('🔍 CustomerSelector: Current state:', {
+      customers: customers?.length || 0,
+      filteredCustomers: filteredCustomers?.length || 0,
+      loading,
+      error,
+    });
 
-    // Always show dropdown when focused if there are customers
-    if (customers.length > 0) {
-      setShowDropdown(true);
+    // If no customers are loaded and not currently loading, try to fetch them
+    if ((!customers || customers.length === 0) && !loading && !error) {
       console.log(
-        '✅ CustomerSelector: Focused, showing dropdown with',
-        customers.length,
-        'customers',
+        '🔍 CustomerSelector: No customers available, attempting to fetch...',
       );
-    } else {
-      console.log('❌ CustomerSelector: No customers available on focus');
+      fetchAll('');
+    }
+
+    setShowDropdown(true);
+    if (scrollRef?.current && inputRef.current) {
+      scrollRef.current.scrollToFocusedInput(inputRef.current, 120);
     }
   };
 
   const handleInputBlur = () => {
-    // Don't immediately hide dropdown - let user interact with it
-    // The dropdown will be hidden when a customer is selected or when clicking outside
-    // We'll handle closing through the closeDropdown function
+    // Delay hiding dropdown to allow selection
+    setTimeout(() => setShowDropdown(false), 200);
   };
 
-  // Clean customer data to remove any "Phone" prefix from partyName
-  const cleanCustomerData = (customer: Customer) => {
-    if (customer.partyName) {
-      // Remove "Phone" prefix and any leading/trailing whitespace
-      let cleanName = customer.partyName;
+  const renderCustomerItem = ({ item }: { item: Customer }) => {
+    const displayName = getDisplayName(item);
+    console.log('🔍 CustomerSelector: Rendering customer item:', {
+      id: item.id,
+      partyName: item.partyName,
+      displayName: displayName,
+      itemKeys: Object.keys(item),
+    });
 
-      // Remove "Phone " prefix (with space)
-      if (cleanName.startsWith('Phone ')) {
-        cleanName = cleanName.replace(/^Phone\s+/, '');
-      }
-
-      // Remove "Phone" prefix (without space)
-      if (cleanName.startsWith('Phone')) {
-        cleanName = cleanName.replace(/^Phone/, '');
-      }
-
-      // Clean up any remaining whitespace
-      cleanName = cleanName.trim();
-
-      console.log('🧹 Cleaning customer data:', {
-        original: customer.partyName,
-        cleaned: cleanName,
-      });
-
-      return {
-        ...customer,
-        partyName: cleanName || customer.partyName, // Fallback to original if cleaning results in empty string
-      };
-    }
-    return customer;
+    return (
+      <TouchableOpacity
+        style={styles.customerItem}
+        onPress={() => handleCustomerSelect(item)}
+        activeOpacity={0.7}
+      >
+        <View style={styles.customerInfo}>
+          <Text style={styles.customerName} numberOfLines={1}>
+            {displayName}
+          </Text>
+        </View>
+        <MaterialCommunityIcons
+          name="chevron-right"
+          size={18}
+          color="#9ca3af"
+        />
+      </TouchableOpacity>
+    );
   };
-
-  // Filter customers based on input
-  const filteredCustomers = inputValue.trim()
-    ? customers.filter(customer =>
-        customer.partyName?.toLowerCase().includes(inputValue.toLowerCase()),
-      )
-    : customers;
 
   return (
     <View style={styles.container}>
-      {/* TextInput for typing customer names */}
       <TextInput
-        style={[styles.textInput, isFocus && styles.textInputFocused]}
-        value={inputValue}
+        ref={inputRef}
+        style={styles.input}
+        value={searchText}
         onChangeText={handleInputChange}
         onFocus={handleInputFocus}
         onBlur={handleInputBlur}
         placeholder={placeholder}
-        placeholderTextColor="#8a94a6"
+        placeholderTextColor="#666666"
       />
 
-      {/* Dropdown for existing customers - only show when there are matches */}
-      {(() => {
-        console.log('🔍 CustomerSelector: Dropdown visibility check:', {
-          showDropdown,
-          filteredCustomersLength: filteredCustomers.length,
-          totalCustomers: customers.length,
-          inputValue: inputValue.trim(),
-        });
-        return null;
-      })()}
-      {showDropdown && filteredCustomers.length > 0 && (
-        <>
-          {/* Background overlay to ensure dropdown appears above everything */}
-          <TouchableOpacity
-            style={styles.dropdownOverlay}
-            activeOpacity={1}
-            onPress={closeDropdown}
-          />
-          <View style={styles.dropdownContainer}>
+      {showDropdown && (
+        <View style={styles.dropdownAbsolute}>
+          {(() => {
+            console.log('🔍 CustomerSelector: Rendering dropdown with state:', {
+              loading,
+              error,
+              customersCount: customers?.length || 0,
+              filteredCustomersCount: filteredCustomers?.length || 0,
+              showDropdown,
+            });
+            return null;
+          })()}
+          {loading ? (
+            <Text style={styles.hint}>Loading customers...</Text>
+          ) : error ? (
+            <View style={styles.errorContainer}>
+              <Text style={styles.errorText} numberOfLines={3}>
+                {error}
+              </Text>
+              <Text style={styles.debugText}>
+                Check network connection and try again
+              </Text>
+              <TouchableOpacity
+                style={styles.retryButton}
+                onPress={() => {
+                  console.log(
+                    '🔄 CustomerSelector: Retrying customer fetch...',
+                  );
+                  fetchAll('');
+                }}
+              >
+                <Text style={styles.retryButtonText}>Retry</Text>
+              </TouchableOpacity>
+            </View>
+          ) : !filteredCustomers || filteredCustomers.length === 0 ? (
+            <View style={styles.hintContainer}>
+              <Text style={styles.hint}>No customers found</Text>
+            </View>
+          ) : (
             <ScrollView
-              style={styles.dropdownScrollView}
-              nestedScrollEnabled={false}
-              showsVerticalScrollIndicator={true}
+              style={{ maxHeight: 240 }}
               keyboardShouldPersistTaps="handled"
-              scrollEventThrottle={16}
-              bounces={false}
-              alwaysBounceVertical={false}
-              contentContainerStyle={styles.dropdownScrollContent}
-              onScrollBeginDrag={() => setIsScrolling(true)}
-              onScrollEndDrag={() => setIsScrolling(false)}
-              onMomentumScrollBegin={() => setIsScrolling(true)}
-              onMomentumScrollEnd={() => setIsScrolling(false)}
+              showsVerticalScrollIndicator={true}
+              nestedScrollEnabled
             >
-              {filteredCustomers.map((customer, index) => {
-                const cleanCustomer = cleanCustomerData(customer);
-                return (
-                  <TouchableOpacity
-                    key={customer.id}
-                    style={[
-                      styles.dropdownItem,
-                      index === filteredCustomers.length - 1 &&
-                        styles.dropdownItemLast,
-                    ]}
-                    onPress={() => handleCustomerSelect(cleanCustomer)}
-                    activeOpacity={0.7}
-                  >
-                    <View style={styles.dropdownItemContent}>
-                      <MaterialCommunityIcons
-                        name="account"
-                        size={20}
-                        color="#4f8cff"
-                        style={styles.dropdownIcon}
-                      />
-                      <Text style={styles.dropdownItemText} numberOfLines={1}>
-                        {cleanCustomer.partyName || 'No Name'}
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
-                );
-              })}
+              {(filteredCustomers || []).map(item => (
+                <View key={item.id.toString()}>
+                  {renderCustomerItem({ item })}
+                </View>
+              ))}
             </ScrollView>
-          </View>
-        </>
-      )}
-
-      {/* Show indicator for new customer */}
-      {/* {inputValue && !customers.find(c => c.partyName === inputValue) && (
-        <View style={styles.newCustomerIndicator}>
-          <MaterialCommunityIcons
-            name="account-plus"
-            size={16}
-            color="#4f8cff"
-          />
-          <Text style={styles.newCustomerText}>New customer: {inputValue}</Text>
+          )}
         </View>
-      )} */}
+      )}
     </View>
   );
 };
@@ -254,98 +271,119 @@ const styles = StyleSheet.create({
     position: 'relative',
     zIndex: 1000,
   },
-  textInput: {
-    height: 52,
-    borderRadius: 8,
-    borderWidth: 1,
+  input: {
+    borderWidth: 0.4,
     borderColor: '#e0e0e0',
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    fontSize: scale(16),
+    color: '#333333',
     backgroundColor: '#f9f9f9',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 16,
-    color: '#222',
+    fontFamily: 'Roboto-Medium',
   },
-  textInputFocused: {
-    borderColor: '#4f8cff',
-    backgroundColor: '#f0f6ff',
-  },
-  dropdownOverlay: {
+
+  dropdownAbsolute: {
     position: 'absolute',
-    top: 0,
-    left: -1000,
-    right: -1000,
-    bottom: -1000,
-    backgroundColor: 'transparent',
-    zIndex: 999,
-  },
-  dropdownContainer: {
-    position: 'absolute',
-    top: '100%',
+    top: 60,
     left: 0,
     right: 0,
     backgroundColor: '#fff',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#e0e0e0',
+    borderColor: '#d1d5db',
+    zIndex: 9999,
     shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 4,
-    },
-    shadowOpacity: 0.3,
-    shadowRadius: 16,
-    elevation: 10,
-    zIndex: 1001,
-    marginTop: 4,
+    shadowOpacity: 0.15,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 16,
     maxHeight: 200,
     overflow: 'hidden',
     // Ensure proper nested scrolling
     flex: 1,
+    // Add a subtle border radius to the top corners only
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
+    borderBottomLeftRadius: 8,
+    borderBottomRightRadius: 8,
   },
-  dropdownScrollView: {
-    maxHeight: 200,
-  },
-  dropdownScrollContent: {
-    flexGrow: 1,
-  },
-  dropdownItem: {
-    paddingVertical: 12,
+  customerItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
     paddingHorizontal: 16,
     borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
+    borderBottomColor: '#f3f4f6',
     backgroundColor: '#fff',
+    minHeight: 56,
   },
-  dropdownItemLast: {
-    borderBottomWidth: 0,
-  },
-  dropdownItemContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  dropdownIcon: {
-    marginRight: 12,
-  },
-  dropdownItemText: {
-    fontSize: 16,
-    color: '#222',
-    fontWeight: '500',
+  customerInfo: {
     flex: 1,
   },
-  newCustomerIndicator: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 8,
-    padding: 8,
-    backgroundColor: '#f0f6ff',
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#4f8cff',
+  customerDetails: {
+    marginTop: 4,
   },
-  newCustomerText: {
-    fontSize: 12,
-    color: '#4f8cff',
-    fontStyle: 'italic',
-    marginLeft: 8,
+  customerName: {
+    fontSize: scale(16),
+    color: '#1f2937',
+    fontFamily: 'Roboto-Medium',
+    lineHeight: scale(20),
+  },
+
+  metaText: {
+    fontSize: scale(16),
+    color: '#666666',
+    marginTop: 2,
+    fontFamily: 'Roboto-Medium',
+  },
+
+  hint: {
+    padding: 16,
+    fontSize: scale(14),
+    color: '#6b7280',
+    textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
+    backgroundColor: '#f9fafb',
+    borderTopWidth: 1,
+    borderTopColor: '#f3f4f6',
+  },
+
+  hintContainer: {
+    padding: scale(8),
+    alignItems: 'center',
+  },
+  errorText: {
+    padding: 12,
+    fontSize: scale(14),
+    color: '#dc3545',
+    textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
+  },
+
+  errorContainer: {
+    padding: 12,
+    alignItems: 'center',
+  },
+  retryButton: {
+    marginTop: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: '#dc3545',
+    borderRadius: 6,
+  },
+  retryButtonText: {
+    color: '#fff',
+    fontSize: scale(14),
+    fontFamily: 'Roboto-Medium',
+  },
+
+  debugText: {
+    fontSize: scale(12),
+    color: '#666666',
+    textAlign: 'center',
+    marginTop: 4,
+    fontFamily: 'Roboto-Medium',
   },
 });
 

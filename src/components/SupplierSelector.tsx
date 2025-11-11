@@ -4,16 +4,22 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  FlatList,
   StyleSheet,
-  Modal,
+  Keyboard,
+  ScrollView,
 } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useSupplierContext } from '../context/SupplierContext';
+import { fetchSupplierById } from '../api/suppliers';
+
+// Global scale helper aligned with other components
+const SCALE = 0.9;
+const scale = (value: number) => Math.round(value * SCALE);
 
 interface Supplier {
   id: number;
-  name: string;
+  name?: string; // Some backends may return partyName instead
+  partyName?: string;
   phoneNumber?: string;
   address?: string;
   gstNumber?: string;
@@ -28,6 +34,7 @@ interface SupplierSelectorProps {
   placeholder?: string;
   scrollRef?: any;
   onSupplierSelect?: (supplier: Supplier) => void;
+  supplierData?: Supplier; // Add supplier data prop for external updates
 }
 
 const SupplierSelector: React.FC<SupplierSelectorProps> = ({
@@ -36,55 +43,179 @@ const SupplierSelector: React.FC<SupplierSelectorProps> = ({
   placeholder = 'Type or search supplier',
   scrollRef,
   onSupplierSelect,
+  supplierData,
 }) => {
-  const { suppliers, fetchAll } = useSupplierContext();
-  const [searchText, setSearchText] = useState('');
+  const { suppliers, fetchAll, loading, error } = useSupplierContext();
+  const [searchText, setSearchText] = useState(value || '');
   const [showDropdown, setShowDropdown] = useState(false);
   const [filteredSuppliers, setFilteredSuppliers] = useState<Supplier[]>([]);
   const inputRef = useRef<TextInput>(null);
 
   useEffect(() => {
-    fetchAll('');
-  }, [fetchAll]);
+    // Fetch suppliers only once on mount to avoid infinite re-fetch loops
+    // caused by changing function identities from context re-renders
+    const loadSuppliers = async () => {
+      try {
+        console.log('🔍 SupplierSelector: Starting to load suppliers...');
+        console.log('🔍 SupplierSelector: Context state:', {
+          loading,
+          error,
+          suppliersCount: suppliers?.length || 0,
+        });
+
+        // Always try to fetch suppliers on mount to ensure they're loaded
+        console.log('🔍 SupplierSelector: Fetching suppliers...');
+        const result = await fetchAll('');
+        console.log(
+          '🔍 SupplierSelector: fetchAll result:',
+          result?.length || 0,
+          'suppliers',
+        );
+      } catch (error) {
+        console.error('❌ SupplierSelector: Error loading suppliers:', error);
+      }
+    };
+    loadSuppliers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Sync searchText with value prop when it changes
+  useEffect(() => {
+    setSearchText(value || '');
+  }, [value]);
+
+  const getDisplayName = (s: Supplier) => {
+    // Prefer the longer/more complete name between name and partyName
+    const name = (s.name || '').trim();
+    const partyName = (s.partyName || '').trim();
+    return name.length >= partyName.length ? name : partyName;
+  };
 
   useEffect(() => {
+    console.log('🔍 SupplierSelector: useEffect triggered', {
+      suppliers: suppliers?.length || 0,
+      isArray: Array.isArray(suppliers),
+      searchText,
+    });
+
+    if (!suppliers || !Array.isArray(suppliers)) {
+      console.log(
+        '🔍 SupplierSelector: Setting filteredSuppliers to empty array',
+      );
+      setFilteredSuppliers([]);
+      return;
+    }
+
+    // Start with the main suppliers list
+    let baseSuppliers = [...suppliers];
+
+    // If we have external supplier data and it matches the current value, include it
+    if (
+      supplierData &&
+      value &&
+      supplierData.id &&
+      supplierData.name &&
+      value.trim() === supplierData.name.trim()
+    ) {
+      console.log('🔍 SupplierSelector: Including external supplier data');
+      // Check if the supplier is already in the base list
+      const existingSupplier = baseSuppliers.find(
+        s => s.id === supplierData.id,
+      );
+      if (existingSupplier) {
+        // Update the existing supplier with new data
+        baseSuppliers = baseSuppliers.map(supplier =>
+          supplier.id === supplierData.id
+            ? { ...supplier, ...supplierData }
+            : supplier,
+        );
+      } else {
+        // Add the new supplier to the list
+        baseSuppliers.unshift(supplierData);
+      }
+    }
+
     if (searchText.trim() === '') {
-      setFilteredSuppliers(suppliers);
+      console.log(
+        '🔍 SupplierSelector: Setting filteredSuppliers to all suppliers',
+      );
+      console.log(
+        '🔍 SupplierSelector: Sample supplier data:',
+        baseSuppliers.slice(0, 2),
+      );
+      setFilteredSuppliers(baseSuppliers);
     } else {
-      const filtered = suppliers.filter(supplier =>
-        supplier.name?.toLowerCase().includes(searchText.toLowerCase()),
+      const needle = searchText.toLowerCase();
+      const filtered = baseSuppliers.filter(supplier => {
+        const name = getDisplayName(supplier).toLowerCase();
+        const phone = (supplier.phoneNumber || '').toLowerCase();
+        return name.includes(needle) || phone.includes(needle);
+      });
+      console.log(
+        '🔍 SupplierSelector: Setting filteredSuppliers to filtered results',
+        filtered.length,
       );
       setFilteredSuppliers(filtered);
     }
-  }, [searchText, suppliers]);
+  }, [searchText, suppliers, supplierData, value]);
 
-  const handleSupplierSelect = (supplier: Supplier) => {
-    console.log('🔍 SupplierSelector: Supplier selected:', supplier);
-    console.log('🔍 SupplierSelector: name:', supplier.name);
-    console.log('🔍 SupplierSelector: phoneNumber:', supplier.phoneNumber);
-    console.log('🔍 SupplierSelector: address:', supplier.address);
-
-    // Call the optional callback first to populate fields
-    if (onSupplierSelect) {
-      console.log('🔍 SupplierSelector: Calling onSupplierSelect callback');
-      onSupplierSelect(supplier);
-    } else {
-      console.log('🔍 SupplierSelector: No onSupplierSelect callback provided');
+  const handleSupplierSelect = async (supplier: Supplier) => {
+    const selectedName = getDisplayName(supplier);
+    let enriched: Supplier = {
+      ...supplier,
+      phoneNumber: supplier.phoneNumber || '',
+      address: supplier.address || '',
+    };
+    // Fallback: fetch full detail if phone/address is missing
+    if (!enriched.phoneNumber || !enriched.address) {
+      try {
+        const full = await fetchSupplierById(supplier.id);
+        if (full) {
+          enriched = {
+            ...enriched,
+            phoneNumber: full.phoneNumber || enriched.phoneNumber,
+            address: full.address || enriched.address,
+            // Ensure we have the most complete name from the server
+            name: full.name || enriched.name,
+            partyName: full.partyName || enriched.partyName,
+          };
+        }
+      } catch (e) {
+        // Ignore detail fetch failures
+      }
     }
-
-    // Then update the input value
-    onChange(supplier.name || '', supplier);
-    setSearchText('');
+    // Use the most complete name after potential enrichment
+    const finalName = getDisplayName(enriched);
+    onChange(finalName, enriched);
+    setSearchText(finalName);
     setShowDropdown(false);
+    Keyboard.dismiss();
+    if (onSupplierSelect) onSupplierSelect(enriched);
   };
 
   const handleInputChange = (text: string) => {
     setSearchText(text);
-    onChange(text);
+    onChange(text, undefined);
     setShowDropdown(true);
   };
 
   const handleInputFocus = () => {
+    console.log('🔍 SupplierSelector: Input focused, showing dropdown');
+    console.log('🔍 SupplierSelector: Current state:', {
+      suppliers: suppliers?.length || 0,
+      filteredSuppliers: filteredSuppliers?.length || 0,
+      loading,
+      error,
+    });
+
+    // If no suppliers are loaded and not currently loading, try to fetch them
+    if ((!suppliers || suppliers.length === 0) && !loading && !error) {
+      console.log(
+        '🔍 SupplierSelector: No suppliers available, attempting to fetch...',
+      );
+      fetchAll('');
+    }
+
     setShowDropdown(true);
     if (scrollRef?.current && inputRef.current) {
       scrollRef.current.scrollToFocusedInput(inputRef.current, 120);
@@ -96,63 +227,101 @@ const SupplierSelector: React.FC<SupplierSelectorProps> = ({
     setTimeout(() => setShowDropdown(false), 200);
   };
 
-  const renderSupplierItem = ({ item }: { item: Supplier }) => (
-    <TouchableOpacity
-      style={styles.supplierItem}
-      onPress={() => handleSupplierSelect(item)}
-      activeOpacity={0.7}
-    >
-      <View style={styles.supplierInfo}>
-        <Text style={styles.supplierName}>{item.name}</Text>
-        {item.phoneNumber && (
-          <Text style={styles.supplierPhone}>{item.phoneNumber}</Text>
-        )}
-        {item.address && (
-          <Text style={styles.supplierAddress} numberOfLines={1}>
-            {item.address}
+  const renderSupplierItem = ({ item }: { item: Supplier }) => {
+    const displayName = getDisplayName(item);
+    console.log('🔍 SupplierSelector: Rendering supplier item:', {
+      id: item.id,
+      partyName: item.partyName,
+      displayName: displayName,
+      itemKeys: Object.keys(item),
+    });
+
+    return (
+      <TouchableOpacity
+        style={styles.supplierItem}
+        onPress={() => handleSupplierSelect(item)}
+        activeOpacity={0.7}
+      >
+        <View style={styles.supplierInfo}>
+          <Text style={styles.supplierName} numberOfLines={1}>
+            {displayName}
           </Text>
-        )}
-      </View>
-      <MaterialCommunityIcons name="chevron-right" size={20} color="#666" />
-    </TouchableOpacity>
-  );
+        </View>
+        <MaterialCommunityIcons
+          name="chevron-right"
+          size={18}
+          color="#9ca3af"
+        />
+      </TouchableOpacity>
+    );
+  };
 
   return (
     <View style={styles.container}>
       <TextInput
         ref={inputRef}
         style={styles.input}
-        value={value}
+        value={searchText}
         onChangeText={handleInputChange}
         onFocus={handleInputFocus}
         onBlur={handleInputBlur}
         placeholder={placeholder}
-        placeholderTextColor="#8a94a6"
+        placeholderTextColor="#666666"
       />
 
-      {showDropdown && filteredSuppliers.length > 0 && (
-        <Modal
-          visible={showDropdown}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setShowDropdown(false)}
-        >
-          <TouchableOpacity
-            style={styles.modalOverlay}
-            activeOpacity={1}
-            onPress={() => setShowDropdown(false)}
-          >
-            <View style={styles.dropdownContainer}>
-              <FlatList
-                data={filteredSuppliers}
-                renderItem={renderSupplierItem}
-                keyExtractor={item => item.id.toString()}
-                showsVerticalScrollIndicator={false}
-                nestedScrollEnabled={true}
-              />
+      {showDropdown && (
+        <View style={styles.dropdownAbsolute}>
+          {(() => {
+            console.log('🔍 SupplierSelector: Rendering dropdown with state:', {
+              loading,
+              error,
+              suppliersCount: suppliers?.length || 0,
+              filteredSuppliersCount: filteredSuppliers?.length || 0,
+              showDropdown,
+            });
+            return null;
+          })()}
+          {loading ? (
+            <Text style={styles.hint}>Loading suppliers...</Text>
+          ) : error ? (
+            <View style={styles.errorContainer}>
+              <Text style={styles.errorText} numberOfLines={3}>
+                {error}
+              </Text>
+              <Text style={styles.debugText}>
+                Check network connection and try again
+              </Text>
+              <TouchableOpacity
+                style={styles.retryButton}
+                onPress={() => {
+                  console.log(
+                    '🔄 SupplierSelector: Retrying supplier fetch...',
+                  );
+                  fetchAll('');
+                }}
+              >
+                <Text style={styles.retryButtonText}>Retry</Text>
+              </TouchableOpacity>
             </View>
-          </TouchableOpacity>
-        </Modal>
+          ) : !filteredSuppliers || filteredSuppliers.length === 0 ? (
+            <View style={styles.hintContainer}>
+              <Text style={styles.hint}>No suppliers found</Text>
+            </View>
+          ) : (
+            <ScrollView
+              style={{ maxHeight: 240 }}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={true}
+              nestedScrollEnabled
+            >
+              {(filteredSuppliers || []).map(item => (
+                <View key={item.id.toString()}>
+                  {renderSupplierItem({ item })}
+                </View>
+              ))}
+            </ScrollView>
+          )}
+        </View>
       )}
     </View>
   );
@@ -164,60 +333,109 @@ const styles = StyleSheet.create({
     zIndex: 1000,
   },
   input: {
-    borderWidth: 1,
+    borderWidth: 0.4,
     borderColor: '#e0e0e0',
     borderRadius: 8,
-    padding: 12,
-    fontSize: 16,
-    color: '#222',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    fontSize: scale(16),
+    color: '#333333',
     backgroundColor: '#f9f9f9',
+    fontFamily: 'Roboto-Medium',
   },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'flex-start',
-    alignItems: 'center',
-    paddingTop: 100,
-  },
-  dropdownContainer: {
+
+  dropdownAbsolute: {
+    position: 'absolute',
+    top: 60,
+    left: 0,
+    right: 0,
     backgroundColor: '#fff',
-    borderRadius: 12,
-    padding: 8,
-    width: '90%',
-    maxHeight: 400,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    zIndex: 9999,
     shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 4,
-    },
     shadowOpacity: 0.15,
-    shadowRadius: 12,
-    elevation: 8,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 16,
+    maxHeight: 200,
+    overflow: 'hidden',
+    // Ensure proper nested scrolling
+    flex: 1,
+    // Add a subtle border radius to the top corners only
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
+    borderBottomLeftRadius: 8,
+    borderBottomRightRadius: 8,
   },
   supplierItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
     borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
+    borderBottomColor: '#f3f4f6',
+    backgroundColor: '#fff',
+    minHeight: 56,
   },
   supplierInfo: {
     flex: 1,
   },
   supplierName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#222',
-    marginBottom: 2,
+    fontSize: scale(16),
+    color: '#1f2937',
+    fontFamily: 'Roboto-Medium',
+    lineHeight: scale(20),
   },
-  supplierPhone: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 2,
+
+  hint: {
+    padding: 16,
+    fontSize: scale(14),
+    color: '#6b7280',
+    textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
+    backgroundColor: '#f9fafb',
+    borderTopWidth: 1,
+    borderTopColor: '#f3f4f6',
   },
-  supplierAddress: {
-    fontSize: 12,
-    color: '#888',
+
+  errorText: {
+    padding: 12,
+    fontSize: scale(14),
+    color: '#dc3545',
+    textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
+  },
+
+  errorContainer: {
+    padding: 12,
+    alignItems: 'center',
+  },
+  retryButton: {
+    marginTop: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: '#dc3545',
+    borderRadius: 6,
+  },
+  retryButtonText: {
+    color: '#fff',
+    fontSize: scale(14),
+    fontFamily: 'Roboto-Medium',
+  },
+
+  debugText: {
+    fontSize: scale(12),
+    color: '#666666',
+    textAlign: 'center',
+    marginTop: 4,
+    fontFamily: 'Roboto-Medium',
+  },
+
+  hintContainer: {
+    padding: scale(8),
+    alignItems: 'center',
   },
 });
 

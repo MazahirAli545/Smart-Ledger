@@ -6,29 +6,30 @@ import {
   ScrollView,
   TouchableOpacity,
   Image,
-  // SafeAreaView,
+  SafeAreaView,
   Alert,
-  StatusBar,
   Dimensions,
+<<<<<<< Updated upstream
+=======
   Modal,
   RefreshControl,
   Platform,
+  StatusBar,
+>>>>>>> Stashed changes
 } from 'react-native';
-import {
-  DrawerActions,
-  useNavigation,
-  useFocusEffect,
-} from '@react-navigation/native';
+import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { unifiedApi } from '../../api/unifiedApiService';
 import { BASE_URL } from '../../api';
-import LinearGradient from 'react-native-linear-gradient';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
+<<<<<<< Updated upstream
 import { PieChart, BarChart } from 'react-native-chart-kit';
+=======
 import { AppStackParamList } from '../../types/navigation';
 import { useAuth } from '../../context/AuthContext';
 import { useAlert } from '../../context/AlertContext';
-import { SafeAreaView } from 'react-native-safe-area-context';
+// Removed SafeAreaView to allow full control over StatusBar area
 import axios from 'axios';
 import { getUserIdFromToken } from '../../utils/storage';
 import { useVouchers } from '../../context/VoucherContext';
@@ -36,6 +37,13 @@ import { useNotifications } from '../../context/NotificationContext';
 import PremiumBadge from '../../components/PremiumBadge';
 import DashboardShimmer from '../../components/DashboardShimmer';
 import { useScreenTracking } from '../../hooks/useScreenTracking';
+import { getStatusBarHeight } from 'react-native-status-bar-height';
+import { getStatusBarSpacerHeight } from '../../utils/statusBarManager';
+import {
+  HEADER_CONTENT_HEIGHT,
+  getSolidHeaderStyle,
+} from '../../utils/headerLayout';
+import StableStatusBar from '../../components/StableStatusBar';
 
 // Global cache for Dashboard with TTL (Time To Live)
 let globalDashboardCache: any = {
@@ -77,23 +85,38 @@ export const refreshDashboardData = async (
     if (!accessToken) return false;
 
     if (dataType === 'vouchers' || dataType === 'all') {
-      const vouchersResult = await fetch(`${BASE_URL}/vouchers`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }).then(res => res.json());
+      // Use unified API with caching
+      const vouchersResult = (await unifiedApi.getTransactions({
+        limit: 50,
+      })) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
 
-      if (vouchersResult?.data) {
-        globalDashboardCache.vouchers = vouchersResult.data;
+      const vouchersData = vouchersResult?.data || vouchersResult;
+      if (vouchersData) {
+        globalDashboardCache.vouchers = Array.isArray(vouchersData)
+          ? vouchersData
+          : vouchersData.data || [];
         globalDashboardCache.lastUpdated = Date.now();
       }
     }
 
     if (dataType === 'folders' || dataType === 'all') {
-      const foldersResult = await fetch(`${BASE_URL}/menus`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      }).then(res => res.json());
+      // Use unified API with caching
+      const foldersResult = (await unifiedApi.get('/menus')) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
 
-      if (foldersResult) {
-        globalDashboardCache.folders = foldersResult.filter(
+      const foldersData = foldersResult?.data || foldersResult;
+      if (foldersData) {
+        const foldersArray = Array.isArray(foldersData)
+          ? foldersData
+          : foldersData.data || [];
+        globalDashboardCache.folders = foldersArray.filter(
           (item: any) =>
             item.parentId === null &&
             item.isCustom === true &&
@@ -121,16 +144,15 @@ const isCacheValid = () => {
 };
 
 // import EntryForm from '../../components/EntryForm';
+>>>>>>> Stashed changes
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
-const PROFILE_ICON =
-  'https://img.icons8.com/ios-filled/100/4f8cff/user-male-circle.png';
-const TRANSACTION_ICON =
-  'https://img.icons8.com/ios-filled/100/1ecb81/transaction.png';
-const REPORT_ICON =
-  'https://img.icons8.com/ios-filled/100/fa7d09/combo-chart.png';
-const SETTINGS_ICON =
-  'https://img.icons8.com/ios-filled/100/9b5de5/settings.png';
+
+type RootStackParamList = {
+  Onboarding: undefined;
+  Dashboard: undefined;
+  // Add other screens as needed
+};
 
 interface UserData {
   id: number;
@@ -152,6 +174,12 @@ interface Transaction {
   status: 'Paid' | 'Pending' | 'Received';
 }
 
+<<<<<<< Updated upstream
+const Dashboard: React.FC = () => {
+  const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
+  const [userData, setUserData] = useState<UserData | null>(null);
+  const [loading, setLoading] = useState(true);
+=======
 const DEFAULT_TYPES = ['sell', 'receipt', 'payment', 'purchase'];
 
 // Map API icon field to MaterialCommunityIcons name
@@ -207,9 +235,34 @@ const getFolderIcon = (icon: string | undefined, title?: string) => {
   return mapped || icon || 'folder-outline';
 };
 
+// Return icon color by quick action category title
+const getActionIconColor = (title?: string) => {
+  const key = String(title || '').toLowerCase();
+  if (key === 'sell') return '#dc3545'; // red
+  if (key === 'purchase') return '#dc3545'; // red
+  if (key === 'receipt') return '#1ecb81'; // green
+  if (key === 'payment') return '#1ecb81'; // green
+  return '#1f2430'; // default
+};
+
+// Background tint for the circular icon bubble per category
+const getActionIconBg = (title?: string) => {
+  const key = String(title || '').toLowerCase();
+  if (key === 'sell' || key === 'purchase') return 'rgba(220, 53, 69, 0.12)'; // light red
+  if (key === 'receipt' || key === 'payment') return 'rgba(30, 203, 129, 0.12)'; // light green
+  return 'rgba(31, 36, 48, 0.08)';
+};
+
 const Dashboard: React.FC = () => {
   // Screen tracking hook
   useScreenTracking();
+
+  // Simple StatusBar configuration - let ForceStatusBar handle it
+  const preciseStatusBarHeight = getStatusBarHeight(true);
+  const effectiveStatusBarHeight = Math.max(
+    preciseStatusBarHeight || 0,
+    getStatusBarSpacerHeight(),
+  );
 
   const navigation = useNavigation<StackNavigationProp<AppStackParamList>>();
   const { isAuthenticated, logout } = useAuth();
@@ -221,14 +274,11 @@ const Dashboard: React.FC = () => {
     globalDashboardCache.userData,
   );
   const [loading, setLoading] = useState(!globalDashboardCacheChecked);
+>>>>>>> Stashed changes
   const [error, setError] = useState<string | null>(null);
-  const [folders, setFolders] = useState<any[]>(globalDashboardCache.folders);
-  const [fullUserData, setFullUserData] = useState<any>(
-    globalDashboardCache.fullUserData,
-  );
-  const [profileModalVisible, setProfileModalVisible] = useState(false);
-  const [profileLoading, setProfileLoading] = useState(false);
   const screenWidth = Dimensions.get('window').width;
+<<<<<<< Updated upstream
+=======
   const scrollRef = React.useRef<ScrollView>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [deleteModalVisible, setDeleteModalVisible] = useState(false);
@@ -253,7 +303,13 @@ const Dashboard: React.FC = () => {
   useEffect(() => {
     const fetchFCMToken = async () => {
       try {
-        const token = notificationService.getCurrentFCMToken();
+        // First ensure notifications are initialized
+        if (!notificationService.isServiceInitialized()) {
+          await notificationService.initializeNotifications();
+        }
+
+        // Get FCM token (this will fetch from Firebase if not cached)
+        const token = await notificationService.refreshFCMToken();
         setFcmToken(token);
 
         // Register FCM token with backend only if we don't have it cached
@@ -261,36 +317,24 @@ const Dashboard: React.FC = () => {
           try {
             const accessToken = await AsyncStorage.getItem('accessToken');
             if (accessToken) {
-              const response = await fetch(
-                `${BASE_URL}/notifications/register-token`,
-                {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${accessToken}`,
-                  },
-                  body: JSON.stringify({
-                    token: token,
-                    deviceType: Platform.OS,
-                  }),
-                },
+              const success = await notificationService.sendTokenToBackend(
+                token,
               );
-
-              if (!response.ok) {
-                throw new Error(`FCM registration failed: ${response.status}`);
+              if (success) {
+                // Cache the FCM token to avoid re-registration
+                globalDashboardCache.fcmToken = token;
+                console.log('✅ FCM token registered successfully');
+              } else {
+                console.warn('⚠️ FCM token registration failed');
               }
-
-              // Cache the FCM token to avoid re-registration
-              globalDashboardCache.fcmToken = token;
-              console.log('✅ FCM token registered successfully');
             }
           } catch (error) {
-            console.error('Error registering FCM token:', error);
+            console.warn('Error registering FCM token:', error);
             // Don't block the app for FCM registration failures
           }
         }
       } catch (error) {
-        console.error('Error fetching FCM token:', error);
+        console.warn('Error fetching FCM token:', error);
       }
     };
 
@@ -340,31 +384,7 @@ const Dashboard: React.FC = () => {
       }
     }, []), // Remove dependencies to prevent loops
   );
-
-  // Mock data for GST Summary
-  const gstData = [
-    {
-      name: 'CGST',
-      amount: 12000,
-      color: '#4285F4',
-      legendFontColor: '#7F7F7F',
-      legendFontSize: 12,
-    },
-    {
-      name: 'SGST',
-      amount: 12000,
-      color: '#0F9D58',
-      legendFontColor: '#7F7F7F',
-      legendFontSize: 12,
-    },
-    {
-      name: 'IGST',
-      amount: 8000,
-      color: '#F4B400',
-      legendFontColor: '#7F7F7F',
-      legendFontSize: 12,
-    },
-  ];
+>>>>>>> Stashed changes
 
   // Mock data for transactions
   const transactions: Transaction[] = [
@@ -402,6 +422,7 @@ const Dashboard: React.FC = () => {
     },
   ];
 
+<<<<<<< Updated upstream
   // Mock data for cash flow chart
   const cashFlowData = {
     labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'],
@@ -420,6 +441,10 @@ const Dashboard: React.FC = () => {
     legend: ['Income', 'Expenses'],
   };
 
+  useEffect(() => {
+    fetchUserData();
+  }, []);
+=======
   // Check for cached data on component mount
   const checkCachedData = async () => {
     // If we have valid cache, use it immediately but still refresh in background
@@ -429,36 +454,41 @@ const Dashboard: React.FC = () => {
       setFullUserData(globalDashboardCache.fullUserData);
       setLoading(false);
       globalDashboardCacheChecked = true;
+>>>>>>> Stashed changes
 
-      // Only fetch fresh data in background if cache is stale
-      if (!isCacheValid()) {
-        setTimeout(() => {
-          fetchDataInBackground();
-        }, 100);
-      }
-      return;
-    }
-
-    // If no valid cache, fetch all data
-    await fetchAllData();
-  };
-
-  // Fetch all data at once to reduce API calls
-  const fetchAllData = async () => {
+  const fetchUserData = async () => {
     try {
-      setLoading(true);
       const accessToken = await AsyncStorage.getItem('accessToken');
+      const mobileNumber =
+        (await AsyncStorage.getItem('userMobileNumber')) || '9844587867';
 
       if (!accessToken) {
         throw new Error('Authentication token not found');
       }
 
-      console.log(
-        '🔑 Dashboard: Using token:',
-        accessToken.substring(0, 20) + '...',
-      );
-      console.log('🌐 Dashboard: Making API calls to:', BASE_URL);
+      // This is a placeholder for the actual API call
+      // In a real app, you would make an API call to get user data
+      // For now, we'll use mock data
 
+<<<<<<< Updated upstream
+      // Simulating API call with timeout
+      setTimeout(() => {
+        // Mock user data - replace with actual API call in production
+        const mockUserData: UserData = {
+          id: 1,
+          businessName: 'Smart Business Solutions',
+          ownerName: 'John Doe',
+          mobileNumber: mobileNumber,
+          businessType: 'Private Limited',
+          businessSize: 'Small',
+          industry: 'Technology',
+          profileComplete: true,
+        };
+
+        setUserData(mockUserData);
+        setLoading(false);
+      }, 1000);
+=======
       // Add timeout wrapper to prevent API calls from hanging
       const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(
@@ -467,7 +497,7 @@ const Dashboard: React.FC = () => {
         );
       });
 
-      // Fetch data in parallel to reduce total time with timeout
+      // Use unified API's built-in parallel fetching with timeout
       const [
         userDataResult,
         foldersResult,
@@ -475,10 +505,10 @@ const Dashboard: React.FC = () => {
         fullUserDataResult,
       ] = (await Promise.race([
         Promise.all([
-          fetchUserData(accessToken),
-          fetchFolders(accessToken),
-          fetchVouchers(accessToken),
-          fetchFullUserData(accessToken),
+          unifiedApi.getUserProfile(),
+          unifiedApi.get('/menus'),
+          unifiedApi.getTransactions({ limit: 50 }),
+          unifiedApi.getUserProfile(), // Full user data same as profile
         ]),
         timeoutPromise,
       ])) as [any, any, any, any];
@@ -566,14 +596,25 @@ const Dashboard: React.FC = () => {
 
   const fetchFolders = async (accessToken: string): Promise<any[]> => {
     try {
-      const response = await axios.get(`${BASE_URL}/menus`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
+      // Use unified API with caching
+      const response = (await unifiedApi.get('/menus')) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
 
-      const userFolders = response.data.filter(
+      const rows = Array.isArray(response?.data)
+        ? response.data
+        : Array.isArray(response)
+        ? response
+        : [];
+
+      const userFolders = rows.filter(
         (item: any) =>
+          item &&
           item.parentId === null &&
           item.isCustom === true &&
+          typeof item.title === 'string' &&
           !DEFAULT_TYPES.includes(item.title.toLowerCase()) &&
           item.title.toLowerCase() !== 'add folder',
       );
@@ -581,39 +622,43 @@ const Dashboard: React.FC = () => {
       console.log('🔍 Dashboard - Filtered user folders:', userFolders);
       return userFolders;
     } catch (err) {
-      console.error('Error fetching folders:', err);
+      console.warn('Error fetching folders:', err);
       return [];
     }
   };
 
   const fetchVouchers = async (accessToken: string): Promise<any[]> => {
     try {
-      const res = await axios.get(`${BASE_URL}/vouchers`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-
-      if (res.data && Array.isArray(res.data.data)) {
-        return res.data.data;
-      }
-      return [];
+      // Use unified API with caching
+      const res = (await unifiedApi.getTransactions({ limit: 50 })) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
+      const rows = Array.isArray(res?.data)
+        ? res.data
+        : Array.isArray(res)
+        ? res
+        : [];
+      return rows;
     } catch (err) {
-      console.error('Error fetching vouchers:', err);
+      console.warn('Error fetching vouchers/transactions:', err);
       return [];
     }
   };
 
   const fetchFullUserData = async (accessToken: string): Promise<any> => {
     try {
-      const userId = await getUserIdFromToken();
-      if (!userId) return null;
-
-      const res = await axios.get(`${BASE_URL}/user/${userId}`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-
-      return res.data.data;
+      // Use unified API with caching
+      const res = (await unifiedApi.getUserProfile()) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
+      // Some controllers return the user entity directly
+      return res?.data ?? res ?? null;
     } catch (err) {
-      console.error('Error fetching full user data:', err);
+      console.warn('Error fetching full user data:', err);
       return null;
     }
   };
@@ -624,15 +669,47 @@ const Dashboard: React.FC = () => {
 
   // Compute top 10 latest transactions (by date desc)
   const recentTransactions = [...vouchers]
-    .filter(v => v && v.date) // Filter out vouchers without dates
+    .filter(v => v)
     .sort((a, b) => {
       try {
-        return new Date(b.date).getTime() - new Date(a.date).getTime();
+        const dA =
+          (a &&
+            (a.date || a.createdAt || a.voucherDate || a.transactionDate)) ||
+          0;
+        const dB =
+          (b &&
+            (b.date || b.createdAt || b.voucherDate || b.transactionDate)) ||
+          0;
+        return new Date(dB as any).getTime() - new Date(dA as any).getTime();
       } catch (error) {
         return 0; // If date parsing fails, keep original order
       }
     })
     .slice(0, 10);
+
+  // Helpers to safely read transaction fields from heterogeneous API rows
+  const getTxnDate = (t: any): string | null => {
+    const raw =
+      t?.date || t?.createdAt || t?.voucherDate || t?.transactionDate || null;
+    return raw ? new Date(raw).toISOString().split('T')[0] : null;
+  };
+  const getTxnParty = (t: any): string =>
+    t?.partyName ||
+    t?.party ||
+    t?.customerName ||
+    t?.supplierName ||
+    t?.name ||
+    'Unknown';
+  const getTxnAmount = (t: any): number =>
+    Number(t?.amount ?? t?.total ?? t?.netAmount ?? t?.grandTotal ?? 0);
+  const getTxnType = (t: any): string =>
+    (t?.type || t?.voucherType || 'Unknown').toString();
+  const getTxnStatus = (t: any): string => {
+    if (t?.status) return String(t.status);
+    if (t?.syncYN === 'Y') return 'complete';
+    if (t?.syncYN === 'N') return 'pending';
+    return 'Unknown';
+  };
 
   const handleLogout = async () => {
     showAlert({
@@ -705,9 +782,11 @@ const Dashboard: React.FC = () => {
         return;
       }
 
-      const response = await axios.delete(`${BASE_URL}/menus/${folderId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const response = (await unifiedApi.delete(`/menus/${folderId}`)) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
 
       if (response.status === 200 || response.status === 204) {
         // Update local state and cache only on successful deletion
@@ -719,71 +798,67 @@ const Dashboard: React.FC = () => {
       } else {
         throw new Error(`Delete failed with status: ${response.status}`);
       }
+>>>>>>> Stashed changes
     } catch (err: any) {
-      console.error('Error deleting folder:', err);
-      let errorMessage = 'Failed to delete folder.';
-
-      if (err.response?.status === 401) {
-        errorMessage = 'Authentication failed. Please login again.';
-      } else if (err.response?.status === 403) {
-        errorMessage = 'You do not have permission to delete this folder.';
-      } else if (err.response?.status === 404) {
-        errorMessage = 'Folder not found. It may have been already deleted.';
-      } else if (err.message) {
-        errorMessage = `Delete failed: ${err.message}`;
-      }
-
-      showAlert({
-        title: 'Error',
-        message: errorMessage,
-        type: 'error',
-        confirmText: 'OK',
-      });
+      console.error('Error fetching user data:', err);
+      setError(err.message || 'Failed to load user data');
+      setLoading(false);
     }
   };
 
-  const showDeleteModal = (folder: any) => {
-    setFolderToDelete(folder);
-    setDeleteModalVisible(true);
+  const handleLogout = async () => {
+    Alert.alert('Logout', 'Are you sure you want to logout?', [
+      {
+        text: 'Cancel',
+        style: 'cancel',
+      },
+      {
+        text: 'Logout',
+        onPress: async () => {
+          try {
+            // Clear all stored tokens and data
+            await AsyncStorage.multiRemove([
+              'accessToken',
+              'refreshToken',
+              'userMobileNumber',
+            ]);
+
+            // Navigate back to onboarding screen
+            navigation.reset({
+              index: 0,
+              routes: [{ name: 'Onboarding' }],
+            });
+          } catch (err) {
+            console.error('Error during logout:', err);
+            Alert.alert('Error', 'Failed to logout. Please try again.');
+          }
+        },
+      },
+    ]);
   };
 
-  const hideDeleteModal = () => {
-    setDeleteModalVisible(false);
-    setFolderToDelete(null);
+  const formatDate = (dateString: string) => {
+    const date = new Date(dateString);
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
+      2,
+      '0',
+    )}-${String(date.getDate()).padStart(2, '0')}`;
   };
 
-  const confirmDeleteFolder = async () => {
-    if (!folderToDelete || !folderToDelete.id) {
-      showAlert({
-        title: 'Error',
-        message: 'Invalid folder selected for deletion.',
-        type: 'error',
-        confirmText: 'OK',
-      });
-      hideDeleteModal();
-      return;
-    }
-
-    try {
-      await handleDeleteFolder(folderToDelete.id);
-      hideDeleteModal();
-    } catch (error) {
-      console.error('Error in confirmDeleteFolder:', error);
-      // Error is already handled in handleDeleteFolder
-    }
+  const formatCurrency = (amount: number) => {
+    return `₹${amount.toLocaleString('en-IN')}`;
   };
-
-  if (!isAuthenticated) return null;
 
   if (loading) {
-    return <DashboardShimmer />;
-  }
-
-  // Show error state with retry option
-  if (error) {
     return (
-      <SafeAreaView style={styles.safeArea}>
+<<<<<<< Updated upstream
+      <SafeAreaView style={styles.loadingContainer}>
         <StatusBar barStyle="dark-content" backgroundColor="#f6fafc" />
+        <Image source={LOGO} style={styles.logo} />
+        <Text style={styles.loadingText}>Loading...</Text>
+      </SafeAreaView>
+=======
+      <View style={styles.safeArea}>
         <View style={styles.errorContainer}>
           <MaterialCommunityIcons
             name="alert-circle"
@@ -803,91 +878,20 @@ const Dashboard: React.FC = () => {
             <Text style={styles.retryButtonText}>Try Again</Text>
           </TouchableOpacity>
         </View>
-      </SafeAreaView>
+      </View>
+>>>>>>> Stashed changes
     );
   }
 
-  // Plan hierarchy for comparison (only free and premium)
-  const PLAN_HIERARCHY = {
-    free: 0,
-    premium: 1,
-  };
-
-  // Utility to check if a plan level is accessible to the user
-  const isPlanAccessible = (userPlan: string, featurePlan: string): boolean => {
-    const userLevel =
-      PLAN_HIERARCHY[userPlan as keyof typeof PLAN_HIERARCHY] ?? 0;
-    const featureLevel =
-      PLAN_HIERARCHY[featurePlan as keyof typeof PLAN_HIERARCHY] ?? 0;
-    return userLevel >= featureLevel;
-  };
-
-  // Static quick actions with plan types (only free and premium)
-  const staticActions = [
-    {
-      title: 'Sell',
-      icon: 'cart-plus',
-      screen: 'Invoice',
-      planType: 'free',
-    },
-    { title: 'Receipt', icon: 'receipt', screen: 'Receipt', planType: 'free' },
-    {
-      title: 'Payment',
-      icon: 'currency-inr',
-      screen: 'Payment',
-      planType: 'free', // Based on API response - Payment is free
-    },
-    {
-      title: 'Purchase',
-      icon: 'cart-outline',
-      screen: 'Purchase',
-      planType: 'free', // Based on API response - Purchase is free
-    },
-  ];
-
-  // Get user's plan type
-  const userPlan = fullUserData?.planType || 'free';
-
-  // Show all static actions with plan badges (for visibility)
-  const allStaticActions = staticActions;
-
-  // Dynamic quick actions - show all folders
-  const dynamicActions = [...folders]
-    .filter(
-      f =>
-        f.parentId === null && // ✅ Changed from 28 to null to match AddFolderScreen
-        f.isCustom === true && // ✅ Only show custom user folders
-        f.isVisible &&
-        !['sell', 'receipt', 'payment', 'purchase', 'add folder'].includes(
-          f.title?.toLowerCase(),
-        ),
-    )
-    .sort((a, b) => Number(a.id) - Number(b.id));
-  const visibleDynamic = dynamicActions.slice(0, 2);
-  const overflowDynamic = dynamicActions.slice(2);
-  const quickActions = [...allStaticActions, ...visibleDynamic];
-
-  // Removed console.log to prevent render loops
-
   return (
+<<<<<<< Updated upstream
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="dark-content" backgroundColor="#f6fafc" />
-      <ScrollView
-        ref={scrollRef}
-        contentContainerStyle={styles.scrollContainer}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-        }
-      >
-        {/* Demo: EntryForm at the top of Dashboard */}
-
+      <ScrollView contentContainerStyle={styles.scrollContainer}>
         {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
-            <TouchableOpacity
-              style={styles.menuButton}
-              onPress={() => navigation.dispatch(DrawerActions.openDrawer())}
-            >
+            <TouchableOpacity style={styles.menuButton}>
               <MaterialCommunityIcons name="menu" size={24} color="#222" />
             </TouchableOpacity>
             <Text style={styles.headerTitle}>Smart Ledger</Text>
@@ -916,40 +920,54 @@ const Dashboard: React.FC = () => {
           <View style={styles.profileInfo}>
             <Image source={{ uri: PROFILE_ICON }} style={styles.profileIcon} />
             <View style={styles.profileDetails}>
-              {fullUserData?.ownerName ? (
-                <Text style={styles.profileName}>{fullUserData.ownerName}</Text>
-              ) : null}
-              {fullUserData?.mobileNumber ? (
-                <Text style={styles.profilePhone}>
-                  {fullUserData.mobileNumber}
-                </Text>
-              ) : null}
-              {fullUserData?.businessType ? (
-                <Text style={styles.profileBusiness}>
-                  {fullUserData.businessType}
-                </Text>
-              ) : null}
-              {/* Welcome message for new users with default values */}
-              {fullUserData?.ownerName === 'User' &&
-                fullUserData?.businessName === 'My Business' && (
-                  <Text style={styles.welcomeMessage}>
-                    🎉 Welcome! Click "View Profile" to customize your details
-                  </Text>
-                )}
+              <Text style={styles.profileName}>
+                {userData?.ownerName || 'User'}
+              </Text>
+              <Text style={styles.profilePhone}>
+                {userData?.mobileNumber || ''}
+              </Text>
+              <Text style={styles.profileBusiness}>
+                {userData?.businessType || 'Business'}
+              </Text>
             </View>
           </View>
-          <TouchableOpacity
-            style={styles.profileButton}
-            onPress={() => {
-              if (fullUserData) {
-                navigation.navigate('ProfileScreen', { user: fullUserData });
-              }
-            }}
-            disabled={!fullUserData}
-          >
-            <Text style={styles.profileButtonText}>View Profile</Text>
+          <TouchableOpacity style={styles.viewProfileButton}>
+            <Text style={styles.viewProfileText}>View Profile</Text>
           </TouchableOpacity>
         </LinearGradient>
+
+        {/* Today's Sales and Pending */}
+=======
+    <View style={styles.safeArea}>
+      <StableStatusBar
+        backgroundColor="#4f8cff"
+        barStyle="light-content"
+        translucent={false}
+        animated={true}
+      />
+      {/* Fixed Header */}
+      <View
+        style={[styles.header, getSolidHeaderStyle(effectiveStatusBarHeight)]}
+      >
+        <View style={{ height: HEADER_CONTENT_HEIGHT }} />
+        <TouchableOpacity
+          style={styles.menuButton}
+          onPress={() => navigation.dispatch(DrawerActions.openDrawer())}
+        >
+          <MaterialCommunityIcons name="menu" size={25} color="#fff" />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>Dashboard</Text>
+      </View>
+      <ScrollView
+        ref={scrollRef}
+        contentContainerStyle={styles.scrollContainer}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+        }
+      >
+        {/* Demo: EntryForm at the top of Dashboard */}
+
+        {/* Profile Card removed as requested */}
 
         {/* Profile Modal */}
         <Modal
@@ -978,80 +996,190 @@ const Dashboard: React.FC = () => {
               <Text
                 style={{
                   fontSize: 22,
-                  fontWeight: 'bold',
                   marginBottom: 12,
                   color: '#222',
+                  fontFamily: 'Roboto-Medium',
                 }}
               >
                 Profile Details
               </Text>
               {profileLoading || !fullUserData ? (
-                <Text style={{ color: '#888', fontSize: 16 }}>Loading...</Text>
+                <Text
+                  style={{
+                    color: '#888',
+                    fontSize: 16,
+                    fontFamily: 'Roboto-Medium',
+                  }}
+                >
+                  Loading...
+                </Text>
               ) : (
                 <ScrollView style={{ maxHeight: 400 }}>
                   <Text
                     style={{
-                      fontWeight: 'bold',
                       fontSize: 18,
                       marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
                     }}
                   >
                     {fullUserData.ownerName}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     {fullUserData.mobileNumber}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     {fullUserData.businessName}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     Business Type: {fullUserData.businessType}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     GST Number: {fullUserData.gstNumber}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     Business Size: {fullUserData.businessSize}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     Industry: {fullUserData.industry || '-'}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     Monthly Transaction Volume:{' '}
                     {fullUserData.monthlyTransactionVolume || '-'}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     Current Accounting Software:{' '}
                     {fullUserData.currentAccountingSoftware || '-'}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     Team Size: {fullUserData.teamSize || '-'}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     Preferred Language: {fullUserData.preferredLanguage || '-'}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     Features:{' '}
                     {Array.isArray(fullUserData.features)
                       ? fullUserData.features.join(', ')
                       : '-'}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     Bank Name: {fullUserData.bankName || '-'}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     Account Number: {fullUserData.accountNumber || '-'}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     IFSC Code: {fullUserData.ifscCode || '-'}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     Primary Goal: {fullUserData.primaryGoal || '-'}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     Current Challenges: {fullUserData.currentChallenges || '-'}
                   </Text>
-                  <Text style={{ color: '#666', marginBottom: 6 }}>
+                  <Text
+                    style={{
+                      color: '#666',
+                      marginBottom: 6,
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
                     Profile Complete:{' '}
                     {fullUserData.profileComplete ? 'Yes' : 'No'}
                   </Text>
@@ -1069,7 +1197,11 @@ const Dashboard: React.FC = () => {
                 onPress={() => setProfileModalVisible(false)}
               >
                 <Text
-                  style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}
+                  style={{
+                    color: '#fff',
+                    fontSize: 16,
+                    fontFamily: 'Roboto-Medium',
+                  }}
                 >
                   Close
                 </Text>
@@ -1079,13 +1211,12 @@ const Dashboard: React.FC = () => {
         </Modal>
 
         {/* Stats Section */}
+>>>>>>> Stashed changes
         <View style={styles.statsContainer}>
           <View style={styles.statCard}>
-            <Text style={styles.statLabel}>Today's Sync</Text>
+            <Text style={styles.statLabel}>Today's Sales</Text>
             <View style={styles.statValueContainer}>
-              <Text style={styles.statValue}>
-                {syncCount.toLocaleString('en-IN')}
-              </Text>
+              <Text style={styles.statValue}>₹45,230</Text>
               <MaterialCommunityIcons
                 name="trending-up"
                 size={20}
@@ -1098,7 +1229,7 @@ const Dashboard: React.FC = () => {
             <Text style={styles.statLabel}>Pending</Text>
             <View style={styles.statValueContainer}>
               <Text style={[styles.statValue, { color: '#F4B400' }]}>
-                {pendingCount.toLocaleString('en-IN')}
+                ₹12,450
               </Text>
               <MaterialCommunityIcons
                 name="trending-down"
@@ -1111,158 +1242,37 @@ const Dashboard: React.FC = () => {
 
         {/* Quick Actions */}
         <View style={styles.quickActionsCard}>
-          <View
-            style={{
-              flexDirection: 'row',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-            }}
-          >
-            <Text style={styles.sectionTitle}>Quick Actions</Text>
-            {overflowDynamic.length > 0 && (
-              <TouchableOpacity
-                style={{
-                  backgroundColor: '#e6f0ff',
-                  borderRadius: 20,
-                  paddingHorizontal: 18,
-                  paddingVertical: 4,
-                  marginLeft: 8,
-                }}
-                onPress={() =>
-                  navigation.navigate('AllQuickActionsScreen', {
-                    actions: overflowDynamic,
-                  })
-                }
-              >
-                <Text
-                  style={{ color: '#4f8cff', fontWeight: 'bold', fontSize: 15 }}
-                >
-                  More
-                </Text>
-              </TouchableOpacity>
-            )}
-          </View>
-          <View
-            style={{
-              flexDirection: 'row',
-              flexWrap: 'wrap',
-              justifyContent: 'space-between',
-              alignItems: 'flex-start',
-              padding: 0,
-              margin: 0,
-              height:
-                quickActions.length <= 2
-                  ? 100 + 16
-                  : quickActions.length <= 4
-                  ? 2 * 100 + 16
-                  : 3 * 100 + 2 * 16, // Dynamic height based on number of actions
-            }}
-          >
-            {quickActions.map((action, idx) => {
-              const isUserFolder = !action.screen;
-              return (
-                <View
-                  key={action.title || action.id}
-                  style={{
-                    position: 'relative',
-                    width: '48%',
-                    height: 100,
-                    marginBottom: 16,
-                  }}
-                >
-                  <TouchableOpacity
-                    style={{
-                      flex: 1,
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      flexDirection: 'column',
-                      height: '100%',
-                      paddingVertical: 10,
-                      opacity: isPlanAccessible(
-                        userPlan,
-                        action.planType || 'free',
-                      )
-                        ? 1
-                        : 0.6,
-                    }}
-                    onPress={() => {
-                      console.log('Action pressed:', action);
-                      if (action.screen) {
-                        console.log('Navigating to screen:', action.screen);
-                        navigation.navigate(action.screen);
-                      } else {
-                        console.log('Navigating to folder:', action);
-                        navigation.navigate('FolderScreen', { folder: action });
-                      }
-                    }}
-                    activeOpacity={0.7}
-                    disabled={
-                      !isPlanAccessible(userPlan, action.planType || 'free')
-                    }
-                  >
-                    <MaterialCommunityIcons
-                      name={getFolderIcon(action.icon, action.title)}
-                      size={28}
-                      color="#222"
-                      style={{ marginBottom: 8 }}
-                    />
-                    <Text style={styles.actionText}>{action.title}</Text>
-                    {/* Plan badge for non-free actions only - but not for user-created custom folders */}
-                    {action.planType &&
-                      action.planType !== 'free' &&
-                      !action.isCustom && (
-                        <PremiumBadge
-                          size="small"
-                          text={
-                            action.planType.charAt(0).toUpperCase() +
-                            action.planType.slice(1)
-                          }
-                          disabled={
-                            !isPlanAccessible(
-                              userPlan,
-                              action.planType || 'free',
-                            )
-                          }
-                        />
-                      )}
-                  </TouchableOpacity>
-                  {/* Delete button */}
-                  {isUserFolder && (
-                    <TouchableOpacity
-                      style={{
-                        position: 'absolute',
-                        top: 8,
-                        right: 8,
-                        zIndex: 2,
-                        backgroundColor: '#fff',
-                        borderRadius: 12,
-                        padding: 2,
-                        elevation: 2,
-                      }}
-                      onPress={() => showDeleteModal(action)}
-                    >
-                      <MaterialCommunityIcons
-                        name="trash-can-outline"
-                        size={18}
-                        color="#dc3545"
-                      />
-                    </TouchableOpacity>
-                  )}
-                </View>
-              );
-            })}
-            {/* Fill empty slots if less than 6 actions */}
-            {Array.from({ length: 6 - quickActions.length }).map((_, idx) => (
-              <View
-                key={`empty-${idx}`}
-                style={{
-                  width: '48%',
-                  height: 100,
-                  marginBottom: 16,
-                  backgroundColor: 'transparent',
-                }}
+<<<<<<< Updated upstream
+          <Text style={styles.sectionTitle}>Quick Actions</Text>
+          <View style={styles.quickActionsGrid}>
+            <TouchableOpacity style={styles.actionButton}>
+              <MaterialCommunityIcons
+                name="file-document-outline"
+                size={24}
+                color="#222"
               />
-            ))}
+              <Text style={styles.actionText}>Invoice</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.actionButton}>
+              <MaterialCommunityIcons name="receipt" size={24} color="#222" />
+              <Text style={styles.actionText}>Receipt</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.actionButton}>
+              <MaterialCommunityIcons
+                name="currency-inr"
+                size={24}
+                color="#222"
+              />
+              <Text style={styles.actionText}>Payment</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.actionButton}>
+              <MaterialCommunityIcons
+                name="cart-outline"
+                size={24}
+                color="#222"
+              />
+              <Text style={styles.actionText}>Purchase</Text>
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -1313,6 +1323,184 @@ const Dashboard: React.FC = () => {
               <Text style={styles.legendLabel}>IGST:</Text>
               <Text style={styles.legendValue}>₹8,000</Text>
             </View>
+=======
+          <View
+            style={{
+              flexDirection: 'row',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+            }}
+          >
+            <Text style={[styles.sectionTitle, { fontWeight: '600' }]}>
+              Quick Actions
+            </Text>
+            {overflowDynamic.length > 0 && (
+              <TouchableOpacity
+                style={{
+                  backgroundColor: '#e6f0ff',
+                  borderRadius: 20,
+                  paddingHorizontal: 18,
+                  paddingVertical: 4,
+                  marginLeft: 8,
+                }}
+                onPress={() =>
+                  navigation.navigate('AllQuickActionsScreen', {
+                    actions: overflowDynamic,
+                  })
+                }
+              >
+                <Text
+                  style={{
+                    color: '#4f8cff',
+                    fontSize: 15,
+                    fontFamily: 'Roboto-Medium',
+                  }}
+                >
+                  More
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          <View
+            style={{
+              height: 1,
+              backgroundColor: '#eef2f5',
+              marginTop: 10,
+              marginBottom: 14,
+            }}
+          />
+          <View
+            style={{
+              flexDirection: 'row',
+              flexWrap: 'wrap',
+              justifyContent: 'space-between',
+              alignItems: 'flex-start',
+              padding: 0,
+              margin: 0,
+            }}
+          >
+            {quickActions.map((action, idx) => {
+              const isUserFolder = !action.screen;
+              return (
+                <View
+                  key={action.title || action.id}
+                  style={{
+                    position: 'relative',
+                    width: '48%',
+                    height: 88,
+                    marginBottom: 16,
+                    backgroundColor: '#ffffff',
+                    borderRadius: 12,
+                    borderWidth: 1,
+                    borderColor: '#eef2f5',
+                    shadowColor: '#000',
+                    shadowOpacity: 0.03,
+                    shadowRadius: 6,
+                    shadowOffset: { width: 0, height: 2 },
+                    elevation: 1,
+                  }}
+                >
+                  <TouchableOpacity
+                    style={{
+                      flex: 1,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      flexDirection: 'column',
+                      height: '100%',
+                      paddingVertical: 8,
+                      opacity: isPlanAccessible(
+                        userPlan,
+                        action.planType || 'free',
+                      )
+                        ? 1
+                        : 0.6,
+                    }}
+                    onPress={() => {
+                      console.log('Action pressed:', action);
+                      if (action.screen) {
+                        console.log('Navigating to screen:', action.screen);
+                        navigation.navigate(action.screen);
+                      } else {
+                        console.log('Navigating to folder:', action);
+                        navigation.navigate('FolderScreen', { folder: action });
+                      }
+                    }}
+                    activeOpacity={0.7}
+                    disabled={
+                      !isPlanAccessible(userPlan, action.planType || 'free')
+                    }
+                  >
+                    <View
+                      style={{
+                        width: 28,
+                        height: 28,
+                        borderRadius: 14,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        backgroundColor: getActionIconBg(action.title),
+                        marginBottom: 6,
+                      }}
+                    >
+                      <MaterialCommunityIcons
+                        name={getFolderIcon(action.icon, action.title)}
+                        size={18}
+                        color={getActionIconColor(action.title)}
+                      />
+                    </View>
+                    <Text
+                      style={[
+                        styles.actionText,
+                        { color: '#000', fontWeight: '600' },
+                      ]}
+                    >
+                      {action.title}
+                    </Text>
+                    {/* Plan badge for non-free actions only - but not for user-created custom folders */}
+                    {action.planType &&
+                      action.planType !== 'free' &&
+                      !action.isCustom && (
+                        <PremiumBadge
+                          size="small"
+                          text={
+                            action.planType.charAt(0).toUpperCase() +
+                            action.planType.slice(1)
+                          }
+                          disabled={
+                            !isPlanAccessible(
+                              userPlan,
+                              action.planType || 'free',
+                            )
+                          }
+                        />
+                      )}
+                  </TouchableOpacity>
+                  {/* Delete button */}
+                  {isUserFolder && (
+                    <TouchableOpacity
+                      style={{
+                        position: 'absolute',
+                        top: 8,
+                        right: 8,
+                        zIndex: 2,
+                        backgroundColor: '#fff',
+                        borderRadius: 12,
+                        padding: 2,
+                        elevation: 2,
+                      }}
+                      onPress={() => showDeleteModal(action)}
+                    >
+                      <MaterialCommunityIcons
+                        name="trash-can-outline"
+                        size={18}
+                        color="#dc3545"
+                      />
+                    </TouchableOpacity>
+                  )}
+                </View>
+              );
+            })}
+            {/* Removed empty placeholders to avoid extra bottom space */}
+>>>>>>> Stashed changes
           </View>
         </View>
 
@@ -1320,6 +1508,14 @@ const Dashboard: React.FC = () => {
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Recent Transactions</Text>
 
+<<<<<<< Updated upstream
+          {transactions.map(transaction => (
+            <View key={transaction.id} style={styles.transactionItem}>
+              <View style={styles.transactionLeft}>
+                <View style={styles.transactionTypeContainer}>
+                  <Text style={styles.transactionTypeText}>
+                    {transaction.type}
+=======
           <View style={{ height: 350 }}>
             <ScrollView
               showsVerticalScrollIndicator={false}
@@ -1328,7 +1524,7 @@ const Dashboard: React.FC = () => {
             >
               {recentTransactions.length > 0 ? (
                 recentTransactions.map((transaction, idx) => (
-                  <View key={transaction.id}>
+                  <View key={String(transaction.id ?? idx)}>
                     <View
                       style={[styles.transactionItem, { paddingVertical: 14 }]}
                     >
@@ -1336,52 +1532,41 @@ const Dashboard: React.FC = () => {
                       <View style={styles.transactionLeft}>
                         <View style={styles.transactionTypeContainer}>
                           <Text style={styles.transactionTypeText}>
-                            {(transaction.type === 'Invoice'
+                            {(getTxnType(transaction) === 'Invoice'
                               ? 'Sell'
-                              : transaction.type || 'Unknown'
+                              : getTxnType(transaction)
                             )
                               .charAt(0)
                               .toUpperCase() +
-                              (transaction.type === 'Invoice'
+                              (getTxnType(transaction) === 'Invoice'
                                 ? 'Sell'
-                                : transaction.type || 'Unknown'
+                                : getTxnType(transaction)
                               ).slice(1)}
                           </Text>
                         </View>
                         <View style={styles.transactionDetails}>
                           <Text style={styles.transactionParty}>
-                            {transaction.partyName ||
-                              transaction.party ||
-                              'Unknown'}
+                            {getTxnParty(transaction)}
                           </Text>
                           <Text style={styles.transactionDate}>
-                            {transaction.date
-                              ? new Date(transaction.date)
-                                  .toISOString()
-                                  .split('T')[0]
-                              : 'No date'}
+                            {getTxnDate(transaction) || 'No date'}
                           </Text>
                         </View>
                       </View>
                       <View style={styles.transactionRight}>
                         <Text
-                          style={[
-                            styles.transactionAmount,
-                            { fontSize: 17, fontWeight: 'bold' },
-                          ]}
+                          style={[styles.transactionAmount, { fontSize: 17 }]}
                         >
                           {' '}
                           {/* larger amount */}₹
-                          {Number(transaction.amount || 0).toLocaleString(
-                            'en-IN',
-                          )}
+                          {getTxnAmount(transaction).toLocaleString('en-IN')}
                         </Text>
                         <View
                           style={[
                             styles.statusBadge,
-                            (transaction.status || '') === 'complete'
+                            getTxnStatus(transaction) === 'complete'
                               ? { backgroundColor: '#1ecb81', marginLeft: 8 }
-                              : (transaction.status || '') === 'draft'
+                              : getTxnStatus(transaction) === 'draft'
                               ? { backgroundColor: '#F4B400', marginLeft: 8 }
                               : { backgroundColor: '#888', marginLeft: 8 },
                           ]}
@@ -1389,14 +1574,12 @@ const Dashboard: React.FC = () => {
                           <Text
                             style={{
                               color: '#fff',
-                              fontWeight: 'bold',
                               fontSize: 13,
+                              fontFamily: 'Roboto-Medium',
                             }}
                           >
-                            {(transaction.status || 'Unknown')
-                              .charAt(0)
-                              .toUpperCase() +
-                              (transaction.status || 'Unknown').slice(1)}
+                            {getTxnStatus(transaction).charAt(0).toUpperCase() +
+                              getTxnStatus(transaction).slice(1)}
                           </Text>
                         </View>
                       </View>
@@ -1428,55 +1611,41 @@ const Dashboard: React.FC = () => {
                   <Text style={styles.emptyTransactionsSubtitle}>
                     Your recent transactions will appear here once you start
                     creating invoices, receipts, payments, or purchases.
+>>>>>>> Stashed changes
                   </Text>
                 </View>
-              )}
-            </ScrollView>
-          </View>
-        </View>
-
-        {/* Cash Flow Overview */}
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>Cash Flow Overview</Text>
-          <Text style={styles.sectionSubtitle}>
-            Income vs Expenses (Last 6 months)
-          </Text>
-
-          <BarChart
-            data={cashFlowData}
-            width={screenWidth - 64}
-            height={220}
-            yAxisLabel="₹"
-            yAxisSuffix=""
-            chartConfig={{
-              backgroundColor: '#ffffff',
-              backgroundGradientFrom: '#ffffff',
-              backgroundGradientTo: '#ffffff',
-              decimalPlaces: 0,
-              color: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
-              labelColor: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
-              style: {
-                borderRadius: 16,
-              },
-              barPercentage: 0.7,
-              propsForBackgroundLines: {
-                strokeDasharray: '5, 5',
-                stroke: '#e3e3e3',
-              },
-            }}
-            fromZero
-            showBarTops={false}
-            showValuesOnTopOfBars={false}
-            withInnerLines={true}
-            style={{
-              marginVertical: 8,
-              borderRadius: 16,
-            }}
-          />
+                <View style={styles.transactionDetails}>
+                  <Text style={styles.transactionParty}>
+                    {transaction.party}
+                  </Text>
+                  <Text style={styles.transactionDate}>
+                    {formatDate(transaction.date)}
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.transactionRight}>
+                <Text style={styles.transactionAmount}>
+                  {formatCurrency(transaction.amount)}
+                </Text>
+                <View
+                  style={[
+                    styles.statusBadge,
+                    transaction.status === 'Paid'
+                      ? styles.paidBadge
+                      : transaction.status === 'Received'
+                      ? styles.receivedBadge
+                      : styles.pendingBadge,
+                  ]}
+                >
+                  <Text style={styles.statusText}>{transaction.status}</Text>
+                </View>
+              </View>
+            </View>
+          ))}
         </View>
 
         {/* Customer & Suppliers Tabs */}
-        {/* <View style={styles.tabsContainer}>
+        <View style={styles.tabsContainer}>
           <TouchableOpacity style={styles.tab}>
             <MaterialCommunityIcons
               name="account-group-outline"
@@ -1493,6 +1662,16 @@ const Dashboard: React.FC = () => {
             />
             <Text style={styles.tabText}>Suppliers</Text>
           </TouchableOpacity>
+<<<<<<< Updated upstream
+        </View>
+
+        {/* Logout Button */}
+        <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
+          <Text style={styles.logoutText}>Logout</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    </SafeAreaView>
+=======
         </View> */}
       </ScrollView>
       {/* Custom Delete Modal */}
@@ -1533,9 +1712,9 @@ const Dashboard: React.FC = () => {
             <Text
               style={{
                 fontSize: 20,
-                fontWeight: 'bold',
                 color: '#222',
                 marginBottom: 10,
+                fontFamily: 'Roboto-Medium',
               }}
             >
               Delete Folder
@@ -1546,10 +1725,16 @@ const Dashboard: React.FC = () => {
                 color: '#444',
                 textAlign: 'center',
                 marginBottom: 24,
+                fontFamily: 'Roboto-Medium',
               }}
             >
               Are you sure you want to delete the folder
-              <Text style={{ fontWeight: 'bold', color: '#dc3545' }}>
+              <Text
+                style={{
+                  color: '#dc3545',
+                  fontFamily: 'Roboto-Medium',
+                }}
+              >
                 {' '}
                 "{folderToDelete?.title || 'Unknown'}"
               </Text>
@@ -1577,7 +1762,11 @@ const Dashboard: React.FC = () => {
                 onPress={hideDeleteModal}
               >
                 <Text
-                  style={{ color: '#444', fontWeight: 'bold', fontSize: 16 }}
+                  style={{
+                    color: '#444',
+                    fontSize: 16,
+                    fontFamily: 'Roboto-Medium',
+                  }}
                 >
                   Cancel
                 </Text>
@@ -1592,7 +1781,11 @@ const Dashboard: React.FC = () => {
                 onPress={confirmDeleteFolder}
               >
                 <Text
-                  style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}
+                  style={{
+                    color: '#fff',
+                    fontSize: 16,
+                    fontFamily: 'Roboto-Medium',
+                  }}
                 >
                   Delete
                 </Text>
@@ -1601,7 +1794,8 @@ const Dashboard: React.FC = () => {
           </View>
         </View>
       </Modal>
-    </SafeAreaView>
+    </View>
+>>>>>>> Stashed changes
   );
 };
 
@@ -1614,29 +1808,40 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     paddingBottom: 24,
   },
-
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
-    backgroundColor: '#fff',
+    backgroundColor: '#f6fafc',
   },
-  headerLeft: {
+  logo: {
+    width: 80,
+    height: 80,
+    marginBottom: 16,
+  },
+  loadingText: {
+    fontSize: 16,
+    color: '#4f8cff',
+    fontWeight: '600',
+  },
+  header: {
+    backgroundColor: '#4f8cff',
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'flex-start',
+    paddingHorizontal: 12,
+    borderBottomWidth: 0,
+    borderBottomColor: 'transparent',
   },
   menuButton: {
-    padding: 8,
+    padding: 10,
+    marginRight: 6,
   },
   headerTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#222',
-    marginLeft: 12,
+    fontSize: 19,
+    fontWeight: '800',
+    color: '#fff',
+    fontFamily: 'Roboto-Medium',
   },
   headerRight: {
     flexDirection: 'row',
@@ -1646,62 +1851,78 @@ const styles = StyleSheet.create({
     padding: 8,
   },
   profileCard: {
-    marginTop: 10,
     marginHorizontal: 16,
     borderRadius: 16,
     padding: 16,
     marginBottom: 24,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#eef2f5',
+    shadowColor: '#000',
+    shadowOpacity: 0.05,
+    shadowRadius: 5,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
   },
   profileInfo: {
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 16,
   },
-  profileIcon: {
+  profileIconContainer: {
     width: 60,
     height: 60,
     borderRadius: 30,
     marginRight: 16,
-    tintColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#eaf2ff',
   },
   profileDetails: {
     flex: 1,
   },
   profileName: {
     fontSize: 18,
-    fontWeight: 'bold',
-    color: '#fff',
+    color: '#222',
     marginBottom: 2,
+    fontFamily: 'Roboto-Medium',
   },
   profilePhone: {
     fontSize: 14,
-    color: '#fff',
-    opacity: 0.9,
+    color: '#4f8cff',
+    opacity: 1,
     marginBottom: 2,
+    fontFamily: 'Roboto-Medium',
   },
   profileBusiness: {
     fontSize: 14,
-    color: '#fff',
-    opacity: 0.9,
+    color: '#666',
+    opacity: 1,
+    fontFamily: 'Roboto-Medium',
   },
+<<<<<<< Updated upstream
+  viewProfileButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+=======
   welcomeMessage: {
     fontSize: 12,
-    color: '#fff',
-    opacity: 0.8,
-    fontStyle: 'italic',
+    color: '#666',
+    opacity: 1,
     marginTop: 4,
+    fontFamily: 'Roboto-Medium',
   },
   profileButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    backgroundColor: '#4f8cff',
+>>>>>>> Stashed changes
     paddingVertical: 8,
     paddingHorizontal: 16,
     borderRadius: 8,
     alignSelf: 'flex-start',
   },
-  profileButtonText: {
+  viewProfileText: {
     color: '#fff',
     fontSize: 14,
-    fontWeight: '600',
+    fontFamily: 'Roboto-Medium',
   },
   statsContainer: {
     flexDirection: 'row',
@@ -1723,8 +1944,10 @@ const styles = StyleSheet.create({
   },
   statLabel: {
     fontSize: 14,
-    color: '#666',
+    color: '#000',
     marginBottom: 8,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
   statValueContainer: {
     flexDirection: 'row',
@@ -1733,13 +1956,15 @@ const styles = StyleSheet.create({
   },
   statValue: {
     fontSize: 24,
-    fontWeight: 'bold',
     color: '#0F9D58',
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
   quickActionsCard: {
     backgroundColor: '#fff',
     borderRadius: 12,
     padding: 16,
+    paddingBottom: 0,
     marginHorizontal: 16,
     marginBottom: 16,
     shadowColor: '#000',
@@ -1750,14 +1975,16 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     fontSize: 18,
-    fontWeight: 'bold',
-    color: '#222',
+    color: '#000',
     marginBottom: 4,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
   sectionSubtitle: {
     fontSize: 14,
     color: '#666',
     marginBottom: 16,
+    fontFamily: 'Roboto-Medium',
   },
   chartContainer: {
     alignItems: 'center',
@@ -1783,11 +2010,12 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#666',
     marginRight: 4,
+    fontFamily: 'Roboto-Medium',
   },
   legendValue: {
     fontSize: 14,
-    fontWeight: 'bold',
     color: '#222',
+    fontFamily: 'Roboto-Medium',
   },
   quickActionsGrid: {
     flexDirection: 'row',
@@ -1806,9 +2034,9 @@ const styles = StyleSheet.create({
   },
   actionText: {
     fontSize: 14,
-    color: '#222',
+    color: '#000',
     marginTop: 8,
-    fontWeight: '500',
+    fontFamily: 'Roboto-Medium',
   },
   transactionItem: {
     flexDirection: 'row',
@@ -1831,20 +2059,23 @@ const styles = StyleSheet.create({
   transactionTypeText: {
     color: '#fff',
     fontSize: 12,
-    fontWeight: '500',
+    fontFamily: 'Roboto-Medium',
   },
   transactionDetails: {
     justifyContent: 'center',
   },
   transactionParty: {
     fontSize: 16,
-    fontWeight: '500',
-    color: '#222',
+    color: '#000',
     marginBottom: 2,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
   transactionDate: {
     fontSize: 12,
-    color: '#666',
+    color: '#000',
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
   transactionRight: {
     alignItems: 'flex-end',
@@ -1852,9 +2083,10 @@ const styles = StyleSheet.create({
   },
   transactionAmount: {
     fontSize: 16,
-    fontWeight: 'bold',
-    color: '#222',
+    color: '#000',
     marginBottom: 4,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
   statusBadge: {
     paddingVertical: 2,
@@ -1872,8 +2104,8 @@ const styles = StyleSheet.create({
   },
   statusText: {
     fontSize: 12,
-    fontWeight: '500',
     color: '#fff',
+    fontFamily: 'Roboto-Medium',
   },
   tabsContainer: {
     flexDirection: 'row',
@@ -1898,10 +2130,22 @@ const styles = StyleSheet.create({
   tabText: {
     fontSize: 14,
     color: '#222',
-    fontWeight: '500',
     marginLeft: 8,
+    fontFamily: 'Roboto-Medium',
   },
-
+  logoutButton: {
+    backgroundColor: '#f0f0f0',
+    borderRadius: 8,
+    padding: 12,
+    alignItems: 'center',
+    marginHorizontal: 16,
+    marginBottom: 16,
+  },
+  logoutText: {
+    fontSize: 14,
+    color: '#222',
+    fontWeight: '500',
+  },
   card: {
     backgroundColor: '#fff',
     borderRadius: 12,
@@ -1914,6 +2158,8 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 2,
   },
+<<<<<<< Updated upstream
+=======
   userFoldersSection: {
     marginTop: 24,
     marginBottom: 8,
@@ -1941,8 +2187,8 @@ const styles = StyleSheet.create({
     marginTop: 8,
     fontSize: 15,
     color: '#222',
-    fontWeight: '500',
     textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
   },
   folderListWrapper: {
     marginTop: 18,
@@ -1958,16 +2204,17 @@ const styles = StyleSheet.create({
   },
   emptyTransactionsTitle: {
     fontSize: 18,
-    fontWeight: 'bold',
     color: '#666',
     marginBottom: 8,
     textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
   },
   emptyTransactionsSubtitle: {
     fontSize: 14,
     color: '#999',
     textAlign: 'center',
     lineHeight: 20,
+    fontFamily: 'Roboto-Medium',
   },
   errorContainer: {
     flex: 1,
@@ -1981,9 +2228,9 @@ const styles = StyleSheet.create({
   },
   errorTitle: {
     fontSize: 20,
-    fontWeight: 'bold',
     color: '#dc3545',
     marginBottom: 10,
+    fontFamily: 'Roboto-Medium',
   },
   errorMessage: {
     fontSize: 16,
@@ -1991,6 +2238,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 25,
     lineHeight: 22,
+    fontFamily: 'Roboto-Medium',
   },
   retryButton: {
     backgroundColor: '#4f8cff',
@@ -2001,8 +2249,9 @@ const styles = StyleSheet.create({
   retryButtonText: {
     color: '#fff',
     fontSize: 16,
-    fontWeight: 'bold',
+    fontFamily: 'Roboto-Medium',
   },
+>>>>>>> Stashed changes
 });
 
 export default Dashboard;

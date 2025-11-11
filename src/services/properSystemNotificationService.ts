@@ -4,8 +4,9 @@ import notifee, {
   AndroidStyle,
 } from '@notifee/react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+
 import { Platform, PermissionsAndroid } from 'react-native';
-import { BASE_URL } from '../api';
+import { unifiedApi } from '../api/unifiedApiService';
 
 export interface NotificationData {
   title: string;
@@ -58,8 +59,24 @@ class ProperSystemNotificationService {
       return true;
     }
 
+    // Respect user's choice to never be asked again - check FIRST before any permission requests
+    const neverAsk = await AsyncStorage.getItem('notificationsNeverAsk');
+    if (neverAsk === 'true') {
+      console.log(
+        '⚠️ Notification permission previously denied – never asking again',
+      );
+      return false;
+    }
+
     try {
       console.log('🚀 Initializing proper system notifications...');
+
+      // Ensure user is signed in before prompting for permission or registering token
+      const accessToken = await AsyncStorage.getItem('accessToken');
+      if (!accessToken) {
+        console.log('⏭️ Skipping notification permission until after sign-in');
+        return false;
+      }
 
       // Check if Firebase is available
       if (!messaging) {
@@ -72,9 +89,23 @@ class ProperSystemNotificationService {
         await this.createNotificationChannel();
       }
 
-      // Request permission for iOS
+      // Do not short-circuit on NOT_DETERMINED; we'll request permission below
+      try {
+        const currentStatus = await messaging().hasPermission();
+        if (currentStatus === messaging.AuthorizationStatus.DENIED) {
+          console.log('⚠️ Notifications currently denied by user');
+          await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+          return false;
+        }
+      } catch {}
+
+      // Request permission for iOS (skip if previously granted)
       if (Platform.OS === 'ios') {
-        const authStatus = await messaging().requestPermission();
+        const grantedFlag = await AsyncStorage.getItem('notificationsGranted');
+        const authStatus =
+          grantedFlag === 'true'
+            ? messaging.AuthorizationStatus.AUTHORIZED
+            : await messaging().requestPermission();
         const enabled =
           authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
           authStatus === messaging.AuthorizationStatus.PROVISIONAL;
@@ -82,6 +113,8 @@ class ProperSystemNotificationService {
         console.log('📱 iOS permission status:', authStatus);
         if (!enabled) {
           console.log('❌ iOS notification permission denied');
+          // Set never ask flag if denied
+          await AsyncStorage.setItem('notificationsNeverAsk', 'true');
           return false;
         }
       }
@@ -107,19 +140,47 @@ class ProperSystemNotificationService {
               },
             );
 
+            if (granted === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN) {
+              console.log(
+                '❌ Android notification permission denied - never ask again',
+              );
+              await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+              return false;
+            }
             if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
               console.log('❌ Android notification permission denied');
+              // If user clicks Cancel (DENIED), also set flag to stop asking
+              await AsyncStorage.setItem('notificationsNeverAsk', 'true');
               return false;
             }
           }
         }
+        // Also request Firebase messaging permission to ensure tokens are issued
+        const grantedFlag = await AsyncStorage.getItem('notificationsGranted');
+        if (grantedFlag !== 'true') {
+          await messaging().requestPermission();
+        }
       }
 
       // Get FCM token
-      const token = await this.getFCMToken();
+      let token = await this.getFCMToken();
       if (!token) {
-        console.log('❌ Failed to get FCM token');
-        return false;
+        console.log('❌ Failed to get FCM token, checking stored token...');
+        // Don't return false immediately - try to register anyway if token exists in storage
+        const storedToken = await AsyncStorage.getItem('fcmToken');
+        if (storedToken) {
+          // Use stored token if available
+          console.log('📋 Using stored FCM token for registration');
+          token = storedToken;
+          this.fcmToken = token;
+          // Try to register stored token with backend
+          await this.sendTokenToBackend(token);
+        } else {
+          return false;
+        }
+      } else {
+        // Persist granted if we have a token
+        await AsyncStorage.setItem('notificationsGranted', 'true');
       }
 
       // Set up message handlers
@@ -169,6 +230,15 @@ class ProperSystemNotificationService {
    */
   public async getFCMToken(): Promise<string | null> {
     try {
+      // Check if user has declined and we should never ask again
+      const neverAsk = await AsyncStorage.getItem('notificationsNeverAsk');
+      if (neverAsk === 'true') {
+        console.log(
+          '⚠️ Notification permission declined - skipping token fetch',
+        );
+        return null;
+      }
+
       console.log('🔑 Getting FCM token...');
 
       // Check if we have permission first
@@ -217,27 +287,41 @@ class ProperSystemNotificationService {
         return;
       }
 
+      // Avoid duplicate registration if token hasn't changed
+      const lastRegistered = await AsyncStorage.getItem(
+        'lastRegisteredFcmToken',
+      );
+      if (lastRegistered === token) {
+        console.log('⏭️ Skipping backend registration; token unchanged');
+        return;
+      }
+
       console.log('📤 Sending FCM token to backend...');
-      const response = await fetch(`${BASE_URL}/user/fcm-token`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-          fcmToken: token,
-          platform: Platform.OS,
-          appVersion: '1.0.0',
-        }),
+      console.log('📤 Token (first 20 chars):', token.substring(0, 20) + '...');
+      console.log('📤 Device Type:', Platform.OS);
+      console.log('📤 API URL:', '/notifications/register-token');
+
+      // Use unified API
+      const response = await unifiedApi.post('/notifications/register-token', {
+        token: token,
+        deviceType: Platform.OS,
       });
 
-      if (response.ok) {
-        console.log('✅ FCM token sent to backend successfully');
+      console.log('📤 Response:', response);
+
+      if (response) {
+        console.log('✅ FCM token sent to backend successfully:', response);
+        await AsyncStorage.setItem('lastRegisteredFcmToken', token);
       } else {
-        console.log('❌ Failed to send FCM token to backend:', response.status);
+        console.error('❌ Failed to send FCM token to backend');
+        // Don't store lastRegisteredFcmToken if registration failed,
+        // so it will retry on next attempt
       }
     } catch (error) {
       console.error('❌ Error sending FCM token to backend:', error);
+      console.error('❌ Error details:', JSON.stringify(error));
+      // Don't store lastRegisteredFcmToken if registration failed,
+      // so it will retry on next attempt
     }
   }
 
@@ -254,6 +338,18 @@ class ProperSystemNotificationService {
       if (this.notificationSettings.enabled) {
         // Show as system notification using Notifee
         await this.showSystemNotification(remoteMessage);
+      }
+    });
+
+    // Handle FCM token refresh
+    messaging().onTokenRefresh(async token => {
+      try {
+        console.log('🔄 FCM token refreshed');
+        this.fcmToken = token;
+        await AsyncStorage.setItem('fcmToken', token);
+        await this.sendTokenToBackend(token);
+      } catch (error) {
+        console.error('❌ Error handling token refresh:', error);
       }
     });
 

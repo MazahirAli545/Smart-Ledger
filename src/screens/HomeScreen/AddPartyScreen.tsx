@@ -5,7 +5,6 @@ import {
   StyleSheet,
   TouchableOpacity,
   TextInput,
-  StatusBar,
   Dimensions,
   ActivityIndicator,
   Image,
@@ -19,14 +18,23 @@ import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { StackNavigationProp } from '@react-navigation/stack';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
+import { uiColors, uiFonts } from '../../config/uiSizing';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { AppStackParamList } from '../../types/navigation';
 import axios from 'axios';
-import { BASE_URL } from '../../api';
+import { unifiedApi } from '../../api/unifiedApiService';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getUserIdFromToken } from '../../utils/storage';
+import { generateNextDocumentNumber } from '../../utils/autoNumberGenerator';
 import AttachDocument from '../../components/AttachDocument';
 import { useTransactionLimit } from '../../context/TransactionLimitContext';
+import { profileUpdateManager } from '../../utils/profileUpdateManager';
+import { useStatusBarWithGradient } from '../../hooks/useStatusBar';
+import { getStatusBarHeight } from 'react-native-status-bar-height';
+import {
+  HEADER_CONTENT_HEIGHT,
+  getSolidHeaderStyle,
+} from '../../utils/headerLayout';
 
 const { width } = Dimensions.get('window');
 
@@ -41,6 +49,12 @@ interface AddPartyScreenParams {
 }
 
 const AddPartyScreen: React.FC = () => {
+  // StatusBar like ProfileScreen for colored header
+  const { statusBarSpacer } = useStatusBarWithGradient('AddParty', [
+    '#4f8cff',
+    '#4f8cff',
+  ]);
+  const preciseStatusBarHeight = getStatusBarHeight(true);
   const navigation = useNavigation<StackNavigationProp<AppStackParamList>>();
   const route = useRoute<RouteProp<AppStackParamList, 'AddParty'>>();
   const params = route.params as AddPartyScreenParams;
@@ -48,15 +62,60 @@ const AddPartyScreen: React.FC = () => {
 
   const isEditMode = params?.editMode || false;
   const customerData = params?.customerData;
+  const fromPaymentPhone = (params as any)?.fromPaymentPhone as
+    | string
+    | undefined;
+  const fromPaymentAddress = (params as any)?.fromPaymentAddress as
+    | string
+    | undefined;
 
   const [partyName, setPartyName] = useState(
     isEditMode ? customerData?.name || '' : params?.contactData?.name || '',
   );
   const [countryCode, setCountryCode] = useState('+91');
+  // Helper to normalize phone to 10 digits (drop +91 and other symbols). Returns '' if not valid
+  const normalizePhone = (value: string | undefined | null): string => {
+    const digits = String(value || '').replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.length >= 11 && digits.startsWith('91'))
+      return digits.slice(-10);
+    if (digits.length === 10) return digits;
+    // For any other length (e.g., just '91'), treat as empty to avoid showing partial codes
+    return '';
+  };
+
+  // Helper to extract phone number from various supplier/customer data structures
+  const extractPhoneFromData = (data: any): string => {
+    if (!data) return '';
+    return normalizePhone(
+      data.phoneNumber ||
+        data.phone ||
+        data.phone_number ||
+        data.partyPhone ||
+        (data as any)?.partyPhone,
+    );
+  };
+
+  // Helper to extract address from various supplier/customer data structures
+  const extractAddressFromData = (data: any): string => {
+    if (!data) return '';
+    return (
+      data.address ||
+      data.addressLine1 ||
+      data.address_line1 ||
+      data.partyAddress ||
+      (data as any)?.partyAddress ||
+      (Array.isArray(data.addresses)
+        ? data.addresses[0]?.addressLine1 || data.addresses[0]?.address_line1
+        : '') ||
+      ''
+    );
+  };
+
   const [phoneNumber, setPhoneNumber] = useState(
     isEditMode
-      ? (customerData?.phoneNumber || '').replace(/^\+91-?/, '')
-      : params?.contactData?.phoneNumber || '',
+      ? extractPhoneFromData(customerData)
+      : normalizePhone(params?.contactData?.phoneNumber),
   );
   const [partyType, setPartyType] = useState<'customer' | 'supplier'>(
     isEditMode
@@ -67,10 +126,14 @@ const AddPartyScreen: React.FC = () => {
     isEditMode ? customerData?.gstNumber || '' : '',
   );
   const [address, setAddress] = useState(
-    isEditMode ? customerData?.address || '' : '',
+    isEditMode ? extractAddressFromData(customerData) : '',
   );
   const [voucherType, setVoucherType] = useState<'payment' | 'receipt'>(
-    isEditMode ? customerData?.voucherType || 'payment' : 'payment',
+    isEditMode
+      ? customerData?.voucherType || 'payment'
+      : partyType === 'supplier'
+      ? 'payment'
+      : 'receipt',
   );
   const [openingBalance, setOpeningBalance] = useState(
     isEditMode ? (customerData?.openingBalance || 0).toString() : '',
@@ -81,6 +144,7 @@ const AddPartyScreen: React.FC = () => {
     uri: string;
     size?: number;
   } | null>(null);
+  const [userPermissions, setUserPermissions] = useState<string[] | null>(null);
 
   const imageScrollViewRef = React.useRef<KeyboardAwareScrollView>(null);
   const lastTapRef = React.useRef<number>(0);
@@ -101,6 +165,30 @@ const AddPartyScreen: React.FC = () => {
     address?: string;
     openingBalance?: string;
   }>({});
+  const [rbacBlockedMsg, setRbacBlockedMsg] = useState<string | null>(null);
+  const [subscriptionError, setSubscriptionError] = useState<string | null>(
+    null,
+  );
+
+  // Helper: format and resolve an effective date (supports backdated params)
+  const formatDateLocal = (date: Date): string => {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+
+  // Accept optional backdated date via navigation params for voucher posting
+  const getEffectiveDate = (): string => {
+    const anyParams: any = params || {};
+    const candidate: string | undefined =
+      anyParams.voucherDate || anyParams.date || anyParams.openingBalanceDate;
+    if (candidate && /^\d{4}-\d{2}-\d{2}$/.test(String(candidate))) {
+      return String(candidate);
+    }
+    // Fallback to today in local (no timezone shift)
+    return formatDateLocal(new Date());
+  };
 
   const [customAlert, setCustomAlert] = useState({
     visible: false,
@@ -136,6 +224,113 @@ const AddPartyScreen: React.FC = () => {
 
   const hideCustomAlert = () => {
     setCustomAlert(prev => ({ ...prev, visible: false }));
+  };
+
+  // Load permissions once for RBAC-aware create/update
+  useEffect(() => {
+    (async () => {
+      try {
+        const permsJson = await AsyncStorage.getItem('userPermissions');
+        if (permsJson) {
+          const permissions = JSON.parse(permsJson);
+          setUserPermissions(permissions);
+          console.log('📋 Loaded user permissions:', permissions);
+        }
+        setRbacBlockedMsg(null);
+      } catch (e) {
+        console.warn('Failed to load userPermissions:', e);
+        // Don't block user if permissions can't be loaded
+        setUserPermissions([]);
+      }
+    })();
+  }, []);
+
+  // Re-evaluate permission message when partyType changes
+  useEffect(() => {
+    if (!Array.isArray(userPermissions)) return;
+
+    const required =
+      partyType === 'supplier' ? 'supplier:create' : 'customer:create';
+
+    // Only show permission error if we have permissions loaded and the required one is missing
+    if (
+      userPermissions.length > 0 &&
+      !hasPermission(userPermissions, required)
+    ) {
+      setRbacBlockedMsg(
+        `You don't have permission to add a ${partyType}. Required: ${required}.`,
+      );
+    } else {
+      setRbacBlockedMsg(null);
+    }
+  }, [partyType, userPermissions]);
+
+  // Helper to normalize and check permissions from different naming styles
+  const hasPermission = (
+    permissions: string[] | null | undefined,
+    required: string,
+  ) => {
+    if (!Array.isArray(permissions) || permissions.length === 0) return false;
+    // Accept both mobile style (customer:create) and backend enum style (CUSTOMER_CREATE)
+    const normalized = new Set(permissions.map(p => String(p).toLowerCase()));
+    const alt = required.includes(':')
+      ? required.split(':')[0].toUpperCase() +
+        '_' +
+        required.split(':')[1].toUpperCase()
+      : required.replace('_', ':').toLowerCase();
+    return (
+      normalized.has(required.toLowerCase()) ||
+      normalized.has(String(alt).toLowerCase())
+    );
+  };
+
+  const ensurePermissions = async (
+    accessToken: string,
+  ): Promise<string[] | null> => {
+    try {
+      // If we already have permissions, return them
+      if (Array.isArray(userPermissions) && userPermissions.length > 0) {
+        return userPermissions;
+      }
+
+      // Try to get from storage first
+      const permsJson = await AsyncStorage.getItem('userPermissions');
+      if (permsJson) {
+        const stored = JSON.parse(permsJson);
+        setUserPermissions(stored);
+        return stored;
+      }
+
+      // Fallback: fetch from backend if not present
+      console.log('🔄 Fetching permissions from backend...');
+      // Use unified API
+      const permsResponse = (await unifiedApi.get('/rbac/me/permissions')) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
+      const perms = Array.isArray(permsResponse.data)
+        ? permsResponse.data
+        : Array.isArray(permsResponse)
+        ? permsResponse
+        : [];
+      if (Array.isArray(perms) && perms.length > 0) {
+        setUserPermissions(perms);
+        try {
+          await AsyncStorage.setItem('userPermissions', JSON.stringify(perms));
+        } catch (storageError) {
+          console.warn('Failed to store permissions:', storageError);
+        }
+        return perms;
+      }
+
+      // Return empty array instead of null to allow proceeding
+      return [];
+    } catch (e) {
+      console.warn('ensurePermissions error:', e);
+      // Return empty array instead of null to allow proceeding
+      return [];
+    }
   };
 
   // Function to scroll to center the focused input field
@@ -250,6 +445,137 @@ const AddPartyScreen: React.FC = () => {
     }
   }, [isEditMode, customerData?.voucherType]);
 
+  // Consolidated effect to prefill customer/supplier details on edit
+  useEffect(() => {
+    if (!isEditMode || !customerData) return;
+
+    const prefillData = async () => {
+      try {
+        // Step 1: Try immediate data from customerData and navigation params
+        let normalizedPhone = fromPaymentPhone
+          ? normalizePhone(fromPaymentPhone)
+          : extractPhoneFromData(customerData);
+
+        let navAddress =
+          fromPaymentAddress && String(fromPaymentAddress).trim()
+            ? String(fromPaymentAddress)
+            : extractAddressFromData(customerData);
+
+        // Step 2: Try local overrides from AsyncStorage
+        try {
+          const overridesRaw = await AsyncStorage.getItem('supplierOverrides');
+          if (overridesRaw) {
+            const map = JSON.parse(overridesRaw);
+            const ov = map[String((customerData as any).id)];
+            if (ov) {
+              if (!normalizedPhone && ov.phoneNumber) {
+                normalizedPhone = normalizePhone(ov.phoneNumber);
+              }
+              if ((!navAddress || !String(navAddress).trim()) && ov.address) {
+                navAddress = String(ov.address);
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('Failed to load local overrides:', e);
+        }
+
+        // Step 3: Try recent transactions as fallback
+        if (!normalizedPhone || !navAddress || !String(navAddress).trim()) {
+          try {
+            const token = await AsyncStorage.getItem('accessToken');
+            const cid = (customerData as any)?.id;
+            if (token && cid) {
+              // Use unified API with server-side filtering
+              const raw = (await unifiedApi.getTransactionsByCustomer(cid)) as {
+                data: any;
+                status: number;
+                headers: Headers;
+              };
+              const rawData = raw?.data || raw || {};
+              const rows: any[] = Array.isArray(rawData?.data)
+                ? rawData.data
+                : Array.isArray(rawData)
+                ? rawData
+                : [];
+              if (rows.length > 0) {
+                const latest = rows
+                  .slice()
+                  .sort(
+                    (a: any, b: any) =>
+                      new Date(b.date || b.created_at || 0).getTime() -
+                      new Date(a.date || a.created_at || 0).getTime(),
+                  )[0];
+
+                if (!normalizedPhone) {
+                  const phoneFromTx = normalizePhone(
+                    latest?.partyPhone || latest?.phone || latest?.phoneNumber,
+                  );
+                  if (phoneFromTx) normalizedPhone = phoneFromTx;
+                }
+
+                if (!navAddress || !String(navAddress).trim()) {
+                  const addressFromTx =
+                    latest?.partyAddress ||
+                    latest?.address ||
+                    latest?.addressLine1 ||
+                    '';
+                  if (addressFromTx) navAddress = String(addressFromTx);
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('Failed to fetch from transactions:', e);
+          }
+        }
+
+        // Step 4: Try API fetch for complete details
+        try {
+          const accessToken = await AsyncStorage.getItem('accessToken');
+          if (accessToken && customerData.id) {
+            // Use unified API with caching
+            const raw = (await unifiedApi.getCustomerById(customerData.id)) as {
+              data: any;
+              status: number;
+              headers: Headers;
+            };
+            const detail = raw?.data ?? raw ?? {};
+            console.log('🔍 Prefill detail for customer:', detail);
+
+            const nameVal =
+              detail?.name || detail?.partyName || detail?.party_name;
+            const phoneVal = extractPhoneFromData(detail);
+            const addrVal = extractAddressFromData(detail);
+            const gstVal =
+              detail?.gstNumber ||
+              detail?.gst ||
+              detail?.gstin ||
+              detail?.gst_number ||
+              '';
+
+            // Only update if we don't have values already
+            if (nameVal && !partyName) setPartyName(String(nameVal));
+            if (phoneVal && !normalizedPhone) normalizedPhone = phoneVal;
+            if (addrVal && (!navAddress || !String(navAddress).trim()))
+              navAddress = String(addrVal);
+            if (gstVal) setGstin(String(gstVal));
+          }
+        } catch (e) {
+          console.warn('Failed to fetch customer details from API:', e);
+        }
+
+        // Step 5: Set the final values
+        if (normalizedPhone) setPhoneNumber(normalizedPhone);
+        if (navAddress && String(navAddress).trim())
+          setAddress(String(navAddress));
+      } catch (e) {
+        console.warn('Error in prefillData:', e);
+      }
+    };
+
+    prefillData();
+  }, [isEditMode, customerData]);
+
   const validateForm = (): boolean => {
     const newErrors: {
       partyName?: string;
@@ -301,7 +627,7 @@ const AddPartyScreen: React.FC = () => {
       voucherType,
       openingBalance,
     });
-    console.log('🔗 BASE_URL:', BASE_URL);
+    // unifiedApi handles base URL internally
 
     if (!validateForm()) {
       console.log('❌ Form validation failed');
@@ -309,10 +635,35 @@ const AddPartyScreen: React.FC = () => {
     }
     console.log('✅ Form validation passed');
     try {
+      // Guard: if monthly transaction limit reached, show modal and skip all API calls
+      try {
+        const accessTokenGuard = await AsyncStorage.getItem('accessToken');
+        if (accessTokenGuard) {
+          // Use unified API for transaction limits
+          const limitsData = (await unifiedApi.getTransactionLimits()) as {
+            canCreate?: boolean;
+          };
+          if (limitsData && limitsData.canCreate === false) {
+            try {
+              await forceShowPopup();
+            } catch {}
+            return;
+          }
+        }
+      } catch {}
+
       setLoading(true);
 
       // Check transaction limit before API call
-      await forceCheckTransactionLimit();
+      try {
+        await forceCheckTransactionLimit();
+      } catch (limitError) {
+        console.warn('Transaction limit check failed:', limitError);
+        // Don't block the user if limit check fails
+        setSubscriptionError(
+          'Failed to fetch subscription data. You can still proceed.',
+        );
+      }
 
       const accessToken = await AsyncStorage.getItem('accessToken');
       if (!accessToken) {
@@ -322,6 +673,34 @@ const AddPartyScreen: React.FC = () => {
           'error',
         );
         return;
+      }
+
+      // RBAC: Check permissions but don't block if we can't determine them
+      try {
+        const perms = await ensurePermissions(accessToken);
+        const requiredPerm =
+          partyType === 'supplier' ? 'supplier:create' : 'customer:create';
+
+        // Only block if we have permissions loaded and the required one is missing
+        if (
+          Array.isArray(perms) &&
+          perms.length > 0 &&
+          !hasPermission(perms, requiredPerm)
+        ) {
+          const msg = `You don't have permission to add a ${partyType}. Required: ${requiredPerm}.`;
+          setRbacBlockedMsg(msg);
+          showCustomAlert('Create Error', msg, 'error');
+          return; // Prevent API call explicitly forbidden by RBAC
+        }
+
+        // If perms are empty or unavailable, proceed with API call; backend will decide
+        console.log('✅ Permission check passed, proceeding with API call');
+      } catch (permErr) {
+        console.warn('Permission check error:', permErr);
+        // Don't block user if permission check fails - let backend handle it
+        console.log(
+          '⚠️ Proceeding with API call despite permission check failure',
+        );
       }
 
       console.log('🔑 Access Token exists:', !!accessToken);
@@ -338,6 +717,29 @@ const AddPartyScreen: React.FC = () => {
       }
     } catch (error: any) {
       console.error('Error handling party:', error);
+      // Duplicate phone handling (backend returns 400 with specific message)
+      try {
+        const backendMsg =
+          error?.response?.data?.message || error?.response?.data?.error;
+        if (
+          error?.response?.status === 400 &&
+          backendMsg &&
+          String(backendMsg)
+            .toLowerCase()
+            .includes('phone number already exists')
+        ) {
+          setErrors(prev => ({
+            ...prev,
+            phoneNumber: 'This phone number is already used by another party.',
+          }));
+          showCustomAlert(
+            'Duplicate Phone Number',
+            'A party with this phone number already exists. Please use a different number.',
+            'error',
+          );
+          return;
+        }
+      } catch {}
       let errorMessage = isEditMode
         ? 'Failed to update party. Please try again.'
         : 'Failed to add party. Please try again.';
@@ -391,37 +793,93 @@ const AddPartyScreen: React.FC = () => {
   const handleCreateParty = async (accessToken: string) => {
     console.log('🚀 handleCreateParty function entered');
     try {
+      // Normalize phone to digits only for backend compatibility
+      const phoneNormalized = phoneNumber.trim().replace(/\D/g, '');
+
+      const isValidGstin = (value: string) =>
+        /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(value);
+
       const basicPayload = {
         partyName: partyName.trim(),
+        // Redundant fields to satisfy backend DTO and any normalization logic
+        name: partyName.trim(),
         partyType: partyType,
-        phoneNumber: `${countryCode}-${phoneNumber.trim()}`,
+        // For DTO.phone, send digits-only
+        phone: phoneNormalized,
+        phoneNumber: phoneNormalized,
         address: address.trim(),
-        gstNumber: gstin.trim() || null,
-        voucherType: voucherType,
-        // openingBalance removed - backend doesn't accept it even for new customers
-      };
+        addressLine1: address.trim(),
+        // include alternate GST keys for broader backend compatibility
+        gstNumber: gstin.trim() || null, // always send flat gst on create when present
+        gst: gstin.trim() || null,
+        gstin: gstin.trim() || null,
+        // Conditionally include structured addresses for suppliers/customers
+        ...(() => {
+          const addr = address.trim();
+          const gst = gstin.trim();
+          const includeGstin = gst && isValidGstin(gst);
+          if (!addr && !includeGstin) return {};
+          return {
+            addresses: [
+              {
+                type: 'billing',
+                ...(addr ? { flatBuildingNumber: addr } : {}),
+                ...(includeGstin ? { gstin: gst } : {}),
+              },
+            ],
+          };
+        })(),
+        // voucherType intentionally omitted to prevent backend-side voucher creation
+        openingBalance:
+          openingBalance && !isNaN(parseFloat(openingBalance))
+            ? parseFloat(openingBalance)
+            : 0,
+        // Optional currency; backend defaults to INR if not provided
+        currency: 'INR',
+      } as any;
 
-      console.log(
-        '➕ Creating basic customer record with payload:',
-        basicPayload,
-      );
-      console.log('🔗 API Endpoint:', `${BASE_URL}/customers`);
+      // Normalize party type casing for backend enum ('Customer' | 'Supplier')
+      if (basicPayload.partyType) {
+        const raw = String(basicPayload.partyType).toLowerCase();
+        basicPayload.partyType = raw === 'supplier' ? 'Supplier' : 'Customer';
+      }
 
-      const createResponse = await axios.post(
-        `${BASE_URL}/customers`,
-        basicPayload,
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: 30000,
-        },
-      );
+      // Include user's primary role id for backend auditing/mapping
+      try {
+        const { addRoleIdToBody } = await import('../../utils/roleHelper');
+        await addRoleIdToBody(basicPayload);
+      } catch (e) {
+        console.warn(
+          '⚠️ AddPartyScreen: Failed to add role ID to create payload:',
+          e,
+        );
+      }
 
-      console.log('✅ Basic customer created:', createResponse.data);
+      console.log('➕ Creating basic party record with payload:', basicPayload);
+      // Use supplier-specific endpoint if creating a supplier
+      const primaryCreateUrl =
+        partyType === 'supplier' ? '/customers/suppliers' : '/customers';
+      console.log('🔗 API Endpoint (primary):', primaryCreateUrl);
 
-      const customerId = createResponse.data.id;
+      let createResponse;
+      try {
+        createResponse = (await unifiedApi.post(
+          primaryCreateUrl,
+          basicPayload,
+        )) as {
+          data: any;
+          status: number;
+          headers: Headers;
+        };
+      } catch (err: any) {
+        throw err;
+      }
+
+      // unifiedApi returns { data, status, headers } structure
+      const responseData = createResponse.data || createResponse;
+      console.log('✅ Basic customer created:', responseData);
+
+      const customerId = responseData.id;
       console.log('🆔 Customer ID received:', customerId);
       if (!customerId) {
         throw new Error('Failed to get customer ID from creation response');
@@ -430,30 +888,57 @@ const AddPartyScreen: React.FC = () => {
       const updatePayload = {
         customerId: customerId,
         partyName: partyName.trim(),
-        partyType: partyType,
-        phoneNumber: `${countryCode}-${phoneNumber.trim()}`,
+        partyType: partyType === 'supplier' ? 'Supplier' : 'Customer',
+        phoneNumber: phoneNormalized,
         address: address.trim(),
+        addressLine1: address.trim(),
         gstNumber: gstin.trim() || null,
-        voucherType: voucherType,
+        gst: gstin.trim() || null,
+        gstin: gstin.trim() || null,
+        // voucherType intentionally omitted to prevent backend-side voucher creation
         // openingBalance removed - backend doesn't accept it
       };
 
-      console.log('📝 Updating customer info with payload:', updatePayload);
-      console.log('🔗 API Endpoint:', `${BASE_URL}/customers/add-info`);
+      // Include user's primary role id for backend auditing/mapping
+      try {
+        const { addRoleIdToBody } = await import('../../utils/roleHelper');
+        await addRoleIdToBody(updatePayload);
+      } catch (e) {
+        console.warn(
+          '⚠️ AddPartyScreen: Failed to add role ID to update payload:',
+          e,
+        );
+      }
 
-      const updateResponse = await axios.post(
-        `${BASE_URL}/customers/add-info`,
-        updatePayload,
-        {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: 30000,
-        },
-      );
+      console.log('📝 Updating party info with payload:', updatePayload);
+      // Use unified API - already migrated above
 
-      console.log('✅ Customer info updated:', updateResponse.data);
+      // Use unified API for update
+      let updateResponse: any;
+      try {
+        updateResponse = await unifiedApi.updateCustomer(
+          customerId,
+          updatePayload,
+        );
+      } catch (updateErr: any) {
+        // If this optional enrichment endpoint is missing, proceed without blocking
+        const status = updateErr?.response?.status;
+        if (status === 404 || status === 405) {
+          console.warn(
+            'ℹ️ Optional endpoint /customers/add-info not available; continuing without it.',
+          );
+        } else {
+          throw updateErr;
+        }
+      }
+
+      if (updateResponse && updateResponse.data) {
+        console.log('✅ Customer info updated:', updateResponse.data);
+      } else {
+        console.log(
+          'ℹ️ Skipped optional /customers/add-info step or no data returned',
+        );
+      }
 
       console.log('📍 Reached opening balance check section');
       // Create opening balance voucher if amount is entered (positive or negative)
@@ -481,19 +966,121 @@ const AddPartyScreen: React.FC = () => {
           openingBalance,
         );
         console.log('📞 Calling createOpeningBalanceVoucher...');
-        await createOpeningBalanceVoucher(accessToken, customerId);
-        console.log('✅ createOpeningBalanceVoucher completed');
+        try {
+          // Only create ONE voucher of the type selected in the UI
+          await createOpeningBalanceVoucher(accessToken, customerId);
+          console.log('✅ createOpeningBalanceVoucher completed successfully');
+
+          // Add a delay to ensure voucher is processed and available in API
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          console.log('⏳ Waited for voucher processing...');
+        } catch (voucherError) {
+          console.error('❌ Voucher creation failed:', voucherError);
+          // Don't fail the entire party creation if voucher creation fails
+        }
       } else {
         console.log('ℹ️ No opening balance entered, skipping voucher creation');
       }
 
-      console.log('🧭 Navigating to Customer screen...');
+      // Store the opening balance locally for CustomerScreen
+      // Since the backend doesn't store opening balance in customer data, we need to store it locally
+      if (shouldCreateVoucher) {
+        const openingBalanceAmount = parseFloat(openingBalance);
+        console.log(
+          `💾 Storing opening balance ${openingBalanceAmount} for customer ${customerId}`,
+        );
+
+        // Store in AsyncStorage for the CustomerScreen to access
+        try {
+          const existingOpeningBalances = await AsyncStorage.getItem(
+            'customerOpeningBalances',
+          );
+          const openingBalances = existingOpeningBalances
+            ? JSON.parse(existingOpeningBalances)
+            : {};
+          openingBalances[customerId] = {
+            amount: openingBalanceAmount,
+            type: voucherType,
+            timestamp: Date.now(),
+            customerName: partyName,
+          };
+          await AsyncStorage.setItem(
+            'customerOpeningBalances',
+            JSON.stringify(openingBalances),
+          );
+          console.log('✅ Opening balance stored in AsyncStorage');
+        } catch (storageError) {
+          console.error(
+            '❌ Failed to store opening balance in AsyncStorage:',
+            storageError,
+          );
+        }
+      }
+
+      console.log(
+        '🧭 Showing success popup after creation (no auto-navigation)',
+      );
+
+      // Emit profile update event to refresh user data in other screens
+      console.log(
+        '📢 AddPartyScreen: Emitting profile update event after party creation',
+      );
+      profileUpdateManager.emitProfileUpdate();
+
+      // Force refresh customer data after voucher creation
+      if (shouldCreateVoucher) {
+        console.log(
+          '🔄 AddPartyScreen: Force refreshing customer data after voucher creation...',
+        );
+
+        // Immediate refresh
+        profileUpdateManager.emitProfileUpdate();
+
+        // Additional refresh after 2 seconds
+        setTimeout(() => {
+          console.log('🔄 AddPartyScreen: 2-second refresh...');
+          profileUpdateManager.emitProfileUpdate();
+        }, 2000);
+
+        // Additional refresh after 5 seconds to catch any delayed voucher processing
+        setTimeout(() => {
+          console.log(
+            '🔄 AddPartyScreen: Final refresh after voucher creation...',
+          );
+          profileUpdateManager.emitProfileUpdate();
+        }, 5000);
+
+        // Final refresh after 10 seconds to ensure voucher is fully processed
+        setTimeout(() => {
+          console.log('🔄 AddPartyScreen: Ultra-delayed refresh...');
+          profileUpdateManager.emitProfileUpdate();
+        }, 10000);
+      }
+
+      // Directly navigate to list without showing success popup
       navigation.navigate('Customer', {
         selectedTab: partyType,
-        shouldRefresh: true, // Tell the CustomerScreen to refresh data
+        shouldRefresh: true,
       });
     } catch (error: any) {
       console.error('Error creating party:', error);
+
+      // Handle permission error specifically
+      if (
+        error.response?.status === 403 &&
+        error.response?.data?.message?.includes('Insufficient permissions')
+      ) {
+        const requiredPerm =
+          partyType === 'supplier' ? 'supplier:create' : 'customer:create';
+        const errorMessage = `You don't have permission to add a ${partyType}. Required: ${requiredPerm}. Please contact your administrator to assign the necessary role.`;
+
+        showCustomAlert('Permission Required', errorMessage, 'error', () => {
+          // Optionally navigate to contact admin or role request screen
+          console.log('User needs to contact admin for role assignment');
+        });
+        return;
+      }
+
       handleCreateError(error);
     }
   };
@@ -522,8 +1109,11 @@ const AddPartyScreen: React.FC = () => {
       console.log('✅ Valid amount for voucher creation:', amount);
       console.log('🎯 User selected voucher type:', voucherType);
 
-      // Use the user's selected voucher type from the button
-      const voucherTypeForVoucher = voucherType;
+      // Map UI selection to backend transaction type
+      // UI: payment | receipt → Backend: debit | credit
+      // Map strictly from user's selection (default Payment)
+      const voucherTypeForVoucher: 'debit' | 'credit' =
+        voucherType === 'receipt' ? 'credit' : 'debit';
 
       // Validate customerId
       const customerIdNumber = parseInt(customerId);
@@ -532,57 +1122,128 @@ const AddPartyScreen: React.FC = () => {
         return;
       }
 
-      const voucherPayload = {
-        user_id: userId, // userId is already a number
-        customerId: customerIdNumber, // Add customerId for relationship
+      // Idempotency: avoid duplicate opening balance vouchers (rapid double taps)
+      const recentlyExists = await hasRecentOpeningBalanceVoucher(
+        accessToken,
+        customerIdNumber,
+        Math.abs(amount),
+        voucherTypeForVoucher,
+      );
+      if (recentlyExists) {
+        console.log('ℹ️ Duplicate opening balance detected; skipping voucher.');
+        return;
+      }
+
+      // Generate document number for opening balance voucher (starts at 001 for new users)
+      let openingBalanceNumber = '';
+      try {
+        if (voucherTypeForVoucher === 'debit') {
+          // Payment - use billNumber
+          openingBalanceNumber = await generateNextDocumentNumber(
+            'payment',
+            true,
+          ); // Store - transaction being saved
+        } else {
+          // Receipt - use receiptNumber
+          openingBalanceNumber = await generateNextDocumentNumber(
+            'receipt',
+            true,
+          ); // Store - transaction being saved
+        }
+      } catch (error) {
+        console.error(
+          'Error generating opening balance document number:',
+          error,
+        );
+        // Fallback: generator returns PREFIX-001 for new users
+        openingBalanceNumber =
+          voucherTypeForVoucher === 'debit' ? 'PAY-001' : 'REC-001';
+      }
+
+      // Compute effective (possibly backdated) date for voucher
+      const effectiveDate = getEffectiveDate();
+      // Use ISO 8601 midnight to satisfy strict DTO parsers expecting full datetime
+      const effectiveIso = `${effectiveDate}T00:00:00`;
+
+      // Define voucherPayload inside try block so it's accessible in catch block
+      const voucherPayload: any = {
+        customer_id: customerIdNumber, // Use customer_id as expected by backend
         type: voucherTypeForVoucher,
-        amount: Math.abs(amount).toFixed(2), // Backend expects string
-        date: new Date().toISOString(),
-        status: 'complete',
+        amount: Math.abs(amount), // Backend expects number
         description: 'Opening Balance',
-        notes: `Opening balance for ${partyType} ${partyName.trim()}`,
         partyName: partyName.trim(),
-        partyPhone: phoneNumber.trim(), // Send only the phone number without country code
+        partyPhone: phoneNumber.trim(),
         partyAddress: address.trim(),
-        billNumber: '', // Opening Balance
-        invoiceNumber: '',
-        receiptNumber: '',
         method: 'Opening Balance',
         gstNumber: gstin.trim() || '',
-        items: [], // Backend expects JSON array
-        createdBy: userId,
-        updatedBy: userId,
+        status: 'complete',
+        // Explicit dates to preserve past dates on backend (send full ISO)
+        date: effectiveIso,
+        documentDate: effectiveIso,
+        transactionDate: effectiveIso,
+        // snake_case aliases for maximum compatibility
+        transaction_date: effectiveIso,
+        document_date: effectiveIso,
+        invoice_date: effectiveIso,
+        // Also include payment/receipt specific aliases used by backend create()
+        // This guarantees the service derives `date` from these when provided
+        ...(voucherTypeForVoucher === 'debit'
+          ? { paymentDate: effectiveIso, payment_date: effectiveIso }
+          : { receiptDate: effectiveIso, receipt_date: effectiveIso }),
+        // Include document number (starts at 001 for new users)
+        ...(voucherTypeForVoucher === 'debit'
+          ? { billNumber: openingBalanceNumber }
+          : { receiptNumber: openingBalanceNumber }),
       };
 
       console.log('💰 Creating opening balance voucher:', voucherPayload);
       console.log('📋 Voucher payload details:', {
-        user_id: voucherPayload.user_id,
-        customerId: voucherPayload.customerId,
+        customer_id: voucherPayload.customer_id,
         type: voucherPayload.type,
         amount: voucherPayload.amount,
         partyName: voucherPayload.partyName,
         partyPhone: voucherPayload.partyPhone,
       });
-      const voucherUrl = `${BASE_URL}/vouchers`;
+      console.log('🔍 DEBUG: Frontend voucherType:', voucherType);
+      console.log(
+        '🔍 DEBUG: Mapped voucherTypeForVoucher:',
+        voucherTypeForVoucher,
+      );
+      console.log(
+        '🔍 DEBUG: Voucher API will be called with type:',
+        voucherTypeForVoucher,
+      );
+      const voucherUrl = '/transactions';
       console.log('🔗 API Endpoint:', voucherUrl);
       console.log('📤 Sending POST request to vouchers API...');
-      console.log('🔑 Auth headers:', {
-        Authorization: `Bearer ${accessToken.substring(0, 20)}...`,
-        'Content-Type': 'application/json',
-      });
 
-      const voucherResponse = await axios.post(voucherUrl, voucherPayload, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 30000,
-      });
+      let voucherResponse;
+      try {
+        voucherResponse = (await unifiedApi.post(
+          voucherUrl,
+          voucherPayload,
+        )) as {
+          data: any;
+          status: number;
+          headers: Headers;
+        };
+      } catch (postErr: any) {
+        // unifiedApi throws errors for non-2xx responses
+        if (postErr?.status === 404 || postErr?.response?.status === 404) {
+          console.warn(
+            'ℹ️ /transactions POST not available; skipping opening balance creation',
+          );
+          return;
+        }
+        throw postErr;
+      }
+      // unifiedApi returns { data, status, headers } structure
       console.log('📥 Voucher API response received:', voucherResponse.status);
 
+      const voucherData = voucherResponse.data || voucherResponse;
       console.log(
         '✅ Opening balance voucher created successfully:',
-        voucherResponse.data,
+        voucherData,
       );
       console.log(
         '💰 Voucher created for amount:',
@@ -590,6 +1251,15 @@ const AddPartyScreen: React.FC = () => {
         'Type:',
         voucherTypeForVoucher,
       );
+      console.log(
+        '🎯 CRITICAL DEBUG: Voucher creation response:',
+        JSON.stringify(voucherResponse.data, null, 2),
+      );
+      console.log(
+        '🔍 DEBUG: Backend returned transaction type:',
+        voucherResponse.data?.type,
+      );
+      console.log('🔍 DEBUG: Expected type was:', voucherTypeForVoucher);
       console.log('🎉 Voucher creation completed successfully!');
 
       // Check transaction limit after successful voucher creation
@@ -601,53 +1271,115 @@ const AddPartyScreen: React.FC = () => {
         // Don't fail the party creation if limit check fails
       }
     } catch (error: any) {
-      console.error('❌ Error creating opening balance voucher:', error);
-      console.error('❌ Error details:', {
-        message: error.message,
-        status: error.response?.status,
-        data: error.response?.data,
-        statusText: error.response?.statusText,
-      });
+      console.error(
+        '❌ CRITICAL ERROR: Opening balance voucher creation failed:',
+        {
+          message: error?.message,
+          status: error?.response?.status,
+          data: error?.response?.data,
+          fullError: error,
+        },
+      );
+      console.error(
+        '❌ VOUCHER PAYLOAD THAT FAILED:',
+        'Check error details above for more information',
+      );
 
-      // Check if it's a transaction limit error
+      // Check if it's specifically a transaction limit error
       if (
         error.response?.data?.message?.includes('transaction limit') ||
         error.response?.data?.message?.includes('limit exceeded') ||
-        error.response?.data?.message?.includes('Internal server error')
+        error.response?.data?.message?.includes('monthly limit') ||
+        error.response?.data?.message?.includes('quota exceeded')
       ) {
-        // Trigger transaction limit popup
+        // Only trigger transaction limit popup for actual limit errors
+        console.log('🚫 Transaction limit error detected, showing popup');
         await forceShowPopup();
         return;
       }
 
-      // Don't fail the entire party creation if voucher creation fails
-      // Just log the error and continue
+      // Don't fail the entire party creation if voucher creation fails; continue silently
+    }
+  };
+
+  // Helper: check for a recent identical opening balance voucher for same customer
+  const hasRecentOpeningBalanceVoucher = async (
+    accessToken: string,
+    customerId: number,
+    amount: number,
+    type: 'debit' | 'credit',
+  ): Promise<boolean> => {
+    try {
+      const url = `/transactions?customer_id=${customerId}&limit=5`;
+      const resp = (await unifiedApi.get(url)) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
+      // unifiedApi returns { data, status, headers } structure
+      const responseData = resp.data || resp;
+      const rows = Array.isArray(responseData?.data)
+        ? responseData.data
+        : Array.isArray(responseData)
+        ? responseData
+        : [];
+      const now = Date.now();
+      const windowMs = 3 * 60 * 1000; // 3 minutes window
+      return rows.some((t: any) => {
+        const ts = new Date(t.created_at || t.createdAt || 0).getTime();
+        const close = Math.abs(now - ts) < windowMs;
+        const sameDesc =
+          String(t.description || '').toLowerCase() === 'opening balance';
+        const sameAmt = Number(t.amount) === Number(amount);
+        const sameType = String(t.type || '').toLowerCase() === String(type);
+        const sameCustomer =
+          Number(t.customer_id || t.customerId) === Number(customerId);
+        return close && sameDesc && sameAmt && sameType && sameCustomer;
+      });
+    } catch (e) {
+      console.warn('Opening balance idempotency check failed:', e);
+      return false;
     }
   };
 
   const handleCreateError = async (error: any) => {
-    let errorMessage = 'Failed to create party. Please try again.';
+    // Import error handler
+    const { handleApiError } = require('../../utils/apiErrorHandler');
+    const errorInfo = handleApiError(error);
+
+    // Handle 403 Forbidden errors with user-friendly message
+    if (errorInfo.isForbidden) {
+      showCustomAlert('Access Denied', errorInfo.message, 'error');
+      return;
+    }
+
+    let errorMessage =
+      errorInfo.message || 'Failed to create party. Please try again.';
     let showRetry = false;
 
-    // Check if it's a transaction limit error
+    // Check if it's specifically a transaction limit error
     if (
       error.response?.data?.message?.includes('transaction limit') ||
       error.response?.data?.message?.includes('limit exceeded') ||
-      error.response?.data?.message?.includes('Internal server error')
+      error.response?.data?.message?.includes('monthly limit') ||
+      error.response?.data?.message?.includes('quota exceeded')
     ) {
-      // Trigger transaction limit popup
+      // Only trigger transaction limit popup for actual limit errors
+      console.log(
+        '🚫 Transaction limit error detected in create error, showing popup',
+      );
       await forceShowPopup();
       return;
     }
 
-    if (error.response?.status === 500) {
+    if (error.response?.status === 500 || errorInfo.status === 500) {
       errorMessage =
         'Server error occurred. This might be a temporary issue. Please try again in a few minutes.';
       showRetry = true;
-    } else if (error.response?.status === 503) {
+    } else if (error.response?.status === 503 || errorInfo.status === 503) {
       errorMessage = 'Service temporarily unavailable. Please try again later.';
       showRetry = true;
-    } else if (error.response?.status === 429) {
+    } else if (error.response?.status === 429 || errorInfo.status === 429) {
       errorMessage =
         'Too many requests. Please wait a moment before trying again.';
       showRetry = true;
@@ -659,18 +1391,8 @@ const AddPartyScreen: React.FC = () => {
       errorMessage =
         'Network error. Please check your internet connection and try again.';
       showRetry = true;
-    } else if (error.response?.data?.message) {
-      const message = error.response.data.message;
-      if (Array.isArray(message)) {
-        errorMessage = message.join(', ');
-      } else if (typeof message === 'object') {
-        errorMessage = JSON.stringify(message);
-      } else {
-        errorMessage = String(message);
-      }
-    } else if (error.message) {
-      errorMessage = String(error.message);
     }
+
     const alertButtons: any[] = [{ text: 'OK', style: 'default' as const }];
     if (showRetry) {
       alertButtons.unshift({
@@ -692,44 +1414,112 @@ const AddPartyScreen: React.FC = () => {
         );
         return;
       }
-      const payload = {
-        partyName: partyName.trim(),
-        phoneNumber: `${countryCode}-${phoneNumber.trim()}`,
-        partyType: partyType,
-        gstNumber: gstin.trim() || null,
-        address: address.trim(),
-        voucherType: voucherType,
-        // openingBalance is removed - backend UpdateCustomerDto doesn't allow it
+      // Backend PATCH /customers/:id accepts UpdateCustomerDto fields.
+      // Map to expected keys and sanitize phone to digits only.
+      const isValidGstin = (value: string) =>
+        /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(value);
+
+      const payload: any = {
+        // only include if non-empty (backend validates non-empty name when present)
+        ...(partyName.trim() ? { name: partyName.trim() } : {}),
+        // include phone only if it matches 10-13 digits rule
+        ...(() => {
+          const digits = phoneNumber.trim().replace(/\D/g, '');
+          return /^\d{10,13}$/.test(digits) ? { phone: digits } : {};
+        })(),
+        partyType: partyType === 'supplier' ? 'Supplier' : 'Customer',
+        // Provide addresses array only when we have valid address or valid GSTIN
+        ...(() => {
+          const addr = address.trim();
+          const gst = gstin.trim();
+          const includeGstin = gst && isValidGstin(gst);
+          if (!addr && !includeGstin) return {};
+          return {
+            addresses: [
+              {
+                type: 'billing',
+                ...(addr ? { flatBuildingNumber: addr } : {}),
+                ...(includeGstin ? { gstin: gst } : {}),
+              },
+            ],
+          };
+        })(),
+        // Also send flat fields (backend now persists these on update)
+        ...(address.trim() ? { address: address.trim() } : {}),
+        // Send gstNumber as provided to persist on customer even if not a valid GSTIN
+        ...(gstin.trim() ? { gstNumber: gstin.trim() } : {}),
       };
       console.log('📝 Updating party with payload:', payload);
-      console.log(
-        '🔗 API Endpoint:',
-        `${BASE_URL}/customers/${customerData.id}`,
-      );
+      // Endpoint handled inside unifiedApi
       console.log('🆔 Customer Data ID:', customerData.id);
       console.log('📋 Voucher Type:', voucherType);
       console.log('💰 Opening Balance (read-only):', openingBalance);
-      if (!payload.partyName || !payload.phoneNumber || !payload.address) {
-        throw new Error('Required fields are missing');
-      }
-      if (
-        !payload.voucherType ||
-        !['payment', 'receipt'].includes(payload.voucherType)
-      ) {
-        console.warn(
-          'Invalid voucher type, using default:',
-          payload.voucherType,
-        );
-        payload.voucherType = 'payment';
-      }
       const response = await updatePartyWithRetry(accessToken, payload);
-      console.log('✅ Update API Response:', response.data);
+      const responseData = (response as any)?.data || response;
+      console.log('✅ Update API Response:', responseData);
+
+      // Also update extended info (address/GST/phone format) via add-info helper
+      try {
+        const addInfoPayload = {
+          customerId: customerData.id,
+          partyName: partyName.trim(),
+          partyType: partyType === 'supplier' ? 'Supplier' : 'Customer',
+          phoneNumber: phoneNumber.trim().replace(/\D/g, ''),
+          address: address.trim(),
+          addressLine1: address.trim(),
+          gstNumber: gstin.trim() || null,
+          gst: gstin.trim() || null,
+          gstin: gstin.trim() || null,
+          // structured address if available
+          ...(address.trim() || gstin.trim()
+            ? {
+                addresses: [
+                  {
+                    type: 'billing',
+                    ...(address.trim()
+                      ? { flatBuildingNumber: address.trim() }
+                      : {}),
+                    ...(gstin.trim() ? { gstin: gstin.trim() } : {}),
+                  },
+                ],
+              }
+            : {}),
+        } as any;
+        const addInfoResp = (await unifiedApi.post(
+          '/customers/add-info',
+          addInfoPayload,
+        )) as {
+          data: any;
+          status: number;
+          headers: Headers;
+        };
+        // unifiedApi returns { data, status, headers } structure
+        if (addInfoResp.status < 200 || addInfoResp.status >= 300) {
+          console.warn(
+            'Optional /customers/add-info returned',
+            addInfoResp.status,
+          );
+        }
+      } catch (e) {
+        console.warn('Optional /customers/add-info failed:', e);
+      }
+
+      // Emit profile update event to refresh user data in other screens
+      console.log(
+        '📢 AddPartyScreen: Emitting profile update event after party update',
+      );
+      profileUpdateManager.emitProfileUpdate();
+
+      // Navigate back to Customer list and force refresh so updated details appear immediately
       showCustomAlert(
         'Success',
         'Party updated successfully!',
         'success',
         () => {
-          navigation.goBack();
+          navigation.navigate('Customer', {
+            selectedTab: partyType,
+            shouldRefresh: true,
+          });
         },
       );
     } catch (error: any) {
@@ -751,31 +1541,21 @@ const AddPartyScreen: React.FC = () => {
           maxRetries + 1
         })`,
       );
-      const updateUrl = `${BASE_URL}/customers/${customerData.id}`;
+      const updateUrl = `/customers/${customerData.id}`;
       console.log('🔗 Update URL:', updateUrl);
-      console.log('🔑 Headers:', {
-        Authorization: `Bearer ${accessToken.substring(0, 20)}...`,
-      });
       const safePayload = {
         ...payload,
       };
       console.log('🆔 Party ID:', customerData.id);
       console.log('📋 Payload:', JSON.stringify(safePayload, null, 2));
-      const response = await axios.patch(updateUrl, safePayload, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 30000,
-        validateStatus: status => {
-          return status >= 200 && status < 300;
-        },
-      });
-      console.log(
-        '✅ Party update successful:',
-        response.status,
-        response.data,
-      );
+      const response = (await unifiedApi.patch(updateUrl, safePayload)) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
+      // unifiedApi returns { data, status, headers } structure
+      const responseData = response.data || response;
+      console.log('✅ Party update successful:', response.status, responseData);
       return response;
     } catch (error: any) {
       console.error(`❌ Party update attempt ${retryCount + 1} failed:`, {
@@ -791,6 +1571,19 @@ const AddPartyScreen: React.FC = () => {
           data: error.config?.data,
         },
       });
+      if (error.response?.status === 400) {
+        const backendMsg =
+          error?.response?.data?.message || error?.response?.data?.error;
+        if (
+          backendMsg &&
+          String(backendMsg)
+            .toLowerCase()
+            .includes('phone number already exists')
+        ) {
+          throw new Error('A party with this phone number already exists');
+        }
+        throw new Error('Invalid data provided. Please check your inputs.');
+      }
       if (error.response?.status === 401) {
         throw new Error('Authentication failed. Please login again.');
       }
@@ -830,27 +1623,61 @@ const AddPartyScreen: React.FC = () => {
   };
 
   const handleUpdateError = async (error: any) => {
-    let errorMessage = 'Failed to update party. Please try again.';
+    // Import error handler
+    const { handleApiError } = require('../../utils/apiErrorHandler');
+    const errorInfo = handleApiError(error);
+
+    // Handle 403 Forbidden errors with user-friendly message
+    if (errorInfo.isForbidden) {
+      showCustomAlert('Access Denied', errorInfo.message, 'error');
+      return;
+    }
+
+    let errorMessage =
+      errorInfo.message || 'Failed to update party. Please try again.';
     let showRetry = false;
 
-    // Check if it's a transaction limit error
+    // Early exit: duplicate phone number surfaced from retry layer
+    try {
+      const msg = String(error?.message || '').toLowerCase();
+      if (msg.includes('phone number already exists')) {
+        setErrors(prev => ({
+          ...prev,
+          phoneNumber: 'This phone number is already used by another party.',
+        }));
+        showCustomAlert(
+          'Duplicate Phone Number',
+          'A party with this phone number already exists. Please use a different number.',
+          'error',
+        );
+        return;
+      }
+    } catch {}
+
+    // Check if it's specifically a transaction limit error
     if (
       error.response?.data?.message?.includes('transaction limit') ||
       error.response?.data?.message?.includes('limit exceeded') ||
-      error.response?.data?.message?.includes('Internal server error')
+      error.response?.data?.message?.includes('monthly limit') ||
+      error.response?.data?.message?.includes('quota exceeded')
     ) {
-      // Trigger transaction limit popup
+      // Only trigger transaction limit popup for actual limit errors
+      console.log(
+        '🚫 Transaction limit error detected in update error, showing popup',
+      );
       await forceShowPopup();
       return;
     }
 
-    if (error.response?.status === 500) {
-      errorMessage = `Server Error (${error.response.status}). There was an issue on the server. Please try again in a few minutes.`;
+    if (error.response?.status === 500 || errorInfo.status === 500) {
+      errorMessage = `Server Error (${
+        error.response?.status || errorInfo.status
+      }). There was an issue on the server. Please try again in a few minutes.`;
       showRetry = true;
-    } else if (error.response?.status === 503) {
+    } else if (error.response?.status === 503 || errorInfo.status === 503) {
       errorMessage = 'Service temporarily unavailable. Please try again later.';
       showRetry = true;
-    } else if (error.response?.status === 429) {
+    } else if (error.response?.status === 429 || errorInfo.status === 429) {
       errorMessage =
         'Too many requests. Please wait a moment before trying again.';
       showRetry = true;
@@ -862,16 +1689,8 @@ const AddPartyScreen: React.FC = () => {
       errorMessage =
         'Network error. Please check your internet connection and try again.';
       showRetry = true;
-    } else if (error.response?.data?.message) {
-      const message = error.response.data.message;
-      if (Array.isArray(message)) {
-        errorMessage = message.join(', ');
-      } else if (typeof message === 'object') {
-        errorMessage = JSON.stringify(message);
-      } else {
-        errorMessage = String(message);
-      }
     }
+
     const alertButtons: any[] = [{ text: 'OK', style: 'default' as const }];
     if (showRetry) {
       alertButtons.unshift({
@@ -887,14 +1706,18 @@ const AddPartyScreen: React.FC = () => {
       try {
         const accessToken = await AsyncStorage.getItem('accessToken');
         if (!accessToken) return 0;
-        const response = await axios.get(`${BASE_URL}/vouchers`, {
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: 15000,
-        });
-        const vouchers = response.data?.data || [];
+        const response = (await unifiedApi.get('/vouchers')) as {
+          data: any;
+          status: number;
+          headers: Headers;
+        };
+        // unifiedApi returns { data, status, headers } structure
+        const responseData = response.data || response;
+        const vouchers = Array.isArray(responseData?.data)
+          ? responseData.data
+          : Array.isArray(responseData)
+          ? responseData
+          : [];
         const relatedCount = vouchers.filter(
           (voucher: any) =>
             voucher.partyName === partyName ||
@@ -970,27 +1793,21 @@ const AddPartyScreen: React.FC = () => {
           maxRetries + 1
         })`,
       );
-      const deleteUrl = `${BASE_URL}/customers/${customerData.id}`;
+      const deleteUrl = `/customers/${customerData.id}`;
       console.log('🔗 Delete URL:', deleteUrl);
-      console.log('🔑 Headers:', {
-        Authorization: `Bearer ${accessToken.substring(0, 20)}...`,
-      });
       console.log('🆔 Party ID:', customerData.id);
       console.log('📝 Party Name:', partyName);
-      const response = await axios.delete(deleteUrl, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 30000,
-        validateStatus: status => {
-          return (status >= 200 && status < 300) || status === 404;
-        },
-      });
+      const response = (await unifiedApi.delete(deleteUrl)) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
+      // unifiedApi returns { data, status, headers } structure
+      const responseData = response.data || response;
       console.log(
         '✅ Party deletion successful:',
         response.status,
-        response.data,
+        responseData,
       );
       return response;
     } catch (error: any) {
@@ -1037,15 +1854,28 @@ const AddPartyScreen: React.FC = () => {
   };
 
   const handleDeleteError = (error: any) => {
-    let errorMessage = 'Failed to delete party. Please try again.';
+    // Import error handler
+    const { handleApiError } = require('../../utils/apiErrorHandler');
+    const errorInfo = handleApiError(error);
+
+    // Handle 403 Forbidden errors with user-friendly message
+    if (errorInfo.isForbidden) {
+      showCustomAlert('Access Denied', errorInfo.message, 'error');
+      return;
+    }
+
+    let errorMessage =
+      errorInfo.message || 'Failed to delete party. Please try again.';
     let showRetry = false;
-    if (error.response?.status === 500) {
-      errorMessage = `Server Error (${error.response.status}). There was an issue on the server when trying to delete the party and its related transactions. Please try again later.`;
+    if (error.response?.status === 500 || errorInfo.status === 500) {
+      errorMessage = `Server Error (${
+        error.response?.status || errorInfo.status
+      }). There was an issue on the server when trying to delete the party and its related transactions. Please try again later.`;
       showRetry = true;
-    } else if (error.response?.status === 503) {
+    } else if (error.response?.status === 503 || errorInfo.status === 503) {
       errorMessage = 'Service temporarily unavailable. Please try again later.';
       showRetry = true;
-    } else if (error.response?.status === 429) {
+    } else if (error.response?.status === 429 || errorInfo.status === 429) {
       errorMessage =
         'Too many requests. Please wait a moment before trying again.';
       showRetry = true;
@@ -1057,16 +1887,8 @@ const AddPartyScreen: React.FC = () => {
       errorMessage =
         'Network error. Please check your internet connection and try again.';
       showRetry = true;
-    } else if (error.response?.data?.message) {
-      const message = error.response.data.message;
-      if (Array.isArray(message)) {
-        errorMessage = message.join(', ');
-      } else if (typeof message === 'object') {
-        errorMessage = JSON.stringify(message);
-      } else {
-        errorMessage = String(message);
-      }
     }
+
     const alertButtons: any[] = [{ text: 'OK', style: 'default' as const }];
     if (showRetry) {
       alertButtons.unshift({
@@ -1079,51 +1901,44 @@ const AddPartyScreen: React.FC = () => {
 
   const deleteRelatedVouchers = async (accessToken: string) => {
     try {
-      console.log('🗑️ Deleting related vouchers for party:', partyName);
-      const response = await axios.get(`${BASE_URL}/vouchers`, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-      });
-      const vouchers = response.data?.data || [];
-      console.log('📊 Total vouchers found:', vouchers.length);
-      const relatedVouchers = vouchers.filter((voucher: any) => {
-        return (
-          voucher.partyName === partyName ||
-          voucher.supplierName === partyName ||
-          voucher.customerName === partyName
-        );
-      });
-      console.log('🔗 Related vouchers found:', relatedVouchers.length);
-      if (relatedVouchers.length === 0) {
-        console.log('ℹ️ No related vouchers found for deletion');
+      console.log('🗑️ Deleting related transactions for customer:', partyName);
+      const listResp = (await unifiedApi.get(
+        `/transactions?customer_id=${customerData?.id}`,
+      )) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
+      // unifiedApi returns { data, status, headers } structure
+      const responseData = listResp.data || listResp;
+      const transactions = Array.isArray(responseData?.data)
+        ? responseData.data
+        : Array.isArray(responseData)
+        ? responseData
+        : [];
+      console.log(
+        '📊 Total transactions found for customer:',
+        transactions.length,
+      );
+      if (transactions.length === 0) {
+        console.log('ℹ️ No related transactions found for deletion');
         return;
       }
-      const deletePromises = relatedVouchers.map(
-        async (voucher: any, index: number) => {
-          try {
-            console.log(
-              `🗑️ Deleting voucher ${index + 1}/${relatedVouchers.length}: ID ${
-                voucher.id
-              }, Type ${voucher.type}`,
-            );
-            await axios.delete(`${BASE_URL}/vouchers/${voucher.id}`, {
-              headers: {
-                Authorization: `Bearer ${accessToken}`,
-              },
-            });
-            console.log(`✅ Voucher ${voucher.id} deleted successfully.`);
-            return { success: true, id: voucher.id };
-          } catch (voucherError: any) {
-            console.error(
-              `❌ Failed to delete voucher ${voucher.id}:`,
-              voucherError,
-            );
-            return { success: false, id: voucher.id, error: voucherError };
-          }
-        },
-      );
+      const deletePromises = transactions.map(async (t: any, index: number) => {
+        try {
+          console.log(
+            `🗑️ Deleting transaction ${index + 1}/${transactions.length}: ID ${
+              t.id
+            }, Type ${t.type}`,
+          );
+          await unifiedApi.delete(`/transactions/${t.id}`);
+          console.log(`✅ Transaction ${t.id} deleted successfully.`);
+          return { success: true, id: t.id };
+        } catch (txnError: any) {
+          console.error(`❌ Failed to delete transaction ${t.id}:`, txnError);
+          return { success: false, id: t.id, error: txnError };
+        }
+      });
       const results = await Promise.allSettled(deletePromises);
       const successful = results.filter(
         result =>
@@ -1135,21 +1950,21 @@ const AddPartyScreen: React.FC = () => {
           result.status === 'fulfilled' &&
           !(result as PromiseFulfilledResult<any>).value?.success,
       ).length;
-      console.log('📊 Voucher deletion results:', {
+      console.log('📊 Transaction deletion results:', {
         successful,
         failed,
-        total: relatedVouchers.length,
+        total: transactions.length,
       });
       if (failed > 0) {
         showCustomAlert(
           'Warning',
-          `Failed to delete ${failed} of ${relatedVouchers.length} related transactions. The party will still be deleted, but you may need to manually clean up these transactions.`,
+          `Failed to delete ${failed} of ${transactions.length} related transactions. The party will still be deleted, but you may need to manually clean up these transactions.`,
           'warning',
         );
       }
-      console.log('✅ Related vouchers deletion completed');
+      console.log('✅ Related transactions deletion completed');
     } catch (error: any) {
-      console.error('❌ Error deleting related vouchers:', error);
+      console.error('❌ Error deleting related transactions:', error);
       showCustomAlert(
         'Warning',
         'Could not check for related transactions. The party will still be deleted. You may need to manually clean up transactions later.',
@@ -1218,7 +2033,7 @@ const AddPartyScreen: React.FC = () => {
           placeholder={placeholder}
           value={value}
           onChangeText={onChangeText}
-          placeholderTextColor="#666"
+          placeholderTextColor="#666666"
           multiline={multiline}
           numberOfLines={multiline ? 3 : 1}
           keyboardType={keyboardType}
@@ -1259,7 +2074,7 @@ const AddPartyScreen: React.FC = () => {
           placeholder="Enter amount (optional, +/-)"
           value={value}
           onChangeText={onChangeText}
-          placeholderTextColor="#666"
+          placeholderTextColor="#666666"
           keyboardType="numeric"
           onFocus={() => {
             if (inputRef) {
@@ -1298,10 +2113,17 @@ const AddPartyScreen: React.FC = () => {
   );
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#4f8cff" />
-      <View style={styles.header}>
+    <SafeAreaView style={styles.container} edges={['bottom']}>
+      <View
+        style={[
+          styles.header,
+          getSolidHeaderStyle(preciseStatusBarHeight || statusBarSpacer.height),
+        ]}
+      >
+        <View style={{ height: HEADER_CONTENT_HEIGHT }} />
         <TouchableOpacity
+          style={styles.headerBackButton}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           onPress={() => {
             console.log(
               '🔄 AddPartyScreen: Back button pressed, navigating back with refresh',
@@ -1309,13 +2131,27 @@ const AddPartyScreen: React.FC = () => {
             navigation.goBack();
           }}
         >
-          <MaterialCommunityIcons name="arrow-left" size={24} color="#fff" />
+          <MaterialCommunityIcons name="arrow-left" size={25} color="#fff" />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>
           {isEditMode ? 'Edit Party' : 'Add Party'}
         </Text>
         <View style={styles.headerRight} />
       </View>
+
+      {/* Subscription Error Banner */}
+      {subscriptionError && (
+        <View style={styles.subscriptionErrorBanner}>
+          <MaterialCommunityIcons name="alert-circle" size={16} color="#fff" />
+          <Text style={styles.subscriptionErrorText}>{subscriptionError}</Text>
+          <TouchableOpacity
+            onPress={() => setSubscriptionError(null)}
+            style={styles.dismissButton}
+          >
+            <MaterialCommunityIcons name="close" size={16} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      )}
       <KeyboardAwareScrollView
         ref={scrollViewRef}
         style={styles.content}
@@ -1332,7 +2168,9 @@ const AddPartyScreen: React.FC = () => {
         scrollEventThrottle={16}
       >
         <View style={styles.inputContainer}>
-          <Text style={styles.inputLabel}>Party Name *</Text>
+          <Text style={styles.inputLabel}>
+            Party Name<Text style={styles.required}> *</Text>
+          </Text>
           {renderInputField(
             'Party Name',
             partyName,
@@ -1345,7 +2183,9 @@ const AddPartyScreen: React.FC = () => {
           )}
         </View>
         <View style={styles.inputContainer}>
-          <Text style={styles.inputLabel}>Phone Number *</Text>
+          <Text style={styles.inputLabel}>
+            Phone Number<Text style={styles.required}> *</Text>
+          </Text>
           <View style={styles.phoneContainer}>
             <View style={styles.flagContainer}>
               <Text style={styles.flagEmoji}>🇮🇳</Text>
@@ -1362,7 +2202,7 @@ const AddPartyScreen: React.FC = () => {
                 value={phoneNumber}
                 onChangeText={handlePhoneNumberChange}
                 keyboardType="phone-pad"
-                placeholderTextColor="#999"
+                placeholderTextColor="#666666"
                 maxLength={10}
                 onFocus={() => {
                   console.log('🔍 Phone number input focused, centering...');
@@ -1391,12 +2231,26 @@ const AddPartyScreen: React.FC = () => {
               'truck-delivery',
             )}
           </View>
+
+          {/* Permission Status Indicator */}
+          {rbacBlockedMsg && (
+            <View style={styles.permissionWarning}>
+              <MaterialCommunityIcons
+                name="alert-circle"
+                size={16}
+                color="#ff9800"
+              />
+              <Text style={styles.permissionWarningText}>{rbacBlockedMsg}</Text>
+            </View>
+          )}
         </View>
 
         {/* Opening Balance - Show for reference but not sent to backend */}
         {!isEditMode ? (
           <View style={styles.inputContainer}>
-            <Text style={styles.inputLabel}>Opening Balance (Optional)</Text>
+            <Text style={[styles.inputLabel, { marginTop: 6 }]}>
+              Opening Balance (Optional)
+            </Text>
             {renderAmountInput(
               'Enter amount (optional, +/-)',
               openingBalance,
@@ -1407,18 +2261,23 @@ const AddPartyScreen: React.FC = () => {
           </View>
         ) : null}
 
-        {renderInputField(
-          'GSTIN (Optional)',
-          gstin,
-          setGstin,
-          undefined,
-          false,
-          'default',
-          undefined,
-          gstinRef,
-        )}
         <View style={styles.inputContainer}>
-          <Text style={styles.inputLabel}>Address *</Text>
+          <Text style={styles.inputLabel}>GSTIN (Optional)</Text>
+          {renderInputField(
+            '27AAAPA1234A1Z5',
+            gstin,
+            setGstin,
+            undefined,
+            false,
+            'default',
+            undefined,
+            gstinRef,
+          )}
+        </View>
+        <View style={styles.inputContainer}>
+          <Text style={styles.inputLabel}>
+            Address<Text style={styles.required}> *</Text>
+          </Text>
           {renderInputField(
             'Address',
             address,
@@ -1621,22 +2480,47 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8fafc',
   },
   header: {
-    backgroundColor: '#4f8cff',
+    backgroundColor: uiColors.primaryBlue,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 12,
-    paddingVertical: 12,
+    paddingVertical: 30,
+  },
+  headerBackButton: {
+    padding: 10,
+    borderRadius: 20,
   },
   headerTitle: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
+    color: uiColors.textHeader,
+    fontSize: 19,
+    fontWeight: '800',
     flex: 1,
     textAlign: 'center',
+    fontFamily: uiFonts.family,
   },
+
   headerRight: {
-    width: 24,
+    width: 44,
+  },
+  subscriptionErrorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: uiColors.errorRed,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  subscriptionErrorText: {
+    flex: 1,
+    color: '#fff',
+    fontSize: 14,
+
+    fontFamily: 'Roboto-Medium',
+  },
+
+  dismissButton: {
+    padding: 4,
   },
   content: {
     flex: 1,
@@ -1647,7 +2531,7 @@ const styles = StyleSheet.create({
     paddingBottom: 80,
   },
   inputContainer: {
-    marginBottom: 16,
+    marginBottom: 12,
   },
   inputWrapper: {
     flexDirection: 'row',
@@ -1664,10 +2548,12 @@ const styles = StyleSheet.create({
     borderColor: '#e0e0e0',
   },
   prefixText: {
-    fontSize: 12,
-    color: '#333',
-    fontWeight: '500',
+    fontSize: 14,
+    color: '#333333',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   textInput: {
     flex: 1,
     backgroundColor: '#fff',
@@ -1676,10 +2562,12 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 12,
-    fontSize: 12,
-    color: '#1e293b',
-    fontWeight: '500',
+    fontSize: 14,
+    color: '#333333',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   textInputWithPrefix: {
     borderTopLeftRadius: 0,
     borderBottomLeftRadius: 0,
@@ -1694,20 +2582,24 @@ const styles = StyleSheet.create({
   },
   errorText: {
     color: '#dc3545',
-    fontSize: 10,
+    fontSize: 12,
     marginTop: 4,
     marginLeft: 4,
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   phoneContainer: {
     flexDirection: 'row',
     gap: 8,
   },
   countryCode: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#1e293b',
+    fontSize: 14,
+    color: '#333333',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   phoneInputContainer: {
     flex: 1,
   },
@@ -1718,25 +2610,31 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 12,
-    fontSize: 12,
-    color: '#1e293b',
-    fontWeight: '500',
+    fontSize: 14,
+    color: '#333333',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   phoneInputError: {
     borderColor: '#dc3545',
   },
   partyTypeContainer: {
-    marginBottom: 16,
-  },
-  sectionLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#1e293b',
     marginBottom: 12,
   },
+  sectionLabel: {
+    fontSize: 16,
+    color: '#333333',
+    marginBottom: 10,
+    marginTop: 6,
+
+    fontFamily: 'Roboto-Medium',
+  },
+
   radioGroup: {
     flexDirection: 'row',
     gap: 12,
+    marginTop: 8,
   },
   radioCard: {
     flex: 1,
@@ -1765,9 +2663,9 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   radioButton: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
     borderWidth: 2,
     borderColor: '#4f8cff',
     alignItems: 'center',
@@ -1777,33 +2675,58 @@ const styles = StyleSheet.create({
     backgroundColor: '#4f8cff',
   },
   radioButtonInner: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
     backgroundColor: '#fff',
   },
   radioIcon: {
     marginLeft: 4,
   },
   radioLabel: {
-    fontSize: 12,
+    fontSize: 14,
     color: '#64748b',
-    fontWeight: '500',
     flex: 1,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   radioLabelSelected: {
     color: '#4f8cff',
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
+  permissionWarning: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff8e1',
+    borderWidth: 1,
+    borderColor: '#ffcc02',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginTop: 8,
+    gap: 8,
+  },
+  permissionWarningText: {
+    flex: 1,
+    fontSize: 12,
+    color: '#e65100',
+    lineHeight: 16,
+
+    fontFamily: 'Roboto-Medium',
+  },
+
   buttonContainer: {
     paddingHorizontal: 12,
     paddingVertical: 16,
     backgroundColor: '#fff',
     borderTopWidth: 1,
     borderTopColor: '#e2e8f0',
+    alignItems: 'stretch',
   },
   addButton: {
-    backgroundColor: '#4f8cff',
+    backgroundColor: uiColors.primaryBlue,
     paddingVertical: 14,
     borderRadius: 8,
     alignItems: 'center',
@@ -1817,10 +2740,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#94a3b8',
   },
   addButtonText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
+    color: uiColors.textHeader,
+    fontSize: 14,
+    fontFamily: uiFonts.family,
+    fontWeight: '700',
   },
+
   amountInputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1848,20 +2773,24 @@ const styles = StyleSheet.create({
     borderRightColor: '#dc3545',
   },
   amountPrefixText: {
-    fontSize: 12,
-    color: '#1e293b',
-    fontWeight: '600',
+    fontSize: 16,
+    color: '#333333',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   amountInput: {
     flex: 1,
-    fontSize: 12,
-    color: '#1e293b',
+    fontSize: 14,
+    color: '#333333',
     paddingHorizontal: 12,
     paddingVertical: 12,
     borderRightWidth: 1,
     borderRightColor: '#e2e8f0',
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   amountInputError: {
     borderColor: '#dc3545',
   },
@@ -1886,19 +2815,26 @@ const styles = StyleSheet.create({
     borderLeftColor: '#dc3545',
   },
   voucherTypeText: {
-    fontSize: 11,
-    color: '#1e293b',
-    fontWeight: '500',
+    fontSize: 15,
+    color: '#333333',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   voucherTypeTextReceipt: {
     color: '#28a745',
+
+    fontFamily: 'Roboto-Medium',
   },
   inputLabel: {
-    fontSize: 12,
-    color: '#1e293b',
+    fontSize: 16,
+    color: '#333333',
     marginBottom: 8,
-    fontWeight: '600',
+    marginTop: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   flagContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1913,26 +2849,31 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   flagEmoji: {
-    fontSize: 12,
-    color: '#333',
-    fontWeight: '500',
+    fontSize: 16,
+    color: '#333333',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   editButtonContainer: {
     flexDirection: 'row',
     gap: 9,
+    width: '100%',
   },
   updateButton: {
     flex: 2,
-    backgroundColor: '#4f8cff',
+    backgroundColor: uiColors.primaryBlue,
     paddingVertical: 12,
     borderRadius: 6,
     alignItems: 'center',
   },
   updateButtonText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
+    color: uiColors.textHeader,
+    fontSize: 14,
+    fontFamily: uiFonts.family,
+    fontWeight: '700',
   },
+
   deleteButton: {
     flex: 1,
     flexDirection: 'row',
@@ -1945,18 +2886,29 @@ const styles = StyleSheet.create({
   },
   deleteButtonText: {
     color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: 14,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '700',
   },
+
   buttonDisabled: {
     backgroundColor: '#ccc',
   },
   notSupportedNote: {
-    fontSize: 9,
-    color: '#888',
+    fontSize: 12,
+    color: '#666666',
     marginTop: 3,
     marginBottom: 6,
+
+    fontFamily: 'Roboto-Medium',
   },
+
+  required: {
+    color: '#dc3545',
+
+    fontFamily: 'Roboto-Medium',
+  },
+
   // Custom Alert Styles
   alertOverlay: {
     position: 'absolute',
@@ -1999,21 +2951,25 @@ const styles = StyleSheet.create({
     elevation: 8,
   },
   alertTitle: {
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: '700',
-    color: '#1a202c',
+    color: '#333333',
     textAlign: 'center',
     marginBottom: 12,
     letterSpacing: 0.5,
+    fontFamily: 'Roboto-Medium',
   },
+
   alertMessage: {
-    fontSize: 14,
+    fontSize: 15,
     color: '#4a5568',
     textAlign: 'center',
-    lineHeight: 20,
+    lineHeight: 22,
     marginBottom: 28,
     paddingHorizontal: 8,
+    fontFamily: 'Roboto-Medium',
   },
+
   alertButtons: {
     flexDirection: 'row',
     gap: 16,
@@ -2043,16 +2999,19 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   alertButtonCancelText: {
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: '600',
     color: '#4a5568',
     letterSpacing: 0.3,
+    fontFamily: 'Roboto-Medium',
   },
+
   alertButtonConfirmText: {
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: '700',
     color: '#fff',
     letterSpacing: 0.3,
+    fontFamily: 'Roboto-Medium',
   },
 });
 

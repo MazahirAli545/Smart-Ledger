@@ -5,12 +5,13 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  StatusBar,
   Dimensions,
   FlatList,
   ActivityIndicator,
   Linking,
+  Platform,
 } from 'react-native';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   useNavigation,
@@ -21,10 +22,23 @@ import {
 } from '@react-navigation/native';
 import { StackNavigationProp } from '@react-navigation/stack';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
+import {
+  uiColors,
+  uiFonts,
+  uiButtons,
+  uiLayout,
+  uiIcons,
+} from '../../config/uiSizing';
 import { AppStackParamList } from '../../types/navigation';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { BASE_URL } from '../../api';
+import { unifiedApi } from '../../api/unifiedApiService';
 import { getToken, getUserIdFromToken } from '../../utils/storage';
+import { useStatusBarWithGradient } from '../../hooks/useStatusBar';
+import { getStatusBarHeight } from 'react-native-status-bar-height';
+import {
+  HEADER_CONTENT_HEIGHT,
+  getSolidHeaderStyle,
+} from '../../utils/headerLayout';
 
 const { width } = Dimensions.get('window');
 
@@ -33,6 +47,13 @@ const CustomerDetailScreen: React.FC = () => {
   const route = useRoute<RouteProp<AppStackParamList, 'CustomerDetail'>>();
   const { customer, partyType, refresh } = route.params || {};
   const isFocused = useIsFocused();
+
+  // StatusBar like ProfileScreen
+  const { statusBarSpacer } = useStatusBarWithGradient('CustomerDetail', [
+    '#4f8cff',
+    '#4f8cff',
+  ]);
+  const preciseStatusBarHeight = getStatusBarHeight(true);
 
   // Four action buttons available:
   // 1. Payment (Red) - Money going out (gave)
@@ -49,6 +70,12 @@ const CustomerDetailScreen: React.FC = () => {
   const [selectedAction, setSelectedAction] = useState<
     'payment' | 'receipt' | 'purchase' | 'sell' | null
   >(null);
+
+  // State for date and time pickers
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [showTimePicker, setShowTimePicker] = useState(false);
+  const [selectedDate, setSelectedDate] = useState<Date | null>(null);
+  const [selectedTime, setSelectedTime] = useState<Date | null>(null);
 
   // Custom Alert State
   const [customAlert, setCustomAlert] = useState<{
@@ -134,75 +161,82 @@ const CustomerDetailScreen: React.FC = () => {
         return;
       }
 
-      // Fetch all vouchers and filter by party name
-      const res = await fetch(`${BASE_URL}/vouchers`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(
-          err.message || `Failed to fetch transactions: ${res.status}`,
-        );
-      }
-
-      const data = await res.json();
-
-      // Add validation for API response structure
-      if (!data || typeof data !== 'object') {
+      // Fetch transactions for this customer only (server-side filtered)
+      // Use unified API with server-side filtering
+      const response = (await unifiedApi.getTransactionsByCustomer(
+        customer.id,
+      )) as { data: any; status: number; headers: Headers };
+      // Validate API shape
+      if (!response || typeof response !== 'object') {
         throw new Error('Invalid API response format');
       }
 
-      const vouchers = Array.isArray(data.data) ? data.data : [];
+      const data = response.data || response;
+      const rawItems = Array.isArray(data?.data)
+        ? data.data
+        : Array.isArray(data)
+        ? data
+        : [];
 
-      console.log('🔍 CustomerDetailScreen: Raw voucher data:', {
-        totalVouchers: vouchers.length,
+      // Normalize transactions to a consistent shape
+      const transactions = rawItems.map((t: any) => {
+        const backendType = String(t.type || '').toLowerCase();
+        const hasItems = Array.isArray(t.items) && t.items.length > 0;
+        let unifiedType:
+          | 'payment'
+          | 'receipt'
+          | 'Purchase'
+          | 'Sell'
+          | 'transaction' = 'transaction';
+        if (backendType === 'debit' || backendType === 'payment') {
+          unifiedType = hasItems ? 'Purchase' : 'payment';
+        } else if (backendType === 'credit' || backendType === 'receipt') {
+          unifiedType = hasItems ? 'Sell' : 'receipt';
+        } else if (backendType === 'purchase') unifiedType = 'Purchase';
+        else if (
+          backendType === 'sell' ||
+          backendType === 'sale' ||
+          backendType === 'invoice'
+        )
+          unifiedType = 'Sell';
+
+        return {
+          id:
+            t.id ??
+            t.transactionId ??
+            t._id ??
+            Math.random().toString(36).slice(2),
+          type: unifiedType,
+          amount: Number(t.amount ?? t.total ?? 0),
+          customerId:
+            t.customerId ?? t.customer_id ?? t.partyId ?? t.party_id ?? null,
+          partyName: t.partyName ?? t.customerName ?? t.supplierName ?? '',
+          phoneNumber: t.phoneNumber ?? t.partyPhone ?? '',
+          date: t.date ?? t.createdAt ?? t.updatedAt ?? null,
+          method: t.method ?? t.paymentMethod ?? '',
+          _raw: t,
+        };
+      });
+
+      console.log('🔍 CustomerDetailScreen: Raw transactions data:', {
+        totalTransactions: transactions.length,
         customerId: customer?.id,
         customerName: customer?.name,
         customerPhone: customer?.phoneNumber,
-        sampleVouchers: vouchers.slice(0, 5).map((v: any) => ({
+        sample: transactions.slice(0, 5).map((v: any) => ({
           id: v.id,
           customerId: v.customerId,
           partyName: v.partyName,
-          supplierName: v.supplierName,
           phoneNumber: v.phoneNumber,
           type: v.type,
           amount: v.amount,
         })),
       });
 
-      // Filter transactions by this customer/supplier
-      // Priority: customerId > partyName (to avoid confusion with similar names)
-      const customerTransactions = vouchers.filter((v: any) => {
-        // First try to match by customerId if available
-        if (
-          v.customerId &&
-          customer?.id &&
-          String(v.customerId) === String(customer.id)
-        ) {
-          return true;
-        }
-
-        // Fallback to party name matching (for backward compatibility)
-        // But add additional validation to ensure it's the same customer
-        if (
-          v.partyName === customer?.name ||
-          v.supplierName === customer?.name
-        ) {
-          // Additional check: if we have phone number, verify it matches
-          if (customer?.phoneNumber && v.phoneNumber) {
-            return customer.phoneNumber === v.phoneNumber;
-          }
-          // If no phone number, use name matching but log a warning
-          console.warn(
-            `⚠️ Using name-based matching for customer: ${customer?.name}. Consider using customerId for more accurate results.`,
-          );
-          return true;
-        }
-
-        return false;
+      // Since the API is filtered by customerId, we only keep records that match id as a hard guard.
+      const customerTransactions = transactions.filter((v: any) => {
+        const vId = v.customerId ?? v._raw?.customerId ?? v._raw?.customer_id;
+        return vId && customer?.id && String(vId) === String(customer.id);
       });
 
       console.log('🔍 CustomerDetailScreen: Filtered transactions:', {
@@ -226,12 +260,12 @@ const CustomerDetailScreen: React.FC = () => {
       let totalReceipts = 0;
       let totalPayments = 0;
 
-      customerTransactions.forEach((voucher: any) => {
-        const amount = parseFloat(voucher.amount) || 0;
-        if (voucher.type === 'receipt' || voucher.type === 'Sell') {
-          totalReceipts += amount; // Money coming in (you get)
-        } else if (voucher.type === 'payment' || voucher.type === 'Purchase') {
-          totalPayments += amount; // Money going out (you give)
+      customerTransactions.forEach((txn: any) => {
+        const amount = Number(txn.amount) || 0;
+        if (txn.type === 'receipt' || txn.type === 'Sell') {
+          totalReceipts += amount; // Money coming in
+        } else if (txn.type === 'payment' || txn.type === 'Purchase') {
+          totalPayments += amount; // Money going out
         }
       });
 
@@ -308,11 +342,188 @@ const CustomerDetailScreen: React.FC = () => {
   };
 
   const handleSetReminder = () => {
-    showCustomAlert(
-      'Set Reminder',
-      'Set collection reminder for this customer',
-      'info',
-    );
+    // Reset previous selections
+    setSelectedDate(null);
+    setSelectedTime(null);
+    // Show date picker first
+    setShowDatePicker(true);
+  };
+
+  // Handle date selection
+  const handleDateChange = (event: any, date?: Date) => {
+    if (Platform.OS === 'android') {
+      setShowDatePicker(false);
+
+      if (event.type === 'set' && date) {
+        setSelectedDate(date);
+        // After date is selected, show time picker
+        setTimeout(() => {
+          setShowTimePicker(true);
+        }, 300);
+      } else if (event.type === 'dismissed') {
+        setSelectedDate(null);
+      }
+    } else {
+      // iOS handling
+      if (date) {
+        setSelectedDate(date);
+        // On iOS, close date picker and show time picker
+        setShowDatePicker(false);
+        setTimeout(() => {
+          setShowTimePicker(true);
+        }, 300);
+      }
+      if (event.type === 'dismissed') {
+        setShowDatePicker(false);
+        setSelectedDate(null);
+      }
+    }
+  };
+
+  // Handle time selection
+  const handleTimeChange = (event: any, time?: Date) => {
+    if (Platform.OS === 'android') {
+      setShowTimePicker(false);
+
+      if (event.type === 'set' && time && selectedDate) {
+        setSelectedTime(time);
+
+        // Combine date and time
+        const reminderDateTime = new Date(selectedDate);
+        reminderDateTime.setHours(time.getHours());
+        reminderDateTime.setMinutes(time.getMinutes());
+        reminderDateTime.setSeconds(0);
+
+        // Automatically send messages after both date and time are selected
+        sendReminderMessages(reminderDateTime);
+      } else if (event.type === 'dismissed') {
+        setSelectedTime(null);
+        setSelectedDate(null);
+      }
+    } else {
+      // iOS handling
+      if (time && selectedDate) {
+        setSelectedTime(time);
+        setShowTimePicker(false);
+
+        // Combine date and time
+        const reminderDateTime = new Date(selectedDate);
+        reminderDateTime.setHours(time.getHours());
+        reminderDateTime.setMinutes(time.getMinutes());
+        reminderDateTime.setSeconds(0);
+
+        // Automatically send messages after both date and time are selected
+        sendReminderMessages(reminderDateTime);
+      }
+      if (event.type === 'dismissed') {
+        setShowTimePicker(false);
+        setSelectedTime(null);
+        setSelectedDate(null);
+      }
+    }
+  };
+
+  // Function to send reminder messages via WhatsApp and SMS
+  const sendReminderMessages = async (reminderDateTime: Date) => {
+    if (!customer?.phoneNumber) {
+      showCustomAlert(
+        'No Phone Number',
+        'Phone number not available for this contact',
+        'warning',
+      );
+      return;
+    }
+
+    try {
+      // Format phone number
+      let phoneNumber = customer.phoneNumber.replace(/[\s\-\(\)]/g, '');
+
+      if (!phoneNumber.startsWith('+')) {
+        if (phoneNumber.startsWith('0')) {
+          phoneNumber = '+91' + phoneNumber.substring(1);
+        } else if (phoneNumber.length === 10) {
+          phoneNumber = '+91' + phoneNumber;
+        } else {
+          phoneNumber = '+91' + phoneNumber;
+        }
+      }
+
+      // Format date and time
+      const formattedDate = reminderDateTime.toLocaleDateString('en-IN', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+      });
+      const formattedTime = reminderDateTime.toLocaleTimeString('en-IN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+      });
+
+      // Create message with balance amount and reminder date/time
+      const balanceText = balanceType === 'receipt' ? 'Receipt' : 'Payment';
+      const amountText = `₹${Math.abs(balance).toLocaleString('en-IN')}`;
+      const customerName = customer.name || 'Customer';
+
+      const message = `Hi ${customerName},\n\nThis is a reminder regarding your ${balanceText.toLowerCase()} of ${amountText}.\n\nReminder Date: ${formattedDate}\nReminder Time: ${formattedTime}\n\nPlease review and confirm.\n\nThank you!`;
+
+      // Send WhatsApp message
+      try {
+        const encodedMessage = encodeURIComponent(message);
+        const whatsappUrl = `whatsapp://send?phone=${phoneNumber}&text=${encodedMessage}`;
+        const canOpenWhatsApp = await Linking.canOpenURL(whatsappUrl);
+
+        if (canOpenWhatsApp) {
+          await Linking.openURL(whatsappUrl);
+        } else {
+          const webWhatsappUrl = `https://wa.me/${phoneNumber}?text=${encodedMessage}`;
+          await Linking.openURL(webWhatsappUrl);
+        }
+      } catch (whatsappError) {
+        console.error('Error sending WhatsApp:', whatsappError);
+      }
+
+      // Small delay before sending SMS
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Send SMS message
+      try {
+        const smsUrl = `sms:${phoneNumber}?body=${encodeURIComponent(message)}`;
+        const canOpenSMS = await Linking.canOpenURL(smsUrl);
+
+        if (canOpenSMS) {
+          await Linking.openURL(smsUrl);
+        } else {
+          const localPhoneNumber = phoneNumber.replace('+91', '');
+          const fallbackSmsUrl = `sms:${localPhoneNumber}?body=${encodeURIComponent(
+            message,
+          )}`;
+          await Linking.openURL(fallbackSmsUrl);
+        }
+      } catch (smsError) {
+        console.error('Error sending SMS:', smsError);
+      }
+
+      // Show success message
+      showCustomAlert(
+        'Reminder Set',
+        `Reminder messages sent successfully for ${formattedDate} at ${formattedTime}`,
+        'success',
+      );
+    } catch (error) {
+      console.error('Error sending reminder messages:', error);
+      showCustomAlert(
+        'Error',
+        'Failed to send reminder messages. Please try again.',
+        'error',
+      );
+    } finally {
+      // Reset picker states
+      setShowDatePicker(false);
+      setShowTimePicker(false);
+      setSelectedDate(null);
+      setSelectedTime(null);
+    }
   };
 
   const handleGenerateReport = () => {
@@ -323,12 +534,118 @@ const CustomerDetailScreen: React.FC = () => {
     );
   };
 
-  const handleSendReminder = () => {
-    showCustomAlert('Send Reminder', 'Send reminder via WhatsApp', 'info');
+  const handleSendReminder = async () => {
+    if (!customer?.phoneNumber) {
+      showCustomAlert(
+        'No Phone Number',
+        'Phone number not available for this contact',
+        'warning',
+      );
+      return;
+    }
+
+    try {
+      // Format phone number (remove spaces, dashes, and ensure country code)
+      let phoneNumber = customer.phoneNumber.replace(/[\s\-\(\)]/g, '');
+
+      // If phone number doesn't start with country code, add +91 for India
+      if (!phoneNumber.startsWith('+')) {
+        if (phoneNumber.startsWith('0')) {
+          phoneNumber = '+91' + phoneNumber.substring(1);
+        } else if (phoneNumber.length === 10) {
+          phoneNumber = '+91' + phoneNumber;
+        } else {
+          phoneNumber = '+91' + phoneNumber;
+        }
+      }
+
+      // Create message with balance amount
+      const balanceText = balanceType === 'receipt' ? 'Receipt' : 'Payment';
+      const amountText = `₹${Math.abs(balance).toLocaleString('en-IN')}`;
+      const customerName = customer.name || 'Customer';
+
+      const message = `Hi ${customerName},\n\nThis is a reminder regarding your ${balanceText.toLowerCase()} of ${amountText}.\n\nPlease review and confirm.\n\nThank you!`;
+
+      // Encode the message for URL
+      const encodedMessage = encodeURIComponent(message);
+      const whatsappUrl = `whatsapp://send?phone=${phoneNumber}&text=${encodedMessage}`;
+
+      // Check if WhatsApp can be opened
+      const canOpen = await Linking.canOpenURL(whatsappUrl);
+
+      if (canOpen) {
+        await Linking.openURL(whatsappUrl);
+      } else {
+        // Fallback to web WhatsApp if app is not installed
+        const webWhatsappUrl = `https://wa.me/${phoneNumber}?text=${encodedMessage}`;
+        await Linking.openURL(webWhatsappUrl);
+      }
+    } catch (error) {
+      console.error('Error opening WhatsApp:', error);
+      showCustomAlert(
+        'Error',
+        'Failed to open WhatsApp. Please make sure WhatsApp is installed on your device.',
+        'error',
+      );
+    }
   };
 
-  const handleSendSMS = () => {
-    showCustomAlert('Send SMS', 'Send reminder via SMS', 'info');
+  const handleSendSMS = async () => {
+    if (!customer?.phoneNumber) {
+      showCustomAlert(
+        'No Phone Number',
+        'Phone number not available for this contact',
+        'warning',
+      );
+      return;
+    }
+
+    try {
+      // Format phone number (remove spaces, dashes, and parentheses)
+      let phoneNumber = customer.phoneNumber.replace(/[\s\-\(\)]/g, '');
+
+      // If phone number doesn't start with country code, add +91 for India
+      if (!phoneNumber.startsWith('+')) {
+        if (phoneNumber.startsWith('0')) {
+          phoneNumber = '+91' + phoneNumber.substring(1);
+        } else if (phoneNumber.length === 10) {
+          phoneNumber = '+91' + phoneNumber;
+        } else {
+          phoneNumber = '+91' + phoneNumber;
+        }
+      }
+
+      // Create message with balance amount
+      const balanceText = balanceType === 'receipt' ? 'Receipt' : 'Payment';
+      const amountText = `₹${Math.abs(balance).toLocaleString('en-IN')}`;
+      const customerName = customer.name || 'Customer';
+
+      const message = `Hi ${customerName},\n\nThis is a reminder regarding your ${balanceText.toLowerCase()} of ${amountText}.\n\nPlease review and confirm.\n\nThank you!`;
+
+      // Create SMS URL
+      const smsUrl = `sms:${phoneNumber}?body=${encodeURIComponent(message)}`;
+
+      // Check if SMS can be opened
+      const canOpen = await Linking.canOpenURL(smsUrl);
+
+      if (canOpen) {
+        await Linking.openURL(smsUrl);
+      } else {
+        // Fallback: try without country code
+        const localPhoneNumber = phoneNumber.replace('+91', '');
+        const fallbackSmsUrl = `sms:${localPhoneNumber}?body=${encodeURIComponent(
+          message,
+        )}`;
+        await Linking.openURL(fallbackSmsUrl);
+      }
+    } catch (error) {
+      console.error('Error opening SMS:', error);
+      showCustomAlert(
+        'Error',
+        'Failed to open SMS. Please make sure your device supports SMS.',
+        'error',
+      );
+    }
   };
 
   const handleCall = async () => {
@@ -429,22 +746,8 @@ const CustomerDetailScreen: React.FC = () => {
             return;
           }
 
-          const res = await fetch(`${BASE_URL}/vouchers/${transaction.id}`, {
-            method: 'DELETE',
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          });
-
-          if (!res.ok) {
-            const err = await res
-              .json()
-              .catch(() => ({ message: 'Unknown error occurred' }));
-            throw new Error(
-              err.message ||
-                `Failed to delete transaction. Status: ${res.status}`,
-            );
-          }
+          // Use unified API for delete
+          await unifiedApi.deleteTransaction(transaction.id);
 
           showCustomAlert(
             'Success',
@@ -615,11 +918,15 @@ const CustomerDetailScreen: React.FC = () => {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#4f8cff" />
-
+    <SafeAreaView style={styles.container} edges={['bottom']}>
       {/* Header */}
-      <View style={styles.header}>
+      <View
+        style={[
+          styles.header,
+          getSolidHeaderStyle(preciseStatusBarHeight || statusBarSpacer.height),
+        ]}
+      >
+        <View style={{ height: HEADER_CONTENT_HEIGHT }} />
         <TouchableOpacity
           style={styles.backButton}
           onPress={() => {
@@ -629,7 +936,7 @@ const CustomerDetailScreen: React.FC = () => {
             navigation.navigate('Customer', { shouldRefresh: true });
           }}
         >
-          <MaterialCommunityIcons name="arrow-left" size={24} color="#fff" />
+          <MaterialCommunityIcons name="arrow-left" size={27} color="#fff" />
         </TouchableOpacity>
 
         <View style={styles.headerContent}>
@@ -637,21 +944,34 @@ const CustomerDetailScreen: React.FC = () => {
             <Text style={styles.avatarText}>{customer.avatar}</Text>
           </View>
           <View style={styles.headerInfo}>
-            <Text style={styles.customerName}>{customer.name}</Text>
-            <View style={styles.partyTypeContainer}>
-              <Text style={styles.partyTypeText}>
-                {partyType === 'customer' ? 'Customer' : 'Supplier'}
+            <View style={styles.headerTitleRow}>
+              <Text
+                style={styles.customerName}
+                numberOfLines={1}
+                ellipsizeMode="tail"
+              >
+                {customer.name}
               </Text>
             </View>
-            <TouchableOpacity onPress={handleViewSettings}>
-              <Text style={styles.viewSettingsText}>View settings</Text>
-            </TouchableOpacity>
           </View>
         </View>
 
-        <TouchableOpacity style={styles.callButton} onPress={handleCall}>
-          <MaterialCommunityIcons name="phone" size={20} color="#fff" />
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <TouchableOpacity
+            onPress={handleViewSettings}
+            style={styles.viewSettingsButton}
+            activeOpacity={0.8}
+          >
+            <MaterialCommunityIcons
+              name="pencil-outline"
+              size={23}
+              color="#fff"
+            />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.callButton} onPress={handleCall}>
+            <MaterialCommunityIcons name="phone" size={25} color="#fff" />
+          </TouchableOpacity>
+        </View>
       </View>
 
       <View style={styles.content}>
@@ -682,7 +1002,8 @@ const CustomerDetailScreen: React.FC = () => {
             </View>
             <TouchableOpacity
               style={styles.setDateButton}
-              onPress={handleSetReminder}
+              onPress={undefined}
+              disabled={true}
             >
               <Text style={styles.setDateText}>SET DATE</Text>
             </TouchableOpacity>
@@ -1040,6 +1361,28 @@ const CustomerDetailScreen: React.FC = () => {
         </TouchableOpacity>
       </View>
 
+      {/* Date Picker */}
+      {showDatePicker && (
+        <DateTimePicker
+          value={selectedDate || new Date()}
+          mode="date"
+          display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+          onChange={handleDateChange}
+          minimumDate={new Date()}
+        />
+      )}
+
+      {/* Time Picker */}
+      {showTimePicker && (
+        <DateTimePicker
+          value={selectedTime || new Date()}
+          mode="time"
+          display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+          onChange={handleTimeChange}
+          is24Hour={false}
+        />
+      )}
+
       {/* Custom Alert Modal */}
       {customAlert.visible && (
         <View style={styles.alertOverlay}>
@@ -1151,11 +1494,16 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8fafc',
   },
   header: {
-    backgroundColor: '#4f8cff',
+    backgroundColor: uiColors.primaryBlue,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 12,
+    justifyContent: 'space-between',
+    paddingHorizontal: uiLayout.containerPaddingH,
+    paddingVertical: 30,
+  },
+  headerBackButton: {
+    padding: 10,
+    borderRadius: 20,
   },
   backButton: {
     width: 40,
@@ -1171,10 +1519,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginLeft: 16,
   },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   avatarContainer: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: '#fff',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1186,53 +1539,80 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   avatarText: {
-    color: '#4f8cff',
+    color: uiColors.primaryBlue,
     fontSize: 20,
-    fontWeight: '700',
+    fontFamily: uiFonts.family,
   },
+
   headerInfo: {
     flex: 1,
   },
-  customerName: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
-    marginBottom: 4,
-    letterSpacing: 0.2,
+  headerTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'nowrap',
   },
+  headerMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 2,
+  },
+  customerName: {
+    color: uiColors.textHeader,
+    fontSize: 19,
+    fontWeight: '800',
+    marginBottom: 0,
+    letterSpacing: 0.2,
+    fontFamily: uiFonts.family,
+    flex: 1,
+    marginRight: 8,
+  },
+
   partyTypeContainer: {
     backgroundColor: 'rgba(255, 255, 255, 0.2)',
     paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingVertical: 2,
     borderRadius: 12,
-    alignSelf: 'flex-start',
-    marginBottom: 4,
+    alignSelf: 'center',
+    marginBottom: 0,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.3)',
   },
   partyTypeText: {
-    color: '#fff',
+    color: uiColors.textHeader,
     fontSize: 9,
-    fontWeight: '600',
     letterSpacing: 0.1,
+    fontFamily: uiFonts.family,
   },
+
   viewSettingsText: {
     color: 'rgba(255, 255, 255, 0.9)',
-    fontSize: 9,
-    fontWeight: '500',
+    fontSize: 12,
     letterSpacing: 0.1,
+    fontFamily: uiFonts.family,
   },
+  viewSettingsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+  },
+
   callButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: 'rgba(255, 255, 255, 0.15)',
     alignItems: 'center',
     justifyContent: 'center',
   },
   content: {
     flex: 1,
-    paddingHorizontal: 12,
+    paddingHorizontal: uiLayout.containerPaddingH,
   },
   scrollableContainer: {
     flex: 1,
@@ -1245,9 +1625,9 @@ const styles = StyleSheet.create({
     paddingBottom: 80,
   },
   balanceCard: {
-    backgroundColor: '#fff',
+    backgroundColor: uiColors.bgCard,
     borderRadius: 12,
-    padding: 16,
+    padding: uiLayout.cardPadding,
     marginTop: 12,
     marginHorizontal: 2,
     shadowColor: '#000',
@@ -1263,15 +1643,18 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   balanceLabel: {
-    fontSize: 12,
+    fontSize: 14,
     color: '#64748b',
-    fontWeight: '500',
+    fontFamily: uiFonts.family,
   },
+
   balanceAmount: {
-    fontSize: 18,
+    fontSize: 20,
     fontWeight: '800',
     letterSpacing: 0.3,
+    fontFamily: uiFonts.family,
   },
+
   reminderSection: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -1287,29 +1670,33 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   reminderText: {
-    fontSize: 10,
+    fontSize: 12,
     color: '#64748b',
-    fontWeight: '500',
+    fontFamily: uiFonts.family,
   },
+
   setDateButton: {
-    backgroundColor: '#4f8cff',
+    backgroundColor: uiColors.primaryBlue,
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 6,
   },
   setDateText: {
-    color: '#fff',
-    fontSize: 9,
+    color: uiColors.textHeader,
+    fontSize: 10,
     fontWeight: '600',
-    letterSpacing: 0.2,
+    letterSpacing: 0.3,
+    fontFamily: uiFonts.family,
   },
+
   actionButtons: {
     flexDirection: 'row',
     justifyContent: 'space-around',
-    backgroundColor: '#fff',
+    backgroundColor: uiColors.bgCard,
     borderRadius: 12,
-    padding: 16,
-    marginTop: 12,
+    paddingHorizontal: uiLayout.cardPadding,
+    paddingVertical: 10,
+    marginTop: 10,
     marginHorizontal: 2,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
@@ -1322,39 +1709,43 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   actionButtonText: {
-    fontSize: 10,
+    fontSize: 14,
     color: '#64748b',
-    fontWeight: '600',
+    fontFamily: uiFonts.family,
   },
+
   transactionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#f8fafc',
+    backgroundColor: uiColors.bgMain,
     paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingVertical: 10,
     marginTop: 12,
     marginHorizontal: 2,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#e2e8f0',
+    borderColor: uiColors.borderLight,
   },
   transactionTitle: {
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 14,
     color: '#334155',
     letterSpacing: 0.2,
+    fontFamily: uiFonts.family,
   },
+
   transactionColumns: {
     flexDirection: 'row',
     gap: 12,
   },
   columnText: {
-    fontSize: 8,
+    // fontSize: 8,
+    fontSize: 12,
     color: '#64748b',
-    fontWeight: '600',
     letterSpacing: 0.1,
+    fontFamily: uiFonts.family,
   },
+
   // bottomButtons: {
   //   position: 'absolute',
   //   bottom: 0,
@@ -1389,32 +1780,40 @@ const styles = StyleSheet.create({
   // actionButtonTextSmall: {
   //   color: '#000000',
   //   fontSize: 12,
-  //   fontWeight: '600',
+  //,
   //   marginTop: 6,
   //   textAlign: 'center',
   //   letterSpacing: 0.2,
+  //   fontFamily: 'Roboto-Medium',
   // },
+
   // actionButtonTextSmallSelected: {
   //   color: '#FFFFFF',
-  //   fontWeight: '700',
+  //,
   //   fontSize: 13,
   //   letterSpacing: 0.3,
+  //   fontFamily: 'Roboto-Medium',
   // },
+
   // Inside the styles = StyleSheet.create({...}) block
 
   // Remove the old bottom button styles and replace with these:
 
   bottomButtons: {
     position: 'absolute',
-    bottom: 16,
+    bottom: 40,
     left: 16,
     right: 16,
     flexDirection: 'row',
     justifyContent: 'space-between',
-    backgroundColor: '#fff',
+    // Subtle primary-tinted background to match screen theme
+    backgroundColor: '#eef4ff',
     borderRadius: 30,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
+    // Tightened paddings for a slimmer pill
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: '#dbeafe',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 3 },
     shadowOpacity: 0.1,
@@ -1436,10 +1835,12 @@ const styles = StyleSheet.create({
   },
 
   actionButtonTextSmall: {
-    fontSize: 11,
-    fontWeight: '500',
-    color: '#64748b', // Neutral gray for inactive text
+    // Slightly larger for readability
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#64748b',
     marginTop: 4,
+    fontFamily: uiFonts.family,
   },
 
   actionButtonTextSmallSelected: {
@@ -1455,13 +1856,15 @@ const styles = StyleSheet.create({
   },
   errorText: {
     fontSize: 16,
-    color: '#dc3545',
-    fontWeight: 'bold',
+    color: uiColors.errorRed,
+
+    fontFamily: uiFonts.family,
   },
+
   noEntriesContainer: {
     alignItems: 'center',
     paddingVertical: 32,
-    backgroundColor: '#fff',
+    backgroundColor: uiColors.bgCard,
     borderRadius: 10,
     marginTop: 14,
     marginHorizontal: 2,
@@ -1477,7 +1880,9 @@ const styles = StyleSheet.create({
     color: '#334155',
     marginTop: 16,
     letterSpacing: 0.3,
+    fontFamily: uiFonts.family,
   },
+
   noEntriesSubtitle: {
     fontSize: 14,
     color: '#64748b',
@@ -1485,7 +1890,9 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingHorizontal: 20,
     lineHeight: 20,
+    fontFamily: uiFonts.family,
   },
+
   noEntriesHint: {
     fontSize: 12,
     color: '#94a3b8',
@@ -1493,7 +1900,9 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingHorizontal: 20,
     fontWeight: '500',
+    fontFamily: uiFonts.family,
   },
+
   loadingContainer: {
     flex: 1,
     justifyContent: 'center',
@@ -1505,28 +1914,33 @@ const styles = StyleSheet.create({
     color: '#64748b',
     fontSize: 14,
     fontWeight: '500',
+    fontFamily: uiFonts.family,
   },
+
   retryButton: {
     marginTop: 20,
-    backgroundColor: '#4f8cff',
+    backgroundColor: uiColors.primaryBlue,
     paddingVertical: 12,
     paddingHorizontal: 24,
     borderRadius: 8,
   },
   retryButtonText: {
-    color: '#fff',
+    color: uiColors.textHeader,
     fontSize: 14,
     fontWeight: '600',
     letterSpacing: 0.3,
+    fontFamily: uiFonts.family,
   },
+
   transactionItem: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: '#fff',
-    padding: 12,
+    backgroundColor: uiColors.bgCard,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     borderRadius: 7.5,
-    marginBottom: 7.5,
+    marginBottom: 10,
     marginHorizontal: 1.5,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
@@ -1545,41 +1959,50 @@ const styles = StyleSheet.create({
     minWidth: 60,
   },
   transactionDescription: {
-    fontSize: 11.25,
+    fontSize: 15,
     fontWeight: '600',
     color: '#1e293b',
     marginBottom: 6,
-    lineHeight: 16.5,
+    lineHeight: 18,
     letterSpacing: 0.2,
+    fontFamily: uiFonts.family,
   },
+
   transactionMetaContainer: {
     flexDirection: 'column',
     alignItems: 'flex-start',
   },
   transactionDate: {
-    fontSize: 9,
+    fontSize: 12,
     color: '#64748b',
     fontWeight: '600',
     letterSpacing: 0.2,
     marginBottom: 1.5,
+    fontFamily: uiFonts.family,
   },
+
   transactionMethod: {
-    fontSize: 9,
+    fontSize: 12,
     color: '#64748b',
     fontWeight: '600',
     letterSpacing: 0.2,
+    fontFamily: uiFonts.family,
   },
+
   amountText: {
-    fontSize: 12.75,
+    fontSize: 18,
     fontWeight: '800',
     marginBottom: 3,
     letterSpacing: 0.4,
+    fontFamily: uiFonts.family,
   },
+
   amountLabel: {
-    fontSize: 8.25,
+    fontSize: 11,
     color: '#64748b',
     fontWeight: '600',
     letterSpacing: 0.2,
+    fontFamily: uiFonts.family,
   },
 
   openingBalanceItem: {
@@ -1588,7 +2011,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     backgroundColor: '#f0f9ff',
     borderRadius: 7.5,
-    padding: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     marginTop: 7.5,
     marginBottom: 7.5,
     marginHorizontal: 1.5,
@@ -1609,19 +2033,23 @@ const styles = StyleSheet.create({
     minWidth: 60,
   },
   openingBalanceDateTime: {
-    fontSize: 8.25,
+    fontSize: 11,
     color: '#64748b',
     marginBottom: 4.5,
     fontWeight: '600',
     letterSpacing: 0.2,
+    fontFamily: uiFonts.family,
   },
+
   openingBalanceText: {
-    fontSize: 9.75,
+    fontSize: 12,
     color: '#334155',
     marginBottom: 4.5,
     fontWeight: '600',
     letterSpacing: 0.2,
+    fontFamily: uiFonts.family,
   },
+
   openingBalanceHighlight: {
     backgroundColor: '#fef3c7',
     paddingHorizontal: 7.5,
@@ -1632,11 +2060,13 @@ const styles = StyleSheet.create({
     borderColor: '#fde68a',
   },
   openingBalanceLabel: {
-    fontSize: 8.25,
+    fontSize: 10,
     color: '#92400e',
     fontWeight: '700',
     letterSpacing: 0.3,
+    fontFamily: uiFonts.family,
   },
+
   openingBalanceAmountContainer: {
     backgroundColor: '#fef3c7',
     paddingHorizontal: 9,
@@ -1646,10 +2076,12 @@ const styles = StyleSheet.create({
     borderColor: '#fde68a',
   },
   openingBalanceAmount: {
-    fontSize: 12.75,
+    fontSize: 16,
     fontWeight: '800',
     letterSpacing: 0.4,
+    fontFamily: uiFonts.family,
   },
+
   openingBalanceIndicator: {
     width: 9,
     height: 9,
@@ -1697,21 +2129,25 @@ const styles = StyleSheet.create({
     marginBottom: 15,
   },
   alertTitle: {
-    fontSize: 16.5,
-    fontWeight: '800',
+    fontSize: 22,
+    fontWeight: '700',
     color: '#1a1a1a',
     textAlign: 'center',
     marginBottom: 9,
     letterSpacing: 0.3,
+    fontFamily: uiFonts.family,
   },
+
   alertMessage: {
-    fontSize: 12,
+    fontSize: 15,
     color: '#666',
     textAlign: 'center',
-    lineHeight: 18,
+    lineHeight: 22,
     marginBottom: 24,
     paddingHorizontal: 6,
+    fontFamily: uiFonts.family,
   },
+
   alertButtons: {
     flexDirection: 'row',
     gap: 12,
@@ -1741,16 +2177,19 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   alertButtonCancelText: {
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 16,
+    fontWeight: '600',
     color: '#6c757d',
     letterSpacing: 0.2,
+    fontFamily: uiFonts.family,
   },
+
   alertButtonConfirmText: {
-    fontSize: 12,
+    fontSize: 16,
     fontWeight: '700',
-    color: '#fff',
+    color: uiColors.textHeader,
     letterSpacing: 0.2,
+    fontFamily: uiFonts.family,
   },
 });
 

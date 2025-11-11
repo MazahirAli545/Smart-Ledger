@@ -244,18 +244,23 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 24,
-    fontWeight: 'bold',
     color: '#222',
     marginBottom: 8,
     textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   subtitle: {
     fontSize: 16,
     color: '#666',
     textAlign: 'center',
     marginBottom: 40,
     lineHeight: 22,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   progressDots: {
     flexDirection: 'row',
     justifyContent: 'center',
@@ -288,7 +293,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#666',
     marginLeft: 8,
-    fontStyle: 'italic',
+
+    fontFamily: 'Roboto-Medium',
   },
 });
 

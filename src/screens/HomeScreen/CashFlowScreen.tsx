@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   RefreshControl,
 } from 'react-native';
+
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
@@ -728,15 +729,20 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     fontSize: 24,
-    fontWeight: 'bold',
     color: '#222',
     marginBottom: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   headerSubtitle: {
     fontSize: 14,
     color: '#666',
     lineHeight: 18,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   headerRight: {
     alignItems: 'flex-end',
     gap: 8,
@@ -754,9 +760,11 @@ const styles = StyleSheet.create({
   },
   periodText: {
     fontSize: 14,
-    fontWeight: '600',
     color: '#222',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   exportButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -768,9 +776,11 @@ const styles = StyleSheet.create({
   },
   exportButtonText: {
     fontSize: 14,
-    fontWeight: '600',
     color: '#fff',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   metricsContainer: {
     paddingHorizontal: 16,
     paddingVertical: 20,
@@ -801,22 +811,31 @@ const styles = StyleSheet.create({
   },
   metricTitle: {
     fontSize: 14,
-    fontWeight: '600',
     color: '#666',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   metricValue: {
     fontSize: 22,
-    fontWeight: 'bold',
     marginBottom: 6,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   metricChange: {
     fontSize: 12,
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   metricSubtitle: {
     fontSize: 12,
     color: '#999',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   chartSection: {
     backgroundColor: '#fff',
     marginHorizontal: 16,
@@ -834,15 +853,20 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     fontSize: 20,
-    fontWeight: 'bold',
     color: '#222',
     marginBottom: 6,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   sectionSubtitle: {
     fontSize: 15,
     color: '#666',
     lineHeight: 20,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   chartContainer: {
     alignItems: 'center',
   },
@@ -874,8 +898,10 @@ const styles = StyleSheet.create({
   legendText: {
     fontSize: 14,
     color: '#333',
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   chartsRow: {
     flexDirection: 'row',
     gap: 12,
@@ -951,22 +977,29 @@ const styles = StyleSheet.create({
   categoryName: {
     fontSize: 16,
     color: '#222',
-    fontWeight: '500',
     flex: 1,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   categoryRight: {
     alignItems: 'flex-end',
   },
   categoryAmount: {
     fontSize: 16,
-    fontWeight: '600',
     color: '#222',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   categoryPercentage: {
     fontSize: 14,
     color: '#666',
     marginTop: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   insightCard: {
     flexDirection: 'row',
     alignItems: 'flex-start',
@@ -980,13 +1013,18 @@ const styles = StyleSheet.create({
   },
   insightTitle: {
     fontSize: 16,
-    fontWeight: 'bold',
     marginBottom: 6,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   insightDescription: {
     fontSize: 14,
     lineHeight: 20,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   forecastSection: {
     backgroundColor: '#fff',
     marginHorizontal: 16,
@@ -1011,21 +1049,28 @@ const styles = StyleSheet.create({
   },
   forecastMonth: {
     fontSize: 14,
-    fontWeight: '600',
     color: '#666',
     marginBottom: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   forecastValue: {
     fontSize: 18,
-    fontWeight: 'bold',
     marginBottom: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   forecastLabel: {
     fontSize: 12,
     color: '#666',
     marginBottom: 8,
     textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   growthBadge: {
     paddingHorizontal: 8,
     paddingVertical: 4,
@@ -1033,9 +1078,11 @@ const styles = StyleSheet.create({
   },
   growthText: {
     fontSize: 10,
-    fontWeight: '600',
     color: '#fff',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   recommendationsSection: {
     backgroundColor: '#fff',
     marginHorizontal: 16,
@@ -1055,7 +1102,10 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#666',
     lineHeight: 20,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   bottomSpacing: {
     height: 20,
   },

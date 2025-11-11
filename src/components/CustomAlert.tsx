@@ -232,9 +232,9 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 20,
-    fontWeight: 'bold',
     textAlign: 'center',
     marginBottom: 12,
+    fontFamily: 'Roboto-Medium',
   },
   message: {
     fontSize: 16,
@@ -242,6 +242,7 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     color: '#333',
     marginBottom: 24,
+    fontFamily: 'Roboto-Medium',
   },
   buttonContainer: {
     flexDirection: 'row',
@@ -271,12 +272,12 @@ const styles = StyleSheet.create({
   cancelButtonText: {
     color: '#fff',
     fontSize: 16,
-    fontWeight: '600',
+    fontFamily: 'Roboto-Medium',
   },
   confirmButtonText: {
     color: '#fff',
     fontSize: 16,
-    fontWeight: '600',
+    fontFamily: 'Roboto-Medium',
   },
 });
 

@@ -186,16 +186,21 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 20,
-    fontWeight: 'bold',
     color: '#1a1a1a',
     textAlign: 'center',
     marginBottom: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   subtitle: {
     fontSize: 14,
     color: '#666',
     textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   progressSection: {
     marginBottom: 20,
   },
@@ -214,8 +219,10 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#dc2626',
     textAlign: 'center',
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   messageSection: {
     marginBottom: 24,
   },
@@ -225,14 +232,18 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 22,
     marginBottom: 12,
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   resetInfo: {
     fontSize: 14,
     color: '#666',
     textAlign: 'center',
-    fontStyle: 'italic',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   actionButtons: {
     gap: 12,
   },
@@ -253,9 +264,11 @@ const styles = StyleSheet.create({
   upgradeButtonText: {
     color: '#fff',
     fontSize: 16,
-    fontWeight: '600',
     marginLeft: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   dismissButton: {
     backgroundColor: '#6c757d',
     paddingVertical: 12,
@@ -265,9 +278,11 @@ const styles = StyleSheet.create({
   },
   dismissButtonText: {
     fontSize: 14,
-    fontWeight: '500',
     color: '#fff',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   lastPlanMessage: {
     alignItems: 'center',
     paddingVertical: 20,
@@ -279,17 +294,21 @@ const styles = StyleSheet.create({
   },
   lastPlanText: {
     fontSize: 16,
-    fontWeight: '600',
     color: '#28a745',
     marginTop: 8,
     marginBottom: 4,
     textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   lastPlanSubtext: {
     fontSize: 14,
     color: '#6c757d',
     textAlign: 'center',
     lineHeight: 20,
+
+    fontFamily: 'Roboto-Medium',
   },
 });
 

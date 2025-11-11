@@ -15,6 +15,7 @@ import LinearGradient from 'react-native-linear-gradient';
 import { useNotifications } from '../../context/NotificationContext';
 import NotificationSettings from '../../components/NotificationSettings';
 import { useAlert } from '../../context/AlertContext';
+import { getSmsStatus } from '../../api';
 
 interface NotificationItem {
   id: string;
@@ -37,6 +38,28 @@ const NotificationScreen: React.FC = () => {
     setRefreshing(true);
     // Refresh notifications - this will be handled by the context
     setTimeout(() => setRefreshing(false), 1000);
+  };
+
+  // Test function for SMS status endpoint
+  const testSmsStatus = async () => {
+    try {
+      console.log('📊 Testing SMS status endpoint...');
+      const result = await getSmsStatus();
+      console.log('✅ SMS status result:', result);
+
+      showAlert({
+        title: 'SMS Status',
+        message: `SMS Status: ${JSON.stringify(result, null, 2)}`,
+        type: 'info',
+      });
+    } catch (error: any) {
+      console.error('❌ SMS status error:', error);
+      showAlert({
+        title: 'SMS Status Error',
+        message: error.message || 'Failed to get SMS status',
+        type: 'error',
+      });
+    }
   };
 
   const handleClearAll = () => {
@@ -161,6 +184,17 @@ const NotificationScreen: React.FC = () => {
           <View style={styles.headerActions}>
             <TouchableOpacity
               style={styles.headerButton}
+              onPress={testSmsStatus}
+            >
+              <MaterialCommunityIcons
+                name="message-text"
+                size={24}
+                color="#ffffff"
+              />
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.headerButton}
               onPress={() => setShowSettings(true)}
             >
               <MaterialCommunityIcons name="cog" size={24} color="#ffffff" />
@@ -228,9 +262,10 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     fontSize: 20,
-    fontWeight: 'bold',
     color: '#ffffff',
+    fontFamily: 'Roboto-Medium',
   },
+
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -269,19 +304,24 @@ const styles = StyleSheet.create({
   },
   notificationTitle: {
     fontSize: 16,
-    fontWeight: '600',
     color: '#333333',
     marginBottom: 4,
+    fontFamily: 'Roboto-Medium',
   },
+
   notificationBody: {
     fontSize: 14,
     color: '#666666',
     marginBottom: 4,
+    fontFamily: 'Roboto-Medium',
   },
+
   notificationTime: {
     fontSize: 12,
     color: '#999999',
+    fontFamily: 'Roboto-Medium',
   },
+
   emptyContainer: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -289,16 +329,18 @@ const styles = StyleSheet.create({
   },
   emptyTitle: {
     fontSize: 18,
-    fontWeight: '600',
     color: '#666666',
     marginTop: 16,
     marginBottom: 8,
+    fontFamily: 'Roboto-Medium',
   },
+
   emptySubtitle: {
     fontSize: 14,
     color: '#999999',
     textAlign: 'center',
     paddingHorizontal: 40,
+    fontFamily: 'Roboto-Medium',
   },
 });
 

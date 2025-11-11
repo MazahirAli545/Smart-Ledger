@@ -120,23 +120,8 @@ class TransactionLimitNotificationService {
 
       console.log('📊 [DEBUG] Auth token found, making API request...');
 
-      // Get user's transaction limit info
-      const response = await fetch(`${BASE_URL}/transaction-limits/info`, {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (!response.ok) {
-        console.error(
-          '❌ [DEBUG] Failed to fetch transaction limit info:',
-          response.status,
-        );
-        return;
-      }
-
-      const result = await response.json();
+      // Get user's transaction limit info - Use unified API
+      const result = await unifiedApi.get('/transaction-limits/info');
       console.log('📊 [DEBUG] API Response:', JSON.stringify(result, null, 2));
 
       if (result.code !== 200 || !result.data) {

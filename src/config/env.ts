@@ -59,8 +59,8 @@ interface EnvConfig {
 // Default values (fallbacks)
 const defaultConfig: EnvConfig = {
   // API Configuration
-  BASE_URL_DEV: 'http://192.168.57.107:5000',
-  BASE_URL_PROD: 'https://utility-apis-49wa.onrender.com',
+  BASE_URL_DEV: 'http://10.0.2.2:3001',
+  BASE_URL_PROD: 'https://u-api-wby7.onrender.com',
 
   // Google Cloud Services
   GOOGLE_PROJECT_ID: '',
@@ -84,8 +84,9 @@ const defaultConfig: EnvConfig = {
   FIREBASE_API_KEY: '',
 
   // Razorpay Payment Gateway
-  RAZORPAY_KEY_ID: '',
-  RAZORPAY_KEY_SECRET: '',
+  // Using test credentials for development
+  RAZORPAY_KEY_ID: 'rzp_test_1DP5mmOlF5G5ag', // Test Key ID
+  RAZORPAY_KEY_SECRET: 'thisissupersecret', // Test Secret Key
 
   // OpenAI API
   OPENAI_API_KEY: '',
@@ -120,8 +121,14 @@ export const envConfig = loadEnvConfig();
 
 // Helper functions
 export const getBaseUrl = (): string => {
-  const isDev = __DEV__ && Platform.OS !== 'ios'; // Adjust based on your needs
-  return isDev ? envConfig.BASE_URL_DEV : envConfig.BASE_URL_PROD;
+  // Decide environment first
+  const isDev = __DEV__;
+  let url = isDev ? envConfig.BASE_URL_DEV : envConfig.BASE_URL_PROD;
+
+  // Note: We're already using 10.0.2.2:3001 directly for Android emulator
+  // No need for localhost mapping since BASE_URL_DEV is already set to 10.0.2.2:3001
+
+  return url;
 };
 
 export const getGoogleCloudConfig = () => ({

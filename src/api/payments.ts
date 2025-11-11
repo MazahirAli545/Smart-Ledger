@@ -231,7 +231,7 @@ export class PaymentApiService {
       ) {
         console.log('🔄 Network error detected, trying production backend...');
         try {
-          const productionUrl = 'https://utility-apis-49wa.onrender.com';
+          const productionUrl = 'http://10.0.2.2:3001';
           const headers = await this.getAuthHeaders();
           const response = await fetch(
             `${productionUrl}${PAYMENT_ENDPOINTS.CREATE_ORDER}`,

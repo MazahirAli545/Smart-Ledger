@@ -1,15 +1,24 @@
 import React from 'react';
-import { View, Text, StyleSheet, Image, TouchableOpacity } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
-import type { StackNavigationProp } from '@react-navigation/stack';
-import { RootStackParamList } from '../types/navigation';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import {
+  View,
+  Text,
+  StyleSheet,
+  Image,
+  TouchableOpacity,
+  SafeAreaView,
+} from 'react-native';
+import { StackNavigationProp } from '@react-navigation/stack';
+
+// Define navigation prop type
+// If you have a RootStackParamList, use it. For now, use 'any' for simplicity.
+type OnboardingScreenProps = {
+  navigation: StackNavigationProp<any, any>;
+};
 
 const HERO_IMAGE =
   'https://images.unsplash.com/photo-1461749280684-dccba630e2f6?auto=format&fit=crop&w=800&q=80'; // Placeholder
 
-const OnboardingScreen: React.FC = () => {
-  const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
+const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ navigation }) => {
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.container}>

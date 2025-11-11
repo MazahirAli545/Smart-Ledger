@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { BASE_URL } from '../api';
+import { unifiedApi } from '../api/unifiedApiService';
 
 export interface PlanExpiryData {
   planName: string;
@@ -87,26 +87,29 @@ class PlanExpiryService {
         return;
       }
 
-      // Get user's subscription data
-      const response = await fetch(`${BASE_URL}/subscriptions/my`, {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (!response.ok) {
-        console.error('❌ Failed to fetch subscription data:', response.status);
+      // Get user's subscription data - Use unified API
+      let result;
+      try {
+        result = (await unifiedApi.get('/subscriptions/current')) as {
+          data: any;
+          status: number;
+          headers: Headers;
+        };
+      } catch (e) {
+        console.error('❌ Failed to fetch subscription data:', e);
+        // If it's a 500 error, it might be a temporary server issue
+        // Don't spam the console, just return silently
         return;
       }
 
-      const result = await response.json();
-      if (!result.success || !result.data) {
+      // unifiedApi handles errors automatically, so if we get here, we have data
+      const resultData = result?.data ?? result ?? {};
+      if (!resultData.success || !resultData.data) {
         console.log('📅 No active subscription found');
         return;
       }
 
-      const subscription = result.data;
+      const subscription = resultData.data;
       const endDate = new Date(subscription.endDate);
       const now = new Date();
 

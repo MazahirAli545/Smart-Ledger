@@ -4,15 +4,15 @@ import { Platform } from 'react-native';
 export const NETWORK_CONFIG = {
   // Development URLs
   development: {
-    local: 'http://192.168.57.107:5000',
-    fallback: 'https://utility-apis-49wa.onrender.com',
+    local: 'http://10.0.2.2:3001',
+    fallback: 'https://u-api-wby7.onrender.com',
     // Add real device fallback
-    realDevice: 'https://utility-apis-49wa.onrender.com',
+    realDevice: 'http://10.0.2.2:3001',
   },
   // Production URLs
   production: {
-    primary: 'https://utility-apis-49wa.onrender.com',
-    backup: 'https://utility-apis-49wa.onrender.com', // Same for now
+    primary: 'https://u-api-wby7.onrender.com',
+    backup: 'https://u-api-wby7.onrender.com', // Same for now
   },
 };
 
@@ -25,33 +25,33 @@ export const isRealDevice = (): boolean => {
 // Get the appropriate base URL based on environment and device type
 export const getBaseUrl = async (): Promise<string> => {
   if (__DEV__) {
-    // Check if we're on a real device
-    if (isRealDevice()) {
-      console.log('📱 Real device detected, using production backend');
-      return NETWORK_CONFIG.development.realDevice;
-    }
+    // For development, use 10.0.2.2:3001 (Android emulator)
+    console.log(
+      '🔧 Development mode: Using 10.0.2.2:3001 for Android emulator development',
+    );
+    return NETWORK_CONFIG.development.local;
 
-    try {
-      // Test local backend connectivity (only for emulator/development)
-      const testResponse = await fetch(
-        `${NETWORK_CONFIG.development.local}/health`,
-        {
-          method: 'GET',
-        },
-      );
+    // Fallback to production if local server is not available
+    // try {
+    //   // Test local backend connectivity
+    //   const testResponse = await fetch(
+    //     `${NETWORK_CONFIG.development.local}/health`,
+    //     {
+    //       method: 'GET',
+    //       timeout: 3000, // Add timeout
+    //     },
+    //   );
 
-      if (testResponse.ok) {
-        console.log('✅ Local backend accessible');
-        return NETWORK_CONFIG.development.local;
-      }
-    } catch (error) {
-      console.warn(
-        '⚠️ Local backend not accessible, falling back to production',
-      );
-    }
-
-    // Fallback to production in development
-    return NETWORK_CONFIG.development.fallback;
+    //   if (testResponse.ok) {
+    //     console.log('✅ Local backend accessible');
+    //     return NETWORK_CONFIG.development.local;
+    //   }
+    // } catch (error) {
+    //   console.warn(
+    //     '⚠️ Local backend not accessible, falling back to production',
+    //   );
+    //   return NETWORK_CONFIG.development.fallback;
+    // }
   }
 
   // Production environment

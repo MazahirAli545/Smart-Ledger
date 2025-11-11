@@ -7,6 +7,8 @@ import notifee, {
   RepeatFrequency,
 } from '@notifee/react-native';
 import { BASE_URL } from '../api';
+import { getUserIdFromToken } from '../utils/storage';
+import { unifiedApi } from '../api/unifiedApiService';
 
 export interface TransactionLimitData {
   currentCount: number;
@@ -138,11 +140,8 @@ class TransactionLimitService {
       this.isServiceActive = true;
       await AsyncStorage.setItem(this.STORAGE_KEYS.SERVICE_ACTIVE, 'true');
 
-      // Check for popup immediately
+      // Check immediately and update popup/notifications based on current state
       await this.checkAndShowPopup();
-
-      // Schedule 24-hour notification
-      await this.schedule24HourNotification();
 
       console.log('✅ Transaction limit monitoring started');
     } catch (error) {
@@ -195,12 +194,15 @@ class TransactionLimitService {
         return;
       }
 
-      // Check if user is at or near limit
-      if (limitData.isAtLimit || limitData.isNearLimit) {
-        console.log('⚠️ User is at/near limit, showing popup...');
+      // Update scheduled notifications strictly based on hard limit state
+      await this.updateNotificationsForLimitState(limitData);
+
+      // Show popup ONLY when user is AT LIMIT (not for near-limit)
+      if (limitData.isAtLimit) {
+        console.log('⛔ User is at limit, showing popup...');
         await this.showTransactionLimitPopup(limitData);
       } else {
-        console.log('✅ User is within limits, no popup needed');
+        console.log('✅ User is below limit, no popup');
       }
     } catch (error) {
       console.error('❌ Error checking and showing popup:', error);
@@ -218,11 +220,26 @@ class TransactionLimitService {
         return;
       }
 
-      // Force show popup regardless of session state
-      console.log('⚠️ Force showing popup with data:', limitData);
-      await this.showTransactionLimitPopup(limitData);
+      // Respect business rule: show daily only for users who reached limit
+      if (limitData.isAtLimit) {
+        console.log('⚠️ Force showing popup with data (at limit):', limitData);
+        await this.showTransactionLimitPopup(limitData);
+      } else {
+        console.log('ℹ️ Force popup suppressed because user is not at limit');
+      }
     } catch (error) {
       console.error('❌ Error force showing popup:', error);
+    }
+  }
+
+  // Expose a safe force check method used by screens/contexts
+  public async forceCheckTransactionLimit() {
+    try {
+      // Ensure service is considered active during explicit checks
+      this.isServiceActive = true;
+      await this.checkAndShowPopup();
+    } catch (error) {
+      console.error('❌ Error in forceCheckTransactionLimit:', error);
     }
   }
 
@@ -234,24 +251,109 @@ class TransactionLimitService {
         return null;
       }
 
-      const response = await fetch(`${BASE_URL}/transaction-limits/info`, {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      const result = await response.json();
-
-      if (response.ok && result.code === 200 && result.data) {
-        return result.data;
-      } else {
-        console.error('❌ Failed to fetch transaction limit data:', result);
+      // Get user ID from token
+      const userId = await getUserIdFromToken();
+      if (!userId) {
+        console.log('❌ No user ID available');
         return null;
       }
+
+      // Use the dedicated transaction limits endpoint with user ID parameter
+      const userIdString = String(userId);
+      console.log('🔍 TransactionLimitService: userId type and value:', {
+        originalUserId: userId,
+        userIdType: typeof userId,
+        userIdString: userIdString,
+        userIdStringType: typeof userIdString,
+      });
+
+      // Use URLSearchParams to ensure proper encoding
+      // Use unified API for transaction limits
+      const res = (await unifiedApi.getTransactionLimits()) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
+
+      // unifiedApi returns { data, status, headers } structure
+      // If unauthorized/forbidden, don't throw – just return a benign default
+      if (res.status === 401 || res.status === 403) {
+        console.warn('⚠️ Transaction limits request unauthorized/forbidden');
+        return {
+          currentCount: 0,
+          maxAllowed: 50,
+          remaining: 50,
+          planName: 'Free',
+          canCreate: true,
+          percentageUsed: 0,
+          isNearLimit: false, // Never show popup for 0 transactions
+          isAtLimit: false, // Never show popup for 0 transactions
+          nextResetDate: new Date(
+            new Date().getFullYear(),
+            new Date().getMonth() + 1,
+            1,
+          ).toISOString(),
+          nextResetFormatted: new Date(
+            new Date().getFullYear(),
+            new Date().getMonth() + 1,
+            1,
+          ).toLocaleDateString(),
+        };
+      }
+
+      if (res.status < 200 || res.status >= 300) {
+        console.warn('⚠️ Transaction limits request failed:', res.status);
+        // Return a benign default instead of null to prevent blocking the user
+        return {
+          currentCount: 0,
+          maxAllowed: 50,
+          remaining: 50,
+          planName: 'Free',
+          canCreate: true,
+          percentageUsed: 0,
+          isNearLimit: false,
+          isAtLimit: false,
+          nextResetDate: new Date(
+            new Date().getFullYear(),
+            new Date().getMonth() + 1,
+            1,
+          ).toISOString(),
+          nextResetFormatted: new Date(
+            new Date().getFullYear(),
+            new Date().getMonth() + 1,
+            1,
+          ).toLocaleDateString(),
+        };
+      }
+
+      // unifiedApi already returns parsed data
+      const data = res.data || res;
+      console.log('📈 Transaction limits data from backend:', data);
+      return data;
     } catch (error) {
       console.error('❌ Error fetching transaction limit data:', error);
-      return null;
+      // Return a benign default instead of null to prevent blocking the user
+      const maxAllowed = 50;
+      return {
+        currentCount: 0,
+        maxAllowed,
+        remaining: maxAllowed,
+        planName: 'Free',
+        canCreate: true,
+        percentageUsed: 0,
+        isNearLimit: false, // Never show popup for 0 transactions
+        isAtLimit: false, // Never show popup for 0 transactions
+        nextResetDate: new Date(
+          new Date().getFullYear(),
+          new Date().getMonth() + 1,
+          1,
+        ).toISOString(),
+        nextResetFormatted: new Date(
+          new Date().getFullYear(),
+          new Date().getMonth() + 1,
+          1,
+        ).toLocaleDateString(),
+      };
     }
   }
 
@@ -393,6 +495,24 @@ class TransactionLimitService {
       );
     } catch (error) {
       console.error('❌ Error scheduling 24-hour notification:', error);
+    }
+  }
+
+  // Ensure notifications only exist for users who have reached the limit
+  private async updateNotificationsForLimitState(data: TransactionLimitData) {
+    try {
+      if (data.isAtLimit) {
+        // Schedule (or keep) the daily reminder
+        await this.schedule24HourNotification();
+      } else {
+        // Cancel any scheduled notifications when user drops below limit
+        await notifee.cancelAllNotifications();
+        this.lastNotificationTime = null;
+        await AsyncStorage.removeItem(this.STORAGE_KEYS.LAST_NOTIFICATION_TIME);
+        console.log('🧹 Cleared scheduled notifications (user below limit)');
+      }
+    } catch (error) {
+      console.error('❌ Error updating notifications for limit state:', error);
     }
   }
 

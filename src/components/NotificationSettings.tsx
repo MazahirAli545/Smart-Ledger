@@ -213,16 +213,21 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     fontSize: 24,
-    fontWeight: 'bold',
     color: '#ffffff',
     marginTop: 10,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   headerSubtitle: {
     fontSize: 16,
     color: '#ffffff',
     opacity: 0.9,
     marginTop: 5,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   content: {
     padding: 20,
   },
@@ -251,14 +256,19 @@ const styles = StyleSheet.create({
   },
   mainToggleTitle: {
     fontSize: 18,
-    fontWeight: '600',
     color: '#333333',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   mainToggleDescription: {
     fontSize: 14,
     color: '#666666',
     marginTop: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   section: {
     backgroundColor: '#ffffff',
     borderRadius: 12,
@@ -271,11 +281,13 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     fontSize: 18,
-    fontWeight: '600',
     color: '#333333',
     padding: 20,
     paddingBottom: 10,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   settingItem: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -296,14 +308,19 @@ const styles = StyleSheet.create({
   },
   settingTitle: {
     fontSize: 16,
-    fontWeight: '500',
     color: '#333333',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   settingDescription: {
     fontSize: 14,
     color: '#666666',
     marginTop: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   tokenButton: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -321,14 +338,19 @@ const styles = StyleSheet.create({
   },
   tokenButtonTitle: {
     fontSize: 16,
-    fontWeight: '500',
     color: '#333333',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   tokenButtonDescription: {
     fontSize: 14,
     color: '#666666',
     marginTop: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   infoSection: {
     flexDirection: 'row',
     backgroundColor: '#e3f2fd',
@@ -342,6 +364,8 @@ const styles = StyleSheet.create({
     marginLeft: 10,
     flex: 1,
     lineHeight: 20,
+
+    fontFamily: 'Roboto-Medium',
   },
 });
 

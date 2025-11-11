@@ -59,6 +59,7 @@ const PremiumBadge: React.FC<PremiumBadgeProps> = ({
           borderRadius: 8,
           fontSize: 10,
           iconSize: 12,
+          fontFamily: 'Roboto-Medium',
         };
       case 'large':
         return {
@@ -67,6 +68,7 @@ const PremiumBadge: React.FC<PremiumBadgeProps> = ({
           borderRadius: 16,
           fontSize: 14,
           iconSize: 16,
+          fontFamily: 'Roboto-Medium',
         };
       default: // medium
         return {
@@ -75,6 +77,7 @@ const PremiumBadge: React.FC<PremiumBadgeProps> = ({
           borderRadius: 12,
           fontSize: 12,
           iconSize: 14,
+          fontFamily: 'Roboto-Medium',
         };
     }
   };
@@ -142,6 +145,7 @@ const PremiumBadge: React.FC<PremiumBadgeProps> = ({
           {
             fontSize: sizeStyles.fontSize,
             color: variantStyles.textColor,
+            fontFamily: 'Roboto-Medium',
           },
           disabled && styles.disabledText,
         ]}
@@ -162,8 +166,9 @@ const styles = StyleSheet.create({
     marginRight: 4,
   },
   text: {
-    fontWeight: 'bold',
     textTransform: 'uppercase',
+
+    fontFamily: 'Roboto-Medium',
   },
   disabled: {
     opacity: 0.5,

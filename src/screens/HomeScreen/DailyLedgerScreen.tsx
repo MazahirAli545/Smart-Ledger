@@ -8,7 +8,6 @@ import {
   TextInput,
   FlatList,
   Alert,
-  StatusBar,
   RefreshControl,
   Modal,
   Dimensions,
@@ -20,7 +19,7 @@ import {
 } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { BASE_URL } from '../../api';
+import { unifiedApi } from '../../api/unifiedApiService';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { AppStackParamList } from '../../types/navigation';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -577,8 +576,6 @@ const DailyLedgerScreen: React.FC = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
-
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity
@@ -718,14 +715,19 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     fontSize: 24,
-    fontWeight: '700',
     color: '#1f2937',
     marginBottom: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   headerSubtitle: {
     fontSize: 14,
     color: '#6b7280',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -783,13 +785,17 @@ const styles = StyleSheet.create({
   summaryCardTitle: {
     fontSize: 12,
     color: '#6b7280',
-    fontWeight: '500',
     marginBottom: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   summaryCardAmount: {
     fontSize: 18,
-    fontWeight: '700',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   searchContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -814,8 +820,10 @@ const styles = StyleSheet.create({
     marginLeft: 12,
     fontSize: 15,
     color: '#6b7280',
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   clearFiltersButton: {
     marginLeft: 16,
     paddingHorizontal: 16,
@@ -824,8 +832,10 @@ const styles = StyleSheet.create({
   clearFiltersText: {
     color: '#3b82f6',
     fontSize: 15,
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   transactionsContainer: {
     backgroundColor: '#ffffff',
     paddingHorizontal: 20,
@@ -836,14 +846,19 @@ const styles = StyleSheet.create({
   },
   transactionsTitle: {
     fontSize: 20,
-    fontWeight: '700',
     color: '#1f2937',
     marginBottom: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   transactionsSubtitle: {
     fontSize: 14,
     color: '#6b7280',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   transactionCard: {
     backgroundColor: '#ffffff',
     padding: 16,
@@ -879,31 +894,44 @@ const styles = StyleSheet.create({
   },
   transactionTitle: {
     fontSize: 16,
-    fontWeight: '600',
     color: '#1f2937',
     marginBottom: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   transactionDetails: {
     fontSize: 13,
     color: '#6b7280',
     marginBottom: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   transactionDate: {
     fontSize: 13,
     color: '#9ca3af',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   transactionRight: {
     alignItems: 'flex-end',
   },
   transactionAmount: {
     fontSize: 16,
-    fontWeight: '700',
     marginBottom: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   gstAmount: {
     fontSize: 12,
     color: '#6b7280',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   transactionTags: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -918,8 +946,10 @@ const styles = StyleSheet.create({
   },
   tagText: {
     fontSize: 11,
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   transactionActions: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
@@ -939,15 +969,20 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#6b7280',
     marginTop: 16,
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   emptyStateSubtext: {
     fontSize: 14,
     color: '#9ca3af',
     marginTop: 8,
     textAlign: 'center',
     paddingHorizontal: 20,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
@@ -970,9 +1005,11 @@ const styles = StyleSheet.create({
   },
   filterTitle: {
     fontSize: 20,
-    fontWeight: '700',
     color: '#1f2937',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   filterContent: {
     paddingHorizontal: 24,
     paddingVertical: 20,
@@ -982,10 +1019,12 @@ const styles = StyleSheet.create({
   },
   filterLabel: {
     fontSize: 16,
-    fontWeight: '600',
     color: '#1f2937',
     marginBottom: 12,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   searchInputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1001,7 +1040,10 @@ const styles = StyleSheet.create({
     marginLeft: 12,
     fontSize: 16,
     color: '#1f2937',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   dateInputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1016,11 +1058,17 @@ const styles = StyleSheet.create({
   dateInputText: {
     fontSize: 16,
     color: '#1f2937',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   dateInputPlaceholder: {
     fontSize: 16,
     color: '#9ca3af',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   filterOptions: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -1042,10 +1090,14 @@ const styles = StyleSheet.create({
   filterOptionText: {
     fontSize: 14,
     color: '#6b7280',
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   filterOptionTextSelected: {
     color: '#ffffff',
+
+    fontFamily: 'Roboto-Medium',
   },
   filterFooter: {
     flexDirection: 'row',
@@ -1068,8 +1120,10 @@ const styles = StyleSheet.create({
   clearButtonText: {
     color: '#6b7280',
     fontSize: 16,
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   applyButton: {
     flex: 1,
     paddingVertical: 14,
@@ -1081,7 +1135,8 @@ const styles = StyleSheet.create({
   applyButtonText: {
     color: '#ffffff',
     fontSize: 16,
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
 });
 

@@ -6,7 +6,6 @@ import {
   TouchableOpacity,
   StyleSheet,
   Platform,
-  Dimensions,
   Keyboard,
   TouchableWithoutFeedback,
 } from 'react-native';
@@ -16,13 +15,15 @@ import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { BASE_URL } from '../../api';
+import ProperSystemNotificationService from '../../services/properSystemNotificationService';
+import { unifiedApi } from '../../api/unifiedApiService';
+import { verifyOtp, getCurrentUser } from '../../api';
 import { useAuth } from '../../context/AuthContext';
 import { useAlert } from '../../context/AlertContext';
 import messaging from '@react-native-firebase/messaging';
 import { navigationRef, ROOT_STACK_APP } from '../../../Navigation';
-import { showAccountCreatedNotification } from '../../utils/notificationHelper';
-import { ScrollView } from 'react-native';
+import { showSignInSuccessNotification } from '../../utils/notificationHelper';
+import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import {
   setDefaultScreen,
   saveCurrentScreen,
@@ -41,6 +42,7 @@ const SignInOtpScreen = () => {
     isExistingUser,
     registrationData,
     useUnifiedAuth,
+    usePostmanAuth,
   } = route.params as any;
   const [otp, setOtp] = useState('');
   const [timer, setTimer] = useState(30); // Reduced for testing
@@ -48,8 +50,42 @@ const SignInOtpScreen = () => {
   const [error, setError] = useState<string | null>(null);
 
   const { login } = useAuth();
-  const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
-  const scrollViewRef = useRef<ScrollView>(null);
+  const scrollViewRef = useRef<any>(null);
+  const otpInputRefs = useRef<TextInput[]>([]);
+
+  const fetchAndStoreRoles = async (token: string) => {
+    try {
+      // Use unified API
+      const response = (await unifiedApi.get('/rbac/me/roles')) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
+      const roles = Array.isArray(response.data)
+        ? response.data
+        : Array.isArray(response.data?.data)
+        ? response.data.data
+        : [];
+      await AsyncStorage.setItem('userRoles', JSON.stringify(roles));
+      console.log(
+        '✅ Stored userRoles:',
+        Array.isArray(roles) ? roles.map((r: any) => r.name) : roles,
+      );
+    } catch (e) {
+      console.warn('Failed to fetch/store roles:', e);
+    }
+  };
+
+  const fetchAndStorePermissions = async (token: string) => {
+    try {
+      // Use unified API
+      const perms = await unifiedApi.get('/rbac/me/permissions');
+      await AsyncStorage.setItem('userPermissions', JSON.stringify(perms));
+      console.log('✅ Stored userPermissions:', perms);
+    } catch (e) {
+      console.warn('Failed to fetch/store permissions:', e);
+    }
+  };
 
   // Handle keyboard show/hide with custom positioning
 
@@ -101,149 +137,164 @@ const SignInOtpScreen = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [otp]);
 
-  // Initial positioning when component mounts
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      if (scrollViewRef.current) {
-        const screenHeight = Dimensions.get('window').height;
-        const targetScrollY = Math.max(0, screenHeight * 0.2); // Center position
-        scrollViewRef.current?.scrollTo({ y: targetScrollY, animated: true });
-        console.log(
-          '🔍 Initial positioning completed, targetY:',
-          targetScrollY,
-        );
-      }
-    }, 500);
+  const handleOtpChange = (value: string, index: number) => {
+    console.log('🔢 OTP Change:', { value, index, currentOtp: otp });
 
-    return () => clearTimeout(timer);
-  }, []);
-
-  // Custom keyboard handling for better control
-  useEffect(() => {
-    const keyboardDidShowListener = Keyboard.addListener(
-      'keyboardDidShow',
-      () => {
-        console.log('🔍 Keyboard shown - moving OTP card much higher');
-        setIsKeyboardVisible(true);
-
-        // Move card much higher when keyboard appears
-        setTimeout(() => {
-          if (scrollViewRef.current) {
-            const screenHeight = Dimensions.get('window').height;
-            const keyboardHeight = screenHeight * 0.4;
-            const availableHeight = screenHeight - keyboardHeight;
-
-            // Move card even higher - more aggressive positioning
-            const targetScrollY = Math.max(0, availableHeight * 0.05); // 5% from top for even higher positioning
-
-            scrollViewRef.current?.scrollTo({
-              y: targetScrollY,
-              animated: true,
-            });
-            console.log(
-              '🔍 Keyboard scroll completed, targetY:',
-              targetScrollY,
-            );
-          }
-        }, 100);
-      },
+    // Create a fixed 6-length array with current OTP values, using space as placeholder
+    const currentOtpArray = (otp || '').split('');
+    const otpArray = Array.from({ length: 6 }, (_, i) =>
+      currentOtpArray[i] === ' ' ? '' : currentOtpArray[i] || '',
     );
 
-    const keyboardDidHideListener = Keyboard.addListener(
-      'keyboardDidHide',
-      () => {
-        console.log('🔍 Keyboard hidden - centering OTP card');
-        setIsKeyboardVisible(false);
+    // Handle empty value (deletion) - use space as placeholder
+    if (value === '') {
+      otpArray[index] = '';
+      const otpString = otpArray
+        .map(char => (char === '' ? ' ' : char))
+        .join('');
+      setOtp(otpString);
+      return;
+    }
 
-        // Center the card when keyboard is hidden
-        setTimeout(() => {
-          if (scrollViewRef.current) {
-            const screenHeight = Dimensions.get('window').height;
-            const targetScrollY = Math.max(0, screenHeight * 0.2); // 20% from top for better center
+    // Only allow single digit
+    if (value.length > 1) {
+      value = value.slice(-1);
+    }
 
-            scrollViewRef.current?.scrollTo({
-              y: targetScrollY,
-              animated: true,
-            });
-            console.log(
-              '🔍 Keyboard hide scroll completed, targetY:',
-              targetScrollY,
-            );
-          }
-        }, 100);
-      },
+    // Update OTP array
+    otpArray[index] = value;
+    const otpString = otpArray.map(char => (char === '' ? ' ' : char)).join('');
+    setOtp(otpString);
+
+    // Auto-focus next input
+    if (value && index < 5) {
+      otpInputRefs.current[index + 1]?.focus();
+    }
+
+    // Auto-submit when all digits are entered (no spaces)
+    if (otpString.replace(/\s/g, '').length === 6) {
+      setTimeout(() => {
+        handleVerify();
+      }, 100);
+    }
+  };
+
+  const handleKeyPress = (key: string, index: number) => {
+    if (key !== 'Backspace') return;
+
+    const currentOtpArray = (otp || '').split('');
+    const otpArray = Array.from({ length: 6 }, (_, i) =>
+      currentOtpArray[i] === ' ' ? '' : currentOtpArray[i] || '',
     );
 
-    return () => {
-      keyboardDidShowListener?.remove();
-      keyboardDidHideListener?.remove();
-    };
-  }, []);
+    // If current box has a digit, clear only that digit and keep focus
+    if (otpArray[index]) {
+      otpArray[index] = '';
+      const otpString = otpArray
+        .map(char => (char === '' ? ' ' : char))
+        .join('');
+      setOtp(otpString);
+      return;
+    }
 
-  const handleOtpChange = (value: string) => {
-    console.log('🔢 OTP Change:', { value, currentOtp: otp });
-    setOtp(value);
+    // If current box is empty and not the first box, move to previous box and clear it
+    if (index > 0) {
+      const prevIndex = index - 1;
+      otpArray[prevIndex] = '';
+      const otpString = otpArray
+        .map(char => (char === '' ? ' ' : char))
+        .join('');
+      setOtp(otpString);
+      otpInputRefs.current[prevIndex]?.focus();
+    }
   };
 
   const handleResend = async () => {
     setLoading(true);
     setError(null);
     try {
-      if (useUnifiedAuth) {
+      if (usePostmanAuth) {
+        // Use Postman collection endpoint for resend
+        console.log('🔄 Resending OTP using Postman collection endpoint...');
+        const { sendOtp } = await import('../../api');
+        const result = await sendOtp({ phone: phone });
+
+        if (result && (result.otp || result.success)) {
+          setTimer(30);
+          setOtp('      '); // 6 spaces for empty slots
+          setError(null);
+          // Focus first input after resending
+          setTimeout(() => {
+            otpInputRefs.current[0]?.focus();
+          }, 100);
+          console.log('✅ OTP resent successfully via Postman collection');
+        } else {
+          throw new Error(result?.message || 'Failed to resend OTP');
+        }
+      } else if (useUnifiedAuth) {
         // Resend unified auth OTP
         console.log('🎯 Resending unified auth OTP...');
-        const response = await fetch(
-          `${BASE_URL}/user/unified-auth/request-otp`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mobileNumber: phone }),
-          },
-        );
-        const result = await response.json();
-        if (response.ok && result.otp) {
+        // Not supported in backend – fall back to /auth/send-otp
+        // Use unified API
+        const result = (await unifiedApi.post('/auth/send-otp', { phone })) as {
+          data: any;
+          status: number;
+          headers: Headers;
+        };
+        const resultData = result.data || result;
+        if (resultData?.otp) {
           setTimer(30);
-          setOtp('');
+          setOtp('      '); // 6 spaces for empty slots
           setError(null);
+          // Focus first input after resending
+          setTimeout(() => {
+            otpInputRefs.current[0]?.focus();
+          }, 100);
         } else {
-          throw new Error(result.message || 'Failed to resend OTP');
+          throw new Error(resultData?.message || 'Failed to resend OTP');
         }
       } else if (isExistingUser) {
         // Resend login OTP
         console.log('📱 Resending login OTP...');
-        const response = await fetch(`${BASE_URL}/user/login/request-otp`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mobileNumber: phone }),
-        });
-        const result = await response.json();
-        if (response.ok && result.otp) {
+        // Use unified API
+        const result = (await unifiedApi.post('/auth/send-otp', { phone })) as {
+          data: any;
+          status: number;
+          headers: Headers;
+        };
+        const resultData = result.data || result;
+        if (resultData?.otp) {
           setTimer(30);
-          setOtp('');
+          setOtp('      '); // 6 spaces for empty slots
           setError(null);
+          // Focus first input after resending
+          setTimeout(() => {
+            otpInputRefs.current[0]?.focus();
+          }, 100);
         } else {
-          throw new Error(result.message || 'Failed to resend OTP');
+          throw new Error(resultData?.message || 'Failed to resend OTP');
         }
       } else {
         // Resend registration OTP
         console.log('🆕 Resending registration OTP...');
-        const response = await fetch(`${BASE_URL}/user/register-init`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            mobileNumber: phone,
-            businessName: '',
-            ownerName: '',
-            businessType: '',
-          }),
-        });
-        const result = await response.json();
-        if (response.ok && result.otp) {
+        // Registration is unified; send OTP only
+        // Use unified API
+        const result = (await unifiedApi.post('/auth/send-otp', { phone })) as {
+          data: any;
+          status: number;
+          headers: Headers;
+        };
+        const resultData = result.data || result;
+        if (resultData?.otp) {
           setTimer(30);
-          setOtp('');
+          setOtp('      '); // 6 spaces for empty slots
           setError(null);
+          // Focus first input after resending
+          setTimeout(() => {
+            otpInputRefs.current[0]?.focus();
+          }, 100);
         } else {
-          throw new Error(result.message || 'Failed to resend OTP');
+          throw new Error(resultData?.message || 'Failed to resend OTP');
         }
       }
     } catch (err: any) {
@@ -259,49 +310,57 @@ const SignInOtpScreen = () => {
   };
 
   const handleVerify = async () => {
-    if (otp.length !== 6) return;
+    const cleanOtp = otp.replace(/\s/g, ''); // Remove spaces
+    if (cleanOtp.length !== 6) return;
     setLoading(true);
     setError(null);
 
-    console.log('🔍 handleVerify called with useUnifiedAuth:', useUnifiedAuth);
-    console.log('🔍 Current OTP:', otp);
+    console.log('🔍 handleVerify called with usePostmanAuth:', usePostmanAuth);
+    console.log('🔍 Current OTP:', cleanOtp);
     console.log('🔍 Phone:', phone);
     console.log('🔍 Backend OTP:', backendOtp);
 
     try {
-      if (useUnifiedAuth) {
-        // UNIFIED AUTH FLOW - Automatically handles both new and existing users
-        console.log('🎯 Using unified auth verification...');
+      if (usePostmanAuth) {
+        // POSTMAN COLLECTION AUTH FLOW - Using /auth/verify-otp endpoint
+        console.log('🎯 Using Postman collection auth verification...');
 
-        const response = await fetch(
-          `${BASE_URL}/user/unified-auth/verify-otp`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              mobileNumber: phone,
-              otp: otp,
-            }),
-          },
-        );
+        console.log('🔍 Phone number format check:', {
+          originalPhone: phone,
+          phoneLength: phone.length,
+          phoneStartsWithPlus: phone.startsWith('+'),
+          otpLength: otp.length,
+          otpValue: otp,
+        });
 
-        const result = await response.json();
-        console.log(
-          '🎯 Unified auth verification response:',
-          response.status,
-          result,
-        );
+        const result = await verifyOtp({
+          phone: phone,
+          otp: cleanOtp,
+        });
 
-        if (response.ok && result.success) {
-          console.log('✅ Unified auth successful!');
+        console.log('🎯 Postman auth verification response:', result);
+        console.log('🎯 Response success check:', {
+          hasResult: !!result,
+          hasSuccess: !!result?.success,
+          hasAccessToken: !!result?.accessToken,
+          hasAccessTokenUnderscore: !!result?.access_token,
+          resultKeys: result ? Object.keys(result) : 'no result',
+        });
+
+        if (
+          result &&
+          (result.success || result.accessToken || result.access_token)
+        ) {
+          console.log('✅ Postman auth successful!');
           console.log(
             '🎯 User type:',
             result.isNewUser ? 'NEW USER' : 'EXISTING USER',
           );
 
           // Store tokens
-          if (result.accessToken) {
-            await AsyncStorage.setItem('accessToken', result.accessToken);
+          const token = result.accessToken || result.access_token;
+          if (token) {
+            await AsyncStorage.setItem('accessToken', token);
             await AsyncStorage.setItem('userMobileNumber', phone);
           }
 
@@ -318,19 +377,100 @@ const SignInOtpScreen = () => {
             });
 
             // Store tokens first, then navigate to CustomerScreen
-            await AsyncStorage.setItem('accessToken', result.accessToken);
+            await AsyncStorage.setItem('accessToken', token);
             await AsyncStorage.setItem('userMobileNumber', phone);
 
-            // Call login first to update auth context, then navigate
-            await login(result.accessToken, null, true);
-
-            // Show account creation success notification
+            // Initialize notifications and register FCM token for new user
             try {
-              await showAccountCreatedNotification();
-              console.log('✅ Account creation notification sent successfully');
+              const proper = ProperSystemNotificationService.getInstance();
+              await proper.initializeNotifications();
+              const fcmToken = await messaging().getToken();
+              if (fcmToken) {
+                console.log(
+                  '🔔 Registering FCM token for new user:',
+                  fcmToken.substring(0, 20) + '...',
+                );
+                console.log(
+                  '🔔 API URL:',
+                  // Use unified API
+                  '/notifications/register-token',
+                );
+                console.log('🔔 Authorization token length:', token.length);
+                console.log('🔔 Request body:', {
+                  token: fcmToken.substring(0, 20) + '...',
+                  deviceType: Platform.OS,
+                });
+
+                // Use unified API
+                const fcmResponse = (await unifiedApi.post(
+                  '/notifications/register-token',
+                  {
+                    token: fcmToken,
+                    deviceType: Platform.OS,
+                  },
+                )) as { data: any; status: number; headers: Headers };
+                // unifiedApi returns { data, status, headers } structure
+                if (fcmResponse.status >= 200 && fcmResponse.status < 300) {
+                  const fcmResult = fcmResponse.data || fcmResponse;
+                  console.log('🔔 FCM Response:', fcmResult);
+                  console.log(
+                    '✅ FCM token registered for new user:',
+                    fcmResult,
+                  );
+                } else {
+                  const errorText = fcmResponse.data;
+                  console.warn(
+                    '⚠️ FCM token registration failed for new user:',
+                    fcmResponse.status,
+                  );
+                  console.warn('⚠️ Error response:', errorText);
+                }
+              } else {
+                console.warn(
+                  '⚠️ No FCM token available for new user (likely emulator)',
+                );
+              }
+            } catch (fcmError) {
+              console.error(
+                'Failed to register FCM token for new user:',
+                fcmError,
+              );
+            }
+
+            // Call login first to update auth context, then navigate
+            await login(token, null, true);
+
+            // Fetch and log user profile
+            try {
+              const profile = await getCurrentUser(token);
+              console.log('👤 Logged-in user profile:', profile);
+            } catch (e) {
+              console.warn('⚠️ Failed to fetch user profile after signup:', e);
+            }
+
+            // Fetch and store RBAC roles/permissions for gated screens
+            await fetchAndStoreRoles(token);
+            await fetchAndStorePermissions(token);
+
+            // Show account creation success notification with name if available
+            try {
+              console.log('🔔 Showing NEW USER notification...');
+              const profileForNotif = await getCurrentUser(token).catch(
+                () => null,
+              );
+              const displayNameForNotif =
+                profileForNotif?.ownerName ||
+                profileForNotif?.businessName ||
+                undefined;
+              console.log(
+                '🔔 Display name for notification:',
+                displayNameForNotif,
+              );
+              await showSignInSuccessNotification(displayNameForNotif, true);
+              console.log('✅ NEW USER notification sent successfully');
             } catch (notificationError) {
               console.error(
-                '❌ Failed to show account creation notification:',
+                '❌ Failed to show NEW USER notification:',
                 notificationError,
               );
               // Don't block the flow if notification fails
@@ -350,11 +490,122 @@ const SignInOtpScreen = () => {
             console.log('📱 Existing user, navigating to CustomerScreen...');
 
             // Store tokens first, then navigate to CustomerScreen
-            await AsyncStorage.setItem('accessToken', result.accessToken);
+            await AsyncStorage.setItem('accessToken', token);
             await AsyncStorage.setItem('userMobileNumber', phone);
 
+            // Initialize notifications and register FCM token for existing user
+            try {
+              const proper = ProperSystemNotificationService.getInstance();
+              await proper.initializeNotifications();
+              const fcmToken = await messaging().getToken();
+              if (fcmToken) {
+                console.log(
+                  '🔔 Registering FCM token for existing user:',
+                  fcmToken.substring(0, 20) + '...',
+                );
+                console.log(
+                  '🔔 API URL:',
+                  // Use unified API
+                  '/notifications/register-token',
+                );
+                console.log('🔔 Authorization token length:', token.length);
+                console.log('🔔 Request body:', {
+                  token: fcmToken.substring(0, 20) + '...',
+                  deviceType: Platform.OS,
+                });
+
+                const fcmResponse = (await unifiedApi.post(
+                  '/notifications/register-token',
+                  {
+                    token: fcmToken,
+                    deviceType: Platform.OS,
+                  },
+                )) as { data: any; status: number; headers: Headers };
+
+                // unifiedApi returns { data, status, headers } structure
+                console.log('🔔 FCM Response status:', fcmResponse.status);
+                // Safely log headers - headers might be undefined or not have entries() method
+                if (fcmResponse.headers) {
+                  try {
+                    // Check if headers has entries method (browser) or is a plain object (React Native)
+                    if (typeof fcmResponse.headers.entries === 'function') {
+                      console.log(
+                        '🔔 FCM Response headers:',
+                        Object.fromEntries(fcmResponse.headers.entries()),
+                      );
+                    } else if (typeof fcmResponse.headers === 'object') {
+                      // React Native might return headers as a plain object
+                      console.log(
+                        '🔔 FCM Response headers:',
+                        fcmResponse.headers,
+                      );
+                    }
+                  } catch (e) {
+                    console.log('🔔 FCM Response headers: (unable to log)', e);
+                  }
+                }
+
+                // unifiedApi returns { data, status, headers } structure
+                if (fcmResponse.status >= 200 && fcmResponse.status < 300) {
+                  const fcmResult = fcmResponse.data || fcmResponse;
+                  console.log(
+                    '✅ FCM token registered for existing user:',
+                    fcmResult,
+                  );
+                } else {
+                  const errorText = fcmResponse.data;
+                  console.warn(
+                    '⚠️ FCM token registration failed for existing user:',
+                    fcmResponse.status,
+                  );
+                  console.warn('⚠️ Error response:', errorText);
+                }
+              } else {
+                console.warn(
+                  '⚠️ No FCM token available for existing user (likely emulator)',
+                );
+              }
+            } catch (fcmError) {
+              console.error(
+                'Failed to register FCM token for existing user:',
+                fcmError,
+              );
+            }
+
             // Call login first to update auth context, then navigate
-            await login(result.accessToken, null, true);
+            await login(token, null, true);
+
+            // Fetch and log user profile
+            try {
+              const profile = await getCurrentUser(token);
+              console.log('👤 Logged-in user profile:', profile);
+            } catch (e) {
+              console.warn('⚠️ Failed to fetch user profile after login:', e);
+            }
+
+            // Show welcome back notification for existing user
+            try {
+              console.log('🔔 Showing EXISTING USER notification...');
+              const profileForNotif = await getCurrentUser(token).catch(
+                () => null,
+              );
+              const displayNameForNotif =
+                profileForNotif?.ownerName ||
+                profileForNotif?.businessName ||
+                undefined;
+              console.log(
+                '🔔 Display name for notification:',
+                displayNameForNotif,
+              );
+              await showSignInSuccessNotification(displayNameForNotif, false);
+              console.log('✅ EXISTING USER notification sent successfully');
+            } catch (notificationError) {
+              console.error(
+                '❌ Failed to show EXISTING USER notification:',
+                notificationError,
+              );
+              // Don't block the flow if notification fails
+            }
 
             // Set Customer as default screen and save current position
             await setDefaultScreen('Customer');
@@ -367,7 +618,16 @@ const SignInOtpScreen = () => {
             });
           }
         } else {
-          setError(result.message || 'OTP verification failed');
+          console.error('❌ Postman auth verification failed:', {
+            result: result,
+            hasSuccess: !!result?.success,
+            hasAccessToken: !!result?.accessToken,
+            message: result?.message,
+          });
+          setError(
+            result?.message ||
+              'OTP verification failed. Please check the console for details.',
+          );
         }
       } else {
         // LEGACY FLOW - Handle existing vs new user logic
@@ -375,63 +635,108 @@ const SignInOtpScreen = () => {
           // EXISTING USER - Login flow
           console.log('📱 Verifying login OTP for existing user...');
 
-          const response = await fetch(`${BASE_URL}/user/login/verify-otp`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              mobileNumber: phone,
-              otp: otp,
-            }),
-          });
-          const result = await response.json();
-          console.log(
-            '📱 Login verification response:',
-            response.status,
-            result,
-          );
+          // Use unified API
+          const result = (await unifiedApi.post('/auth/verify-otp', {
+            phone,
+            otp,
+          })) as { data: any; status: number; headers: Headers };
+          const resultData = result.data || result;
+          console.log('📱 Login verification response:', resultData);
 
-          if (response.ok && result.success) {
-            const verifiedMobile = result.data?.mobileNumber || phone;
+          if (resultData?.success) {
+            const verifiedMobile =
+              resultData.data?.mobileNumber || resultData.mobileNumber || phone;
             await AsyncStorage.setItem('userMobileNumber', verifiedMobile);
-            if (result.accessToken != null) {
-              await AsyncStorage.setItem('accessToken', result.accessToken);
+            if (resultData.accessToken != null) {
+              await AsyncStorage.setItem('accessToken', resultData.accessToken);
 
-              // Register FCM token after successful login
+              // Initialize notifications and register FCM token after successful login
               try {
-                const fcmToken = await messaging().getToken();
-                if (fcmToken) {
-                  await fetch(`${BASE_URL}/notifications/register-token`, {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type': 'application/json',
-                      Authorization: `Bearer ${result.accessToken}`,
-                    },
-                    body: JSON.stringify({
-                      token: fcmToken,
-                      deviceType: Platform.OS,
-                    }),
-                  });
+                console.log(
+                  '🔔 LEGACY FLOW (EXISTING USER) - Initializing notifications and registering FCM token...',
+                );
+                const proper = ProperSystemNotificationService.getInstance();
+                const initialized = await proper.initializeNotifications();
+
+                if (initialized) {
+                  // Get FCM token and ensure it's registered
+                  const fcmToken = await proper.getFCMToken();
+                  if (fcmToken) {
+                    console.log(
+                      '✅ LEGACY FLOW (EXISTING USER) - FCM token obtained, registering with backend...',
+                    );
+                    // Ensure token is registered - refreshFCMToken will re-register it
+                    await proper.refreshFCMToken();
+                  } else {
+                    console.warn(
+                      '⚠️ LEGACY FLOW (EXISTING USER) - No FCM token available',
+                    );
+                  }
+                } else {
+                  // If initialization failed, try direct registration
+                  console.log(
+                    '⚠️ LEGACY FLOW (EXISTING USER) - Initialization failed, trying direct FCM token registration...',
+                  );
+                  try {
+                    const fcmToken = await messaging().getToken();
+                    if (fcmToken && resultData.accessToken) {
+                      // Use unified API
+                      await unifiedApi.post('/notifications/register-token', {
+                        token: fcmToken,
+                        deviceType: Platform.OS,
+                      });
+                      console.log(
+                        '✅ LEGACY FLOW (EXISTING USER) - FCM token registered directly',
+                      );
+                    }
+                  } catch (directError) {
+                    console.error(
+                      '❌ LEGACY FLOW (EXISTING USER) - Direct FCM token registration failed:',
+                      directError,
+                    );
+                  }
                 }
               } catch (fcmError) {
-                console.error('Failed to register FCM token:', fcmError);
+                console.error(
+                  '❌ LEGACY FLOW (EXISTING USER) - Failed to register FCM token:',
+                  fcmError,
+                );
               }
             } else {
               await AsyncStorage.removeItem('accessToken');
             }
-            if (result.refreshToken != null) {
-              await AsyncStorage.setItem('refreshToken', result.refreshToken);
+            if (resultData.refreshToken != null) {
+              await AsyncStorage.setItem(
+                'refreshToken',
+                resultData.refreshToken,
+              );
             } else {
               await AsyncStorage.removeItem('refreshToken');
             }
             // Store tokens first, then navigate to CustomerScreen
-            await AsyncStorage.setItem('accessToken', result.accessToken);
-            if (result.refreshToken) {
-              await AsyncStorage.setItem('refreshToken', result.refreshToken);
+            await AsyncStorage.setItem('accessToken', resultData.accessToken);
+            if (resultData.refreshToken) {
+              await AsyncStorage.setItem(
+                'refreshToken',
+                resultData.refreshToken,
+              );
             }
             await AsyncStorage.setItem('userMobileNumber', verifiedMobile);
 
             // Call login first to update auth context, then navigate
-            await login(result.accessToken, result.refreshToken, true);
+            await login(resultData.accessToken, resultData.refreshToken, true);
+
+            // Fetch and log user profile
+            try {
+              const profile = await getCurrentUser(resultData.accessToken);
+              console.log('👤 Logged-in user profile:', profile);
+            } catch (e) {
+              console.warn('⚠️ Failed to fetch user profile after login:', e);
+            }
+
+            // Fetch and store RBAC roles/permissions for gated screens
+            await fetchAndStoreRoles(resultData.accessToken);
+            await fetchAndStorePermissions(resultData.accessToken);
 
             // Set Customer as default screen and save current position
             await setDefaultScreen('Customer');
@@ -443,53 +748,118 @@ const SignInOtpScreen = () => {
               params: { screen: 'Customer' },
             });
           } else {
-            setError(result.message || 'Invalid OTP');
+            setError(resultData.message || 'Invalid OTP');
           }
         } else {
           // NEW USER - Registration flow
           console.log('🆕 Verifying registration OTP for new user...');
           console.log('🆕 Registration data:', registrationData);
 
-          const response = await fetch(`${BASE_URL}/user/register/verify-otp`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              mobileNumber: phone,
-              otp: otp,
-            }),
-          });
-          const result = await response.json();
-          console.log(
-            '🆕 Registration verification response:',
-            response.status,
-            result,
-          );
+          // Use unified API
+          const result = (await unifiedApi.post('/auth/verify-otp', {
+            phone,
+            otp: cleanOtp,
+          })) as { data: any; status: number; headers: Headers };
+          const resultData = result.data || result;
+          console.log('🆕 Registration verification response:', resultData);
 
-          if (response.ok && result.success) {
+          if (resultData?.success) {
             console.log('✅ Registration OTP verified successfully!');
 
             // Store tokens first, then navigate to CustomerScreen
-            await AsyncStorage.setItem('accessToken', result.accessToken);
+            await AsyncStorage.setItem('accessToken', resultData.accessToken);
             await AsyncStorage.setItem('userMobileNumber', phone);
 
             // Call login first to update auth context, then navigate
             console.log('🔐 Calling login function for new user with:', {
-              token: result.accessToken,
+              token: resultData.accessToken,
               refreshToken: null,
               profileComplete: true,
             });
-            await login(result.accessToken, null, true);
+            await login(resultData.accessToken, null, true);
+
+            // Ensure notifications are initialized and FCM token is registered after login
+            try {
+              console.log(
+                '🔔 LEGACY FLOW - Initializing notifications and registering FCM token...',
+              );
+              const proper = ProperSystemNotificationService.getInstance();
+              const initialized = await proper.initializeNotifications();
+
+              if (initialized) {
+                // Get FCM token and ensure it's registered
+                const fcmToken = await proper.getFCMToken();
+                if (fcmToken) {
+                  console.log(
+                    '✅ LEGACY FLOW - FCM token obtained, registering with backend...',
+                  );
+                  // Ensure token is registered - refreshFCMToken will re-register it
+                  await proper.refreshFCMToken();
+                } else {
+                  console.warn('⚠️ LEGACY FLOW - No FCM token available');
+                }
+              } else {
+                // If initialization failed, try direct registration
+                console.log(
+                  '⚠️ LEGACY FLOW - Initialization failed, trying direct FCM token registration...',
+                );
+                try {
+                  const fcmToken = await messaging().getToken();
+                  if (fcmToken && resultData.accessToken) {
+                    // Use unified API
+                    await unifiedApi.post('/notifications/register-token', {
+                      token: fcmToken,
+                      deviceType: Platform.OS,
+                    });
+                    console.log(
+                      '✅ LEGACY FLOW - FCM token registered directly',
+                    );
+                  }
+                } catch (directError) {
+                  console.error(
+                    '❌ LEGACY FLOW - Direct FCM token registration failed:',
+                    directError,
+                  );
+                }
+              }
+            } catch (notifError) {
+              console.error(
+                '❌ LEGACY FLOW - Notification initialization failed:',
+                notifError,
+              );
+            }
+
+            // Fetch and log user profile
+            try {
+              const profile = await getCurrentUser(resultData.accessToken);
+              console.log('👤 Logged-in user profile:', profile);
+            } catch (e) {
+              console.warn('⚠️ Failed to fetch user profile after signup:', e);
+            }
             console.log(
               '✅ Login function completed successfully for new user',
             );
 
-            // Show account creation success notification
+            // Fetch and store RBAC roles/permissions for gated screens
+            await fetchAndStoreRoles(resultData.accessToken);
+            await fetchAndStorePermissions(resultData.accessToken);
+
+            // Show account creation success notification with name if available
             try {
-              await showAccountCreatedNotification();
-              console.log('✅ Account creation notification sent successfully');
+              console.log('🔔 LEGACY FLOW - Showing NEW USER notification...');
+              const profile = await getCurrentUser(
+                resultData.accessToken,
+              ).catch(() => null);
+              const displayName =
+                profile?.ownerName || profile?.businessName || undefined;
+              console.log('🔔 LEGACY FLOW - Display name:', displayName);
+              await showSignInSuccessNotification(displayName, true);
+              console.log(
+                '✅ LEGACY FLOW - NEW USER notification sent successfully',
+              );
             } catch (notificationError) {
               console.error(
-                '❌ Failed to show account creation notification:',
+                '❌ LEGACY FLOW - Failed to show NEW USER notification:',
                 notificationError,
               );
               // Don't block the flow if notification fails
@@ -505,7 +875,9 @@ const SignInOtpScreen = () => {
               params: { screen: 'Customer' },
             });
           } else {
-            setError(result.message || 'Registration OTP verification failed');
+            setError(
+              resultData.message || 'Registration OTP verification failed',
+            );
           }
         }
       }
@@ -522,40 +894,30 @@ const SignInOtpScreen = () => {
   return (
     <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
       <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
-        <ScrollView
+        <KeyboardAwareScrollView
           ref={scrollViewRef}
-          contentContainerStyle={{
-            flexGrow: 1,
-            minHeight: '100%',
-            justifyContent: 'center',
-            paddingTop: 80,
-            paddingBottom: 80,
-          }}
+          contentContainerStyle={{ flexGrow: 1 }}
+          enableOnAndroid
+          enableAutomaticScroll={true}
+          extraScrollHeight={80}
+          extraHeight={100}
+          keyboardOpeningTime={0}
           keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
           scrollEnabled={true}
-          contentInsetAdjustmentBehavior="automatic"
-          keyboardDismissMode="interactive"
-          bounces={!isKeyboardVisible} // Disable bouncing when keyboard is visible
-          alwaysBounceVertical={false}
-          scrollEventThrottle={16}
-          decelerationRate="fast"
+          showsVerticalScrollIndicator={false}
         >
           <View style={styles.container}>
+            {/* Back Button */}
+            <TouchableOpacity
+              style={styles.backButton}
+              onPress={() => navigation.goBack()}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="arrow-back" size={26} color="#2d3748" />
+            </TouchableOpacity>
+
             {/* Header Section */}
             <View style={styles.headerSection}>
-              <TouchableOpacity
-                style={styles.topBar}
-                onPress={() => navigation.goBack()}
-              >
-                <Ionicons
-                  name="arrow-back"
-                  size={28}
-                  color="#2d3748"
-                  style={styles.backArrow}
-                />
-              </TouchableOpacity>
-
               <View style={styles.titleSection}>
                 <Text style={styles.welcome}>Verify Your Number</Text>
                 <Text style={styles.subtitle}>
@@ -568,20 +930,6 @@ const SignInOtpScreen = () => {
             <View style={styles.mainContent}>
               <View style={styles.card}>
                 <View style={styles.cardHeader}>
-                  <View style={styles.iconContainer}>
-                    <LinearGradient
-                      colors={['#8f5cff', '#6f4cff']}
-                      start={{ x: 0, y: 0 }}
-                      end={{ x: 1, y: 1 }}
-                      style={styles.iconGradient}
-                    >
-                      <Ionicons
-                        name="shield-checkmark"
-                        size={32}
-                        color="#fff"
-                      />
-                    </LinearGradient>
-                  </View>
                   <Text style={styles.cardTitle}>OTP Verification</Text>
                   <Text style={styles.cardSubtitle}>
                     {useUnifiedAuth
@@ -602,54 +950,43 @@ const SignInOtpScreen = () => {
                     <View style={styles.otpContainer}>
                       <View style={styles.otpRow}>
                         {Array.from({ length: 6 }, (_, index) => (
-                          <View
+                          <TextInput
                             key={index}
+                            ref={ref => {
+                              if (ref) {
+                                otpInputRefs.current[index] = ref;
+                              }
+                            }}
                             style={[
                               styles.otpInput,
-                              otp.length > index && styles.otpInputFilled,
-                              otp.length === index && styles.otpInputActive,
+                              otp[index] &&
+                                otp[index] !== ' ' &&
+                                styles.otpInputFilled,
                             ]}
-                          >
-                            <Text style={styles.otpText}>
-                              {otp[index] || ''}
-                            </Text>
-                          </View>
+                            value={otp[index] === ' ' ? '' : otp[index] || ''}
+                            onChangeText={value =>
+                              handleOtpChange(value, index)
+                            }
+                            onKeyPress={({ nativeEvent }) =>
+                              handleKeyPress(nativeEvent.key, index)
+                            }
+                            keyboardType="number-pad"
+                            maxLength={1}
+                            textAlign="center"
+                            autoFocus={index === 0}
+                            selectTextOnFocus={true}
+                            autoComplete="sms-otp"
+                            showSoftInputOnFocus={true}
+                            blurOnSubmit={false}
+                            returnKeyType="next"
+                            onSubmitEditing={() => {
+                              if (index < 5) {
+                                otpInputRefs.current[index + 1]?.focus();
+                              }
+                            }}
+                          />
                         ))}
                       </View>
-                      <TextInput
-                        style={styles.hiddenInput}
-                        value={otp}
-                        onChangeText={handleOtpChange}
-                        keyboardType="number-pad"
-                        maxLength={6}
-                        autoFocus={true}
-                        selectTextOnFocus={true}
-                        autoComplete="sms-otp"
-                        showSoftInputOnFocus={true}
-                        onFocus={() => {
-                          console.log(
-                            '🔍 OTP input focused - forcing keyboard to show',
-                          );
-                          // Force keyboard to show and move card even higher
-                          setTimeout(() => {
-                            if (scrollViewRef.current) {
-                              const screenHeight =
-                                Dimensions.get('window').height;
-                              const targetScrollY = Math.max(
-                                0,
-                                screenHeight * 0.05, // Even higher positioning
-                              );
-                              scrollViewRef.current?.scrollTo({
-                                y: targetScrollY,
-                                animated: true,
-                              });
-                            }
-                          }, 200);
-                        }}
-                        onBlur={() => {
-                          console.log('🔍 OTP input blurred');
-                        }}
-                      />
                     </View>
                     {/* Backend OTP Display */}
                     {backendOtp && (
@@ -680,14 +1017,27 @@ const SignInOtpScreen = () => {
                     </View>
 
                     {timer === 0 && (
-                      <TouchableOpacity
+                      <LinearGradient
+                        colors={['#6366f1', '#4f46e5', '#4338ca']}
+                        start={{ x: 0, y: 0 }}
+                        end={{ x: 1, y: 0 }}
                         style={styles.resendButton}
-                        onPress={handleResend}
-                        activeOpacity={0.7}
                       >
-                        <Ionicons name="refresh" size={24} color="#ffffff" />
-                        <Text style={styles.resendText}>Resend OTP</Text>
-                      </TouchableOpacity>
+                        <TouchableOpacity
+                          style={{
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            paddingHorizontal: 24,
+                            paddingVertical: 14,
+                          }}
+                          onPress={handleResend}
+                          activeOpacity={0.8}
+                        >
+                          <Ionicons name="refresh" size={20} color="#ffffff" />
+                          <Text style={styles.resendText}>Resend OTP</Text>
+                        </TouchableOpacity>
+                      </LinearGradient>
                     )}
                   </View>
 
@@ -712,6 +1062,8 @@ const SignInOtpScreen = () => {
                       <Text style={styles.loadingText}>Verifying...</Text>
                     </View>
                   )}
+
+                  {/* Test buttons removed for production */}
                 </View>
 
                 <View style={styles.footerSection}>
@@ -724,7 +1076,7 @@ const SignInOtpScreen = () => {
               </View>
             </View>
           </View>
-        </ScrollView>
+        </KeyboardAwareScrollView>
       </SafeAreaView>
     </TouchableWithoutFeedback>
   );
@@ -733,69 +1085,68 @@ const SignInOtpScreen = () => {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#f6fafc',
+    backgroundColor: '#ffffff',
   },
   container: {
     flex: 1,
-    backgroundColor: '#f6fafc',
+    backgroundColor: '#ffffff',
     alignItems: 'center',
     justifyContent: 'flex-start',
     paddingHorizontal: 20,
     paddingTop: 20,
+    paddingBottom: 40,
     minHeight: '100%',
+  },
+  backButton: {
+    position: 'absolute',
+    top: 20,
+    left: 20,
+    zIndex: 10,
+    padding: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderRadius: 22,
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 4,
   },
   // Header Section
   headerSection: {
     width: '100%',
     alignItems: 'center',
-    marginBottom: 30,
-  },
-  topBar: {
-    position: 'absolute',
-    top: 20,
-    left: 16,
-    zIndex: 10,
-    padding: 8,
-    backgroundColor: 'rgba(255, 255, 255, 0.9)',
-    borderRadius: 20,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 1 },
-    elevation: 2,
-  },
-  backArrow: {
-    marginLeft: 0,
-    marginTop: 0,
-    textShadowColor: 'rgba(0,0,0,0.1)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 2,
+    marginBottom: 32,
+    marginTop: 15,
   },
   titleSection: {
     alignItems: 'center',
-    marginTop: 50,
+    marginTop: 15,
   },
   welcome: {
-    fontSize: 26,
-    fontWeight: '700',
-    color: '#1a202c',
+    fontSize: 32,
+    color: '#0f172a',
     textAlign: 'center',
-    marginBottom: 6,
+    marginBottom: 12,
+    fontWeight: '800',
+    fontFamily: 'Roboto-Bold',
+    letterSpacing: -0.5,
   },
+
   mainContent: {
     width: '100%',
     flex: 1,
     justifyContent: 'flex-start',
-    marginTop: 20,
-    position: 'relative',
+    marginTop: 10,
   },
   subtitle: {
-    fontSize: 15,
-    color: '#718096',
+    fontSize: 17,
+    color: '#475569',
     textAlign: 'center',
-    fontWeight: '400',
-    lineHeight: 20,
+    lineHeight: 24,
+    fontWeight: '500',
+    fontFamily: 'Roboto-Medium',
   },
+
   otpContainer: {
     marginVertical: 18,
     alignItems: 'center',
@@ -803,128 +1154,105 @@ const styles = StyleSheet.create({
   },
   otpRow: {
     flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 15,
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '100%',
   },
   otpInput: {
-    width: 36,
-    height: 46,
+    width: 44,
+    height: 56,
     borderWidth: 2,
-    borderColor: '#e3e7ee',
-    borderRadius: 8,
-    backgroundColor: '#f8fafc',
-    alignItems: 'center',
-    justifyContent: 'center',
+    borderColor: '#e2e8f0',
+    borderRadius: 12,
+    backgroundColor: '#fafbfc',
+    marginHorizontal: 3,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.05,
-    shadowRadius: 4,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
     elevation: 2,
+    fontSize: 20,
+    color: '#0f172a',
+    fontFamily: 'Roboto-Bold',
+    fontWeight: '700',
+    textAlign: 'center',
   },
   otpInputFilled: {
-    borderColor: '#8f5cff',
+    borderColor: '#6366f1',
     backgroundColor: '#f0f6ff',
-    shadowColor: '#8f5cff',
-    shadowOffset: { width: 0, height: 2 },
+    shadowColor: '#6366f1',
     shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 3,
-  },
-  otpInputActive: {
-    borderColor: '#8f5cff',
-    backgroundColor: '#f0f6ff',
-    shadowColor: '#8f5cff',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
-    transform: [{ scale: 1.05 }],
-  },
-  otpText: {
-    fontSize: 18,
-    color: '#1a202c',
-    fontWeight: '600',
-  },
-  hiddenInput: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    opacity: 0,
-    fontSize: 16,
-  },
-  iconContainer: {
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  iconGradient: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#8f5cff',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
-  },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 28,
-    paddingBottom: 40,
-    shadowColor: '#000',
-    shadowOpacity: 0.06,
     shadowRadius: 12,
-    shadowOffset: { width: 0, height: 2 },
     elevation: 4,
+  },
+
+  card: {
+    backgroundColor: '#ffffff',
+    borderRadius: 24,
+    padding: 32,
+    shadowColor: '#6366f1',
+    shadowOpacity: 0.12,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
     width: '100%',
-    maxWidth: 380,
+    maxWidth: 400,
     alignSelf: 'center',
+    borderWidth: 1.5,
+    borderColor: '#f1f5f9',
   },
   cardHeader: {
     alignItems: 'center',
-    marginBottom: 28,
+    marginBottom: 32,
   },
   cardTitle: {
-    fontSize: 22,
+    fontSize: 28,
+    color: '#0f172a',
+    marginBottom: 10,
+    textAlign: 'center',
     fontWeight: '700',
-    color: '#1a202c',
-    marginBottom: 6,
-    textAlign: 'center',
+    fontFamily: 'Roboto-Bold',
+    letterSpacing: -0.3,
   },
+
   cardSubtitle: {
-    fontSize: 15,
-    color: '#718096',
+    fontSize: 16,
+    color: '#64748b',
     textAlign: 'center',
-    fontWeight: '400',
-    lineHeight: 20,
+    lineHeight: 24,
+    fontWeight: '500',
+    fontFamily: 'Roboto-Medium',
   },
+
   formSection: {
     width: '100%',
-    marginBottom: 20,
+    marginBottom: 24,
   },
   infoText: {
-    fontSize: 14,
-    color: '#718096',
-    marginBottom: 24,
+    fontSize: 15,
+    color: '#64748b',
+    marginBottom: 28,
     textAlign: 'center',
-    lineHeight: 20,
+    lineHeight: 24,
     paddingHorizontal: 8,
+    fontWeight: '400',
+    fontFamily: 'Roboto-Medium',
   },
+
   inputSection: {
     width: '100%',
-    marginBottom: 20,
+    marginBottom: 24,
   },
   label: {
     fontSize: 15,
-    color: '#1a202c',
-    marginBottom: 10,
-    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 12,
     alignSelf: 'flex-start',
+    fontWeight: '700',
+    fontFamily: 'Roboto-Medium',
+    letterSpacing: 0.2,
   },
+
   timerSection: {
     alignItems: 'center',
     marginBottom: 20,
@@ -936,46 +1264,50 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     paddingHorizontal: 20,
     paddingVertical: 12,
-    backgroundColor: '#f8f9fa',
-    borderRadius: 25,
-    borderWidth: 1,
-    borderColor: '#e9ecef',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
+    backgroundColor: '#fafbfc',
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: '#f1f5f9',
+    shadowColor: '#6366f1',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    elevation: 3,
   },
   timerText: {
     fontSize: 16,
-    color: '#333',
+    color: '#1e293b',
     marginLeft: 8,
-    fontWeight: '600',
+    fontFamily: 'Roboto-Bold',
+    fontWeight: '700',
   },
+
   timerExpired: {
-    color: '#999',
+    color: '#94a3b8',
+    fontFamily: 'Roboto-Bold',
+    fontWeight: '700',
   },
   resendButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#8f5cff',
-    paddingHorizontal: 24,
-    paddingVertical: 14,
-    borderRadius: 28,
+    borderRadius: 16,
+    width: '100%',
     marginBottom: 20,
-    shadowColor: '#8f5cff',
-    shadowOffset: { width: 0, height: 4 },
+    shadowColor: '#6366f1',
+    shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
+    shadowRadius: 16,
+    elevation: 10,
+    overflow: 'hidden',
   },
   resendText: {
     color: '#fff',
-    fontWeight: '600',
-    fontSize: 16,
+    fontSize: 18,
     marginLeft: 8,
+    letterSpacing: 0.5,
+    fontWeight: '700',
+    fontFamily: 'Roboto-Bold',
+    textAlign: 'center',
   },
+
   errorContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -995,13 +1327,14 @@ const styles = StyleSheet.create({
   },
   errorText: {
     color: '#dc2626',
-    fontWeight: '500',
     fontSize: 14,
     marginLeft: 12,
     textAlign: 'left',
     flex: 1,
     lineHeight: 20,
+    fontFamily: 'Roboto-Medium',
   },
+
   loadingContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1021,21 +1354,25 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     color: '#0369a1',
-    fontWeight: '500',
     fontSize: 14,
     marginLeft: 12,
+    fontFamily: 'Roboto-Medium',
   },
+
   footerSection: {
     alignItems: 'center',
-    paddingTop: 12,
-    borderTopWidth: 1,
+    paddingTop: 20,
+    borderTopWidth: 1.5,
     borderTopColor: '#f1f5f9',
+    marginTop: 8,
   },
   bottomText: {
     fontSize: 14,
-    color: '#718096',
+    color: '#64748b',
     textAlign: 'center',
-    lineHeight: 20,
+    lineHeight: 22,
+    fontWeight: '400',
+    fontFamily: 'Roboto-Medium',
   },
 
   backendOtpContainer: {
@@ -1052,16 +1389,21 @@ const styles = StyleSheet.create({
   },
   backendOtpTitle: {
     fontSize: 12,
-    fontWeight: '600',
     color: '#2e7d32',
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '700',
   },
+
   backendOtpValue: {
     fontSize: 18,
-    fontWeight: 'bold',
     color: '#1b5e20',
-    fontFamily: 'monospace',
+    fontFamily: 'Roboto-Bold',
+    fontWeight: '800',
     letterSpacing: 1,
   },
+
+  // Test button styles
+  // Test styles removed
 });
 
 export default SignInOtpScreen;

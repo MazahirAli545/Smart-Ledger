@@ -1,0 +1,52 @@
+# Font Fix Report
+
+Scanned files: 102
+Changed files: 43
+Inline fixes: 170
+Style fixes: 443
+Bare <Text> fixes: 0
+
+## Files changed
+- src\screens\LinkToCAScreen.tsx (inline: 0, styles: 9, bare: 0)
+- src\screens\ReportsScreen.tsx (inline: 0, styles: 12, bare: 0)
+- src\screens\SubscriptionPlanScreen.tsx (inline: 0, styles: 45, bare: 0)
+- src\screens\HomeScreen\AddCustomerFromContactsScreen.tsx (inline: 0, styles: 12, bare: 0)
+- src\screens\HomeScreen\AddFolderScreen.tsx (inline: 0, styles: 15, bare: 0)
+- src\screens\HomeScreen\AddNewEntryScreen.tsx (inline: 0, styles: 37, bare: 0)
+- src\screens\HomeScreen\AddPartyScreen.tsx (inline: 0, styles: 22, bare: 0)
+- src\screens\HomeScreen\AllQuickActionsScreen.tsx (inline: 4, styles: 2, bare: 0)
+- src\screens\HomeScreen\CashFlowScreen.tsx (inline: 0, styles: 14, bare: 0)
+- src\screens\HomeScreen\CustomerDetailScreen.tsx (inline: 0, styles: 13, bare: 0)
+- src\screens\HomeScreen\CustomerScreen.tsx (inline: 0, styles: 50, bare: 0)
+- src\screens\HomeScreen\DailyLedgerScreen.tsx (inline: 0, styles: 15, bare: 0)
+- src\screens\HomeScreen\Dashboard.tsx (inline: 9, styles: 17, bare: 0)
+- src\screens\HomeScreen\GSTSummaryScreen.tsx (inline: 0, styles: 19, bare: 0)
+- src\screens\HomeScreen\InvoiceScreen_clean.tsx (inline: 44, styles: 15, bare: 0)
+- src\screens\HomeScreen\NotificationScreen.tsx (inline: 0, styles: 3, bare: 0)
+- src\screens\HomeScreen\PaymentScreen.tsx (inline: 33, styles: 3, bare: 0)
+- src\screens\HomeScreen\ProfileScreen.tsx (inline: 0, styles: 17, bare: 0)
+- src\screens\HomeScreen\PurchaseScreen.tsx (inline: 45, styles: 15, bare: 0)
+- src\screens\HomeScreen\ReceiptScreen.tsx (inline: 32, styles: 3, bare: 0)
+- src\screens\Auth\SignInOtpScreen.tsx (inline: 0, styles: 12, bare: 0)
+- src\screens\Auth\SignInScreen.tsx (inline: 2, styles: 10, bare: 0)
+- src\components\AttachDocument.tsx (inline: 0, styles: 7, bare: 0)
+- src\components\CustomAlert.tsx (inline: 0, styles: 3, bare: 0)
+- src\components\CustomDrawerContent.tsx (inline: 0, styles: 12, bare: 0)
+- src\components\CustomerSelector.tsx (inline: 0, styles: 3, bare: 0)
+- src\components\EntryForm.tsx (inline: 1, styles: 1, bare: 0)
+- src\components\LoadingScreen.tsx (inline: 0, styles: 2, bare: 0)
+- src\components\NetworkStatusModal.tsx (inline: 0, styles: 3, bare: 0)
+- src\components\NotificationSettings.tsx (inline: 0, styles: 5, bare: 0)
+- src\components\PartyList.tsx (inline: 0, styles: 5, bare: 0)
+- src\components\PaymentDetailsDisplay.tsx (inline: 0, styles: 9, bare: 0)
+- src\components\PlanExpiryPopup.tsx (inline: 0, styles: 6, bare: 0)
+- src\components\PremiumBadge.tsx (inline: 0, styles: 1, bare: 0)
+- src\components\SearchAndFilter.tsx (inline: 0, styles: 1, bare: 0)
+- src\components\SessionLogoutPopup.tsx (inline: 0, styles: 2, bare: 0)
+- src\components\StatusBadge.tsx (inline: 0, styles: 1, bare: 0)
+- src\components\SubscriptionRenewalNotification.tsx (inline: 0, styles: 7, bare: 0)
+- src\components\SupplierSelector.tsx (inline: 0, styles: 1, bare: 0)
+- src\components\SyncCard.tsx (inline: 0, styles: 3, bare: 0)
+- src\components\TopTabs.tsx (inline: 0, styles: 2, bare: 0)
+- src\components\TransactionLimitPopup.tsx (inline: 0, styles: 7, bare: 0)
+- src\components\UploadDocument.tsx (inline: 0, styles: 2, bare: 0)

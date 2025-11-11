@@ -6,7 +6,6 @@ import {
   ScrollView,
   TouchableOpacity,
   TextInput,
-  StatusBar,
   Dimensions,
   Alert,
   PermissionsAndroid,
@@ -15,11 +14,23 @@ import {
   Linking,
   NativeModules,
 } from 'react-native';
-import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import {
+  useNavigation,
+  useFocusEffect,
+  useRoute,
+  RouteProp,
+} from '@react-navigation/native';
 import { StackNavigationProp } from '@react-navigation/stack';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
+import { uiColors, uiFonts } from '../../config/uiSizing';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { AppStackParamList } from '../../types/navigation';
+import { useStatusBarWithGradient } from '../../hooks/useStatusBar';
+import { getStatusBarHeight } from 'react-native-status-bar-height';
+import {
+  HEADER_CONTENT_HEIGHT,
+  getSolidHeaderStyle,
+} from '../../utils/headerLayout';
 
 // Import contacts with multiple fallback methods
 let Contacts: any = null;
@@ -48,6 +59,11 @@ try {
 }
 
 const { width } = Dimensions.get('window');
+// Responsive sizes for ADD button (slightly smaller overall)
+const ADD_BTN_FONT_SIZE = width >= 400 ? 13 : width <= 360 ? 11 : 12;
+const ADD_BTN_ICON_SIZE = width >= 400 ? 16 : width <= 360 ? 14 : 15;
+const ADD_BTN_HEIGHT = width >= 400 ? 40 : width <= 360 ? 36 : 38;
+const ADD_BTN_MIN_WIDTH = width >= 400 ? 88 : width <= 360 ? 80 : 84;
 
 interface Contact {
   id: string;
@@ -69,8 +85,22 @@ export const clearContactsCache = () => {
 };
 
 const AddCustomerFromContactsScreen: React.FC = () => {
+  // StatusBar like ProfileScreen for colored header
+  const { statusBarSpacer } = useStatusBarWithGradient(
+    'AddCustomerFromContacts',
+    ['#4f8cff', '#4f8cff'],
+  );
+  const preciseStatusBarHeight = getStatusBarHeight(true);
   const navigation = useNavigation<StackNavigationProp<AppStackParamList>>();
+  const route =
+    useRoute<RouteProp<AppStackParamList, 'AddCustomerFromContacts'>>();
+  const incomingPartyType = (route.params as any)?.partyType as
+    | 'customer'
+    | 'supplier'
+    | undefined;
   const [searchQuery, setSearchQuery] = useState('');
+  const entityLabel =
+    incomingPartyType === 'supplier' ? 'Supplier' : 'Customer';
   const [contacts, setContacts] = useState<Contact[]>(
     globalContactsCache || [],
   );
@@ -765,6 +795,7 @@ const AddCustomerFromContactsScreen: React.FC = () => {
   const handleAddNewCustomer = () => {
     navigation.navigate('AddParty', {
       shouldRefresh: true, // Tell the CustomerScreen to refresh when returning
+      partyType: incomingPartyType === 'supplier' ? 'supplier' : 'customer',
     });
   };
 
@@ -783,6 +814,7 @@ const AddCustomerFromContactsScreen: React.FC = () => {
         phoneNumber: phoneNumber,
       },
       shouldRefresh: true, // Tell the CustomerScreen to refresh when returning
+      partyType: incomingPartyType === 'supplier' ? 'supplier' : 'customer',
     });
   };
 
@@ -865,19 +897,35 @@ const AddCustomerFromContactsScreen: React.FC = () => {
       <TouchableOpacity
         style={styles.addButton}
         onPress={() => handleAddContact(contact)}
+        activeOpacity={0.85}
       >
-        <Text style={styles.addButtonText}>+ ADD</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <MaterialCommunityIcons
+            name="plus"
+            size={ADD_BTN_ICON_SIZE}
+            color={uiColors.textHeader}
+          />
+          <Text style={[styles.addButtonText, { fontSize: ADD_BTN_FONT_SIZE }]}>
+            ADD
+          </Text>
+        </View>
       </TouchableOpacity>
     </View>
   );
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#4f8cff" />
-
+    <SafeAreaView style={styles.container} edges={['bottom']}>
       {/* Header */}
-      <View style={styles.header}>
+      <View
+        style={[
+          styles.header,
+          getSolidHeaderStyle(preciseStatusBarHeight || statusBarSpacer.height),
+        ]}
+      >
+        <View style={{ height: HEADER_CONTENT_HEIGHT }} />
         <TouchableOpacity
+          style={styles.headerBackButton}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           onPress={() => {
             console.log(
               '🔄 AddCustomerFromContactsScreen: Back button pressed, navigating to CustomerScreen with refresh',
@@ -885,9 +933,9 @@ const AddCustomerFromContactsScreen: React.FC = () => {
             navigation.navigate('Customer', { shouldRefresh: true });
           }}
         >
-          <MaterialCommunityIcons name="arrow-left" size={24} color="#fff" />
+          <MaterialCommunityIcons name="arrow-left" size={25} color="#fff" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Add Customer from Contacts</Text>
+        <Text style={styles.headerTitle}>Add {entityLabel} from Contacts</Text>
         <View style={styles.headerRight} />
       </View>
 
@@ -899,7 +947,7 @@ const AddCustomerFromContactsScreen: React.FC = () => {
             placeholder="Search name or number"
             value={searchQuery}
             onChangeText={setSearchQuery}
-            placeholderTextColor="#666"
+            placeholderTextColor="#666666"
           />
           <MaterialCommunityIcons name="magnify" size={20} color="#666" />
         </View>
@@ -919,7 +967,7 @@ const AddCustomerFromContactsScreen: React.FC = () => {
             />
           </View>
           <View style={styles.addNewCustomerInfo}>
-            <Text style={styles.addNewCustomerText}>Add New Customer</Text>
+            <Text style={styles.addNewCustomerText}>Add New {entityLabel}</Text>
           </View>
           <MaterialCommunityIcons
             name="chevron-right"
@@ -951,47 +999,6 @@ const AddCustomerFromContactsScreen: React.FC = () => {
             </View>
           ) : (
             <>
-              {/* Show status banner */}
-              {usingRealContacts ? (
-                <View style={styles.successBanner}>
-                  <MaterialCommunityIcons
-                    name="check-circle"
-                    size={16}
-                    color="#28a745"
-                  />
-                  <Text style={styles.successBannerText}>
-                    ✅ Real device contacts loaded successfully!
-                  </Text>
-                </View>
-              ) : error ? (
-                <View style={styles.errorBanner}>
-                  <MaterialCommunityIcons
-                    name="information"
-                    size={16}
-                    color="#4f8cff"
-                  />
-                  <Text style={styles.errorBannerText}>{error}</Text>
-                  <View style={styles.errorBannerButtons}>
-                    <TouchableOpacity
-                      style={styles.retryButtonSmall}
-                      onPress={() => fetchDeviceContacts()}
-                    >
-                      <Text style={styles.retryButtonTextSmall}>Retry</Text>
-                    </TouchableOpacity>
-                    {showSettingsButton ? (
-                      <TouchableOpacity
-                        style={styles.settingsButtonSmall}
-                        onPress={openAppSettings}
-                      >
-                        <Text style={styles.settingsButtonTextSmall}>
-                          Settings
-                        </Text>
-                      </TouchableOpacity>
-                    ) : null}
-                  </View>
-                </View>
-              ) : null}
-
               {/* Always show contacts if available */}
               {filteredContacts.map(renderContactItem)}
             </>
@@ -1008,22 +1015,28 @@ const styles = StyleSheet.create({
     backgroundColor: '#f8fafc',
   },
   header: {
-    backgroundColor: '#4f8cff',
+    backgroundColor: uiColors.primaryBlue,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 12,
-    paddingVertical: 12,
+    paddingVertical: 30,
+  },
+  headerBackButton: {
+    padding: 10,
+    borderRadius: 20,
   },
   headerTitle: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '600',
+    color: uiColors.textHeader,
+    fontSize: 19,
+    fontWeight: '800',
     flex: 1,
     textAlign: 'center',
+    fontFamily: uiFonts.family,
   },
+
   headerRight: {
-    width: 20, // Same width as back button for centering
+    width: 44, // Match back button touch area for perfect centering
   },
   searchContainer: {
     paddingHorizontal: 12,
@@ -1042,11 +1055,13 @@ const styles = StyleSheet.create({
   },
   searchInput: {
     flex: 1,
-    fontSize: 12,
-    color: '#1e293b',
+    fontSize: uiFonts.sizeSearchInput,
+    color: '#333333',
     marginRight: 8,
-    fontWeight: '500',
+
+    fontFamily: uiFonts.family,
   },
+
   content: {
     flex: 1,
   },
@@ -1061,9 +1076,9 @@ const styles = StyleSheet.create({
     borderBottomColor: '#e2e8f0',
   },
   addNewCustomerAvatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: '#e3f2fd',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1073,10 +1088,11 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   addNewCustomerText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#4f8cff',
+    fontSize: 14,
+    color: uiColors.primaryBlue,
+    fontFamily: uiFonts.family,
   },
+
   contactsList: {
     backgroundColor: '#fff',
   },
@@ -1089,43 +1105,62 @@ const styles = StyleSheet.create({
     borderBottomColor: '#e2e8f0',
   },
   contactAvatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: '#4f8cff',
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: uiColors.primaryBlue,
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 12,
   },
   avatarText: {
     color: '#fff',
-    fontSize: 12,
-    fontWeight: '700',
+    fontSize: 16,
+
+    fontFamily: uiFonts.family,
   },
+
   contactInfo: {
     flex: 1,
   },
   contactName: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#1e293b',
+    fontSize: uiFonts.sizeCustomerName,
+    color: '#333333',
     marginBottom: 4,
+
+    fontFamily: uiFonts.family,
   },
+
   contactPhone: {
-    fontSize: 10,
+    fontSize: uiFonts.sizeCustomerMeta,
     color: '#64748b',
+
+    fontFamily: uiFonts.family,
   },
+
   addButton: {
-    backgroundColor: '#4f8cff',
+    backgroundColor: uiColors.primaryBlue,
     paddingHorizontal: 12,
     paddingVertical: 8,
-    borderRadius: 6,
+    borderRadius: 10,
+    minWidth: ADD_BTN_MIN_WIDTH,
+    height: ADD_BTN_HEIGHT,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#4f8cff',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 3,
+    elevation: 2,
   },
   addButtonText: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: '600',
+    color: uiColors.textHeader,
+    fontSize: 12,
+    fontFamily: uiFonts.family,
+
+    letterSpacing: 0.3,
   },
+
   loadingContainer: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -1135,7 +1170,9 @@ const styles = StyleSheet.create({
     marginTop: 12,
     fontSize: 12,
     color: '#64748b',
+    fontFamily: uiFonts.family,
   },
+
   errorContainer: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -1147,18 +1184,22 @@ const styles = StyleSheet.create({
     color: '#dc3545',
     textAlign: 'center',
     marginBottom: 16,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   retryButton: {
-    backgroundColor: '#4f8cff',
+    backgroundColor: uiColors.primaryBlue,
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderRadius: 8,
   },
   retryButtonText: {
-    color: '#fff',
+    color: uiColors.textHeader,
     fontSize: 12,
-    fontWeight: '600',
+    fontFamily: uiFonts.family,
   },
+
   errorButtonsContainer: {
     flexDirection: 'row',
     gap: 12,
@@ -1173,8 +1214,10 @@ const styles = StyleSheet.create({
   settingsButtonText: {
     color: '#fff',
     fontSize: 12,
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   emptyContainer: {
     alignItems: 'center',
     justifyContent: 'center',
@@ -1183,15 +1226,20 @@ const styles = StyleSheet.create({
   emptyText: {
     marginTop: 12,
     fontSize: 14,
-    fontWeight: '600',
-    color: '#1e293b',
+    color: '#333333',
     marginBottom: 6,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   emptySubtext: {
     fontSize: 12,
     color: '#64748b',
     textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   errorBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1207,7 +1255,10 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#4f8cff',
     marginLeft: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   errorBannerButtons: {
     flexDirection: 'row',
     gap: 8,
@@ -1221,8 +1272,10 @@ const styles = StyleSheet.create({
   retryButtonTextSmall: {
     color: '#fff',
     fontSize: 10,
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   settingsButtonSmall: {
     backgroundColor: '#6c757d',
     paddingHorizontal: 12,
@@ -1232,24 +1285,8 @@ const styles = StyleSheet.create({
   settingsButtonTextSmall: {
     color: '#fff',
     fontSize: 10,
-    fontWeight: '600',
-  },
-  successBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#d4edda',
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    marginBottom: 1,
-    borderBottomWidth: 1,
-    borderBottomColor: '#e2e8f0',
-  },
-  successBannerText: {
-    flex: 1,
-    fontSize: 11,
-    color: '#28a745',
-    marginLeft: 8,
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
 });
 

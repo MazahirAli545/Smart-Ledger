@@ -7,16 +7,21 @@ import {
   ScrollView,
   Image,
   Platform,
+  SafeAreaView,
 } from 'react-native';
-import { Dropdown } from 'react-native-element-dropdown';
-import Ionicons from 'react-native-vector-icons/Ionicons';
+import { Picker } from '@react-native-picker/picker';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import { useOnboarding } from '../../context/OnboardingContext';
-import { RootStackParamList } from '../../types/navigation';
-import { SafeAreaView } from 'react-native-safe-area-context';
-import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
+
+// Define the navigation param list
+type RootStackParamList = {
+  SetupWizard: undefined;
+  TeamSetup: undefined;
+  Preferences: undefined;
+  BankDetailsScreen: undefined;
+};
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
 const MIC_ICON = 'https://img.icons8.com/ios-filled/100/9b5de5/microphone.png'; // Placeholder purple mic icon
@@ -77,25 +82,19 @@ const PreferencesScreen: React.FC = () => {
       features: selectedFeatures,
     }));
 
-    navigation.navigate('BankDetails');
+    navigation.navigate('BankDetailsScreen');
   };
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <KeyboardAwareScrollView
-        contentContainerStyle={{ flexGrow: 1, justifyContent: 'center' }}
-        keyboardShouldPersistTaps="handled"
-        enableOnAndroid={true}
-        extraScrollHeight={60}
-        showsVerticalScrollIndicator={false}
-      >
+      <ScrollView contentContainerStyle={{ flexGrow: 1 }}>
         {/* Logo and App Name */}
-        {/* <View style={styles.logoContainer}>
+        <View style={styles.logoContainer}>
           <Image source={LOGO} style={styles.logo} />
           <Text style={styles.appName}>Smart Ledger</Text>
         </View>
         {/* Setup Wizard Badge */}
-        {/* <View style={styles.badgeRow}>
+        <View style={styles.badgeRow}>
           <LinearGradient
             colors={['#4f8cff', '#1ecb81']}
             start={{ x: 0, y: 0 }}
@@ -104,8 +103,15 @@ const PreferencesScreen: React.FC = () => {
           >
             <Text style={styles.setupBadgeText}>Setup Wizard</Text>
           </LinearGradient>
-        </View> */}
-
+        </View>
+        {/* Progress Bar */}
+        <View style={styles.progressRow}>
+          <Text style={styles.progressText}>Step 3 of 5</Text>
+          <Text style={styles.progressTextRight}>60% Complete</Text>
+        </View>
+        <View style={styles.progressBarBg}>
+          <View style={styles.progressBarFill} />
+        </View>
         {/* Card Container */}
         <View style={styles.card}>
           <Image source={{ uri: MIC_ICON }} style={styles.micIcon} />
@@ -115,45 +121,24 @@ const PreferencesScreen: React.FC = () => {
           </Text>
           {/* Preferred Language */}
           <Text style={styles.label}>Preferred Language</Text>
-          <Dropdown
-            style={[
-              styles.dropdown1,
-              language && styles.inputActive,
-              language && styles.inputFocusShadow,
-            ]}
-            placeholderStyle={styles.placeholderStyle1}
-            selectedTextStyle={styles.selectedTextStyle1}
-            inputSearchStyle={styles.inputSearchStyle1}
-            iconStyle={styles.iconStyle1}
-            data={languages.map(lang => ({ label: lang, value: lang }))}
-            search
-            searchPlaceholder="Search language..."
-            maxHeight={300}
-            labelField="label"
-            valueField="value"
-            placeholder="Select your preferred language"
-            value={language}
-            onChange={item => handleLanguageChange(item.value)}
-            renderLeftIcon={() => (
-              <Ionicons
-                name="language"
-                size={20}
-                color="#4f8cff"
-                style={{ marginRight: 10 }}
+          <View style={styles.pickerWrapper}>
+            <Picker
+              selectedValue={language}
+              onValueChange={handleLanguageChange}
+              style={styles.picker}
+              itemStyle={styles.pickerItem}
+              dropdownIconColor="#8a94a6"
+            >
+              <Picker.Item
+                label="Select your preferred language"
+                value=""
+                color="#8a94a6"
               />
-            )}
-            renderItem={(item, selected) => (
-              <View style={styles.dropdownItem}>
-                <Text style={styles.dropdownItemText}>{item.label}</Text>
-                {selected && (
-                  <Ionicons name="checkmark" size={18} color="#4f8cff" />
-                )}
-              </View>
-            )}
-            flatListProps={{ keyboardShouldPersistTaps: 'always' }}
-            containerStyle={styles.dropdownContainer}
-            itemContainerStyle={styles.dropdownItemContainer}
-          />
+              {languages.map(lang => (
+                <Picker.Item key={lang} label={lang} value={lang} />
+              ))}
+            </Picker>
+          </View>
           {/* Features */}
           <Text style={styles.label}>Features you're most interested in:</Text>
           {features.map(feature => {
@@ -204,7 +189,7 @@ const PreferencesScreen: React.FC = () => {
             </LinearGradient>
           </View>
         </View>
-      </KeyboardAwareScrollView>
+      </ScrollView>
     </SafeAreaView>
   );
 };
@@ -259,7 +244,36 @@ const styles = StyleSheet.create({
     color: '#222',
     letterSpacing: 0.5,
   },
-
+  progressRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginHorizontal: 24,
+    marginBottom: 2,
+  },
+  progressText: {
+    color: '#222',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  progressTextRight: {
+    color: '#888',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  progressBarBg: {
+    height: 6,
+    backgroundColor: '#e3e7ee',
+    borderRadius: 4,
+    marginHorizontal: 24,
+    marginBottom: 18,
+  },
+  progressBarFill: {
+    height: 6,
+    width: '60%',
+    backgroundColor: '#222',
+    borderRadius: 4,
+  },
   card: {
     backgroundColor: '#fff',
     borderRadius: 16,
@@ -302,6 +316,32 @@ const styles = StyleSheet.create({
     marginTop: 16,
     fontWeight: 'bold',
     alignSelf: 'flex-start',
+  },
+  pickerWrapper: {
+    borderColor: '#e3e7ee',
+    borderWidth: 1,
+    borderRadius: 10,
+    backgroundColor: '#fff',
+    marginBottom: 12,
+    height: 52,
+    justifyContent: 'center',
+    overflow: 'hidden',
+    width: '100%',
+  },
+  picker: {
+    width: '100%',
+    height: 52,
+    color: '#222',
+    fontSize: 14,
+    paddingVertical: 6,
+    backgroundColor: '#fff',
+  },
+  pickerItem: {
+    height: 52,
+    fontSize: 14,
+    color: '#222',
+    textAlignVertical: 'center',
+    backgroundColor: '#fff',
   },
   featureBox: {
     width: '100%',
@@ -377,82 +417,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: 'bold',
     textAlign: 'center',
-  },
-  dropdown1: {
-    marginTop: 12,
-    height: 50,
-    width: '100%',
-    backgroundColor: '#fff',
-    paddingHorizontal: 16,
-    borderRadius: 12,
-    borderColor: '#e3e7ee',
-    borderWidth: 1.5,
-    fontSize: 16,
-  },
-  placeholderStyle1: {
-    fontSize: 15,
-    color: '#8a94a6',
-  },
-  selectedTextStyle1: {
-    fontSize: 15,
-    color: '#222',
-  },
-  inputSearchStyle1: {
-    height: 40,
-    fontSize: 15,
-    color: '#222',
-    backgroundColor: '#f8fafc',
-    borderRadius: 8,
-    paddingLeft: 8,
-    borderBottomColor: '#e3e7ee',
-    borderBottomWidth: 1,
-  },
-  iconStyle1: {
-    width: 24,
-    height: 24,
-  },
-  dropdownContainer: {
-    marginTop: 10,
-    borderRadius: 12,
-    borderColor: '#e3e7ee',
-    borderWidth: 1,
-    shadowColor: '#000',
-    shadowOffset: {
-      width: 0,
-      height: 2,
-    },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 5,
-    zIndex: 1000,
-  },
-  dropdownItemContainer: {
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
-  },
-  dropdownItem: {
-    padding: 12,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  dropdownItemText: {
-    fontSize: 15,
-    color: '#222',
-  },
-  inputActive: {
-    borderColor: '#4f8cff',
-    borderWidth: 2,
-  },
-  inputFocusShadow: {
-    shadowColor: '#4f8cff',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 6,
-    elevation: 2,
-    backgroundColor: '#f0f6ff',
   },
 });
 

@@ -9,6 +9,10 @@ import {
 } from 'react-native';
 import type { ViewStyle, TextStyle } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
+import { uiColors, uiFonts, uiButtons, uiLayout } from '../config/uiSizing';
+
+const SCALE = 0.75;
+const scale = (value: number) => Math.round(value * SCALE);
 
 // --- TypeScript interfaces for search/filter state ---
 export interface PaymentSearchFilterState {
@@ -38,6 +42,9 @@ export interface SearchAndFilterProps {
   recentSearches: RecentSearch[];
   onRecentSearchPress: (search: RecentSearch) => void;
   filterBadgeCount: number;
+  // Optional overrides for input text and placeholder colors
+  inputTextColor?: string;
+  placeholderTextColor?: string;
 }
 
 const SearchAndFilter: React.FC<SearchAndFilterProps> = ({
@@ -47,6 +54,8 @@ const SearchAndFilter: React.FC<SearchAndFilterProps> = ({
   recentSearches,
   onRecentSearchPress,
   filterBadgeCount,
+  inputTextColor,
+  placeholderTextColor,
 }) => {
   return (
     <View style={styles.container}>
@@ -54,16 +63,22 @@ const SearchAndFilter: React.FC<SearchAndFilterProps> = ({
       <View style={styles.searchBar}>
         <MaterialCommunityIcons
           name="magnify"
-          size={20}
-          color="#8a94a6"
+          size={22}
+          color={uiColors.textTertiary}
           style={{ marginRight: 8 }}
         />
         <TextInput
-          style={styles.input}
+          style={[
+            styles.input,
+            inputTextColor ? { color: inputTextColor } : null,
+          ]}
           placeholder="Search payments, suppliers, amount, etc."
           value={value.searchText}
           onChangeText={text => onChange({ ...value, searchText: text })}
           returnKeyType="search"
+          placeholderTextColor={
+            placeholderTextColor ? placeholderTextColor : uiColors.textTertiary
+          }
         />
         {!!value.searchText && (
           <TouchableOpacity
@@ -73,7 +88,7 @@ const SearchAndFilter: React.FC<SearchAndFilterProps> = ({
             <MaterialCommunityIcons
               name="close-circle"
               size={22}
-              color="#8a94a6"
+              color={uiColors.textTertiary}
             />
           </TouchableOpacity>
         )}
@@ -85,7 +100,7 @@ const SearchAndFilter: React.FC<SearchAndFilterProps> = ({
           <MaterialCommunityIcons
             name="filter-variant"
             size={22}
-            color="#4f8cff"
+            color={uiColors.primaryBlue}
           />
           {filterBadgeCount > 0 && (
             <View style={styles.badge}>
@@ -126,12 +141,12 @@ const styles = StyleSheet.create({
   searchBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    borderColor: '#e3e7ee',
+    backgroundColor: uiColors.bgCard,
+    borderRadius: uiButtons.radiusMd,
+    borderColor: uiColors.borderLight,
     borderWidth: 1.5,
-    paddingHorizontal: 12,
-    height: 48,
+    paddingHorizontal: 14,
+    height: 52,
     shadowColor: '#000',
     shadowOpacity: 0.05,
     shadowRadius: 5,
@@ -139,15 +154,16 @@ const styles = StyleSheet.create({
   } as ViewStyle,
   input: {
     flex: 1,
-    height: 44,
+    height: 48,
     fontSize: 16,
-    color: '#222',
-  } as TextStyle,
+    color: uiColors.textPrimary,
+    fontFamily: 'Roboto-Medium',
+  },
   badge: {
     position: 'absolute',
     top: -4,
     right: -4,
-    backgroundColor: '#4f8cff',
+    backgroundColor: uiColors.primaryBlue,
     borderRadius: 8,
     minWidth: 16,
     height: 16,
@@ -156,10 +172,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 2,
   } as ViewStyle,
   badgeText: {
-    color: '#fff',
+    color: uiColors.textHeader,
     fontSize: 10,
-    fontWeight: 'bold',
-  } as TextStyle,
+    fontFamily: 'Roboto-Medium',
+  },
+
   recentSearchesContainer: {
     marginTop: 6,
     flexDirection: 'row',
@@ -172,9 +189,10 @@ const styles = StyleSheet.create({
     marginRight: 8,
   } as ViewStyle,
   recentSearchText: {
-    color: '#4f8cff',
+    color: uiColors.primaryBlue,
     fontSize: 14,
-  } as TextStyle,
+    fontFamily: 'Roboto-Medium',
+  },
 });
 
 export default SearchAndFilter;

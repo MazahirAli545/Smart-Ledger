@@ -73,34 +73,3 @@ yarn-error.log
 !.yarn/releases
 !.yarn/sdks
 !.yarn/versions
-
-# Environment variables and sensitive configuration
-.env
-.env.local
-.env.development
-.env.production
-.env.staging
-
-# Secret files and API keys
-*.json
-!package.json
-!package-lock.json
-!tsconfig.json
-!app.json
-!android/link-assets-manifest.json
-
-# Google Cloud credentials
-google-services.json
-service-account-*.json
-*-key.json
-stable-chain.json
-ocr*.json
-
-# Firebase configuration
-google-services.json
-GoogleService-Info.plist
-
-# Test files with hardcoded tokens
-test-*-api.js
-test-*-screen*.js
-test-*-endpoints.js

@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   RefreshControl,
 } from 'react-native';
+
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
@@ -16,7 +17,7 @@ import type { StackNavigationProp } from '@react-navigation/stack';
 import { RootStackParamList } from '../../types/navigation';
 import { useVouchers } from '../../context/VoucherContext';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { BASE_URL } from '../../api';
+import { unifiedApi } from '../../api/unifiedApiService';
 import LoadingScreen from '../../components/LoadingScreen';
 
 // Global cache for GSTSummaryScreen
@@ -552,14 +553,19 @@ const styles = StyleSheet.create({
   },
   headerTitle: {
     fontSize: 20,
-    fontWeight: 'bold',
     color: '#222',
     marginBottom: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   headerSubtitle: {
     fontSize: 14,
     color: '#666',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   exportButton: {
     width: 40,
     height: 40,
@@ -585,8 +591,10 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#666',
     marginRight: 8,
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   quickStatsContainer: {
     paddingHorizontal: 16,
     paddingVertical: 16,
@@ -618,25 +626,31 @@ const styles = StyleSheet.create({
   },
   quickStatAmount: {
     fontSize: 18,
-    fontWeight: 'bold',
     color: '#222',
     marginBottom: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   quickStatLabel: {
     fontSize: 12,
     color: '#666',
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   sectionContainer: {
     paddingHorizontal: 16,
     marginTop: 8,
   },
   sectionTitle: {
     fontSize: 18,
-    fontWeight: 'bold',
     color: '#222',
     marginBottom: 12,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   filingStatusContainer: {
     flexDirection: 'row',
     gap: 12,
@@ -666,18 +680,25 @@ const styles = StyleSheet.create({
   statusBadgeText: {
     fontSize: 10,
     color: '#fff',
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   filingStatusTitle: {
     fontSize: 16,
-    fontWeight: 'bold',
     color: '#222',
     marginBottom: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   filingStatusDate: {
     fontSize: 12,
     color: '#666',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   gstBreakdownContainer: {
     backgroundColor: '#fff',
     borderRadius: 16,
@@ -707,20 +728,28 @@ const styles = StyleSheet.create({
   gstBreakdownLabel: {
     fontSize: 16,
     color: '#666',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   gstBreakdownLabelBold: {
-    fontWeight: 'bold',
     color: '#222',
+
+    fontFamily: 'Roboto-Medium',
   },
   gstBreakdownAmount: {
     fontSize: 16,
     color: '#222',
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   gstBreakdownAmountBold: {
     fontSize: 18,
-    fontWeight: 'bold',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   gstBreakdownDivider: {
     height: 1,
     backgroundColor: '#f0f0f0',
@@ -741,8 +770,10 @@ const styles = StyleSheet.create({
   viewAllButtonText: {
     fontSize: 12,
     color: '#4f8cff',
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   transactionsContainer: {
     backgroundColor: '#fff',
     borderRadius: 16,
@@ -778,43 +809,58 @@ const styles = StyleSheet.create({
   },
   transactionTitle: {
     fontSize: 14,
-    fontWeight: '600',
     color: '#222',
     marginBottom: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   transactionInvoice: {
     fontSize: 12,
     color: '#666',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   transactionRight: {
     alignItems: 'flex-end',
   },
   transactionAmount: {
     fontSize: 14,
-    fontWeight: 'bold',
     marginBottom: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   transactionGst: {
     fontSize: 11,
     color: '#666',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   emptyTransactionsContainer: {
     padding: 32,
     alignItems: 'center',
   },
   emptyTransactionsTitle: {
     fontSize: 16,
-    fontWeight: 'bold',
     color: '#666',
     marginBottom: 8,
     textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   emptyTransactionsSubtitle: {
     fontSize: 14,
     color: '#999',
     textAlign: 'center',
     lineHeight: 20,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   alertsHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -822,10 +868,12 @@ const styles = StyleSheet.create({
   },
   alertsTitle: {
     fontSize: 18,
-    fontWeight: 'bold',
     color: '#222',
     marginLeft: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   alertCard: {
     backgroundColor: '#fff',
     borderRadius: 16,
@@ -844,19 +892,25 @@ const styles = StyleSheet.create({
   },
   alertCardTitle: {
     fontSize: 16,
-    fontWeight: 'bold',
     color: '#222',
     marginLeft: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   alertMessage: {
     fontSize: 14,
     color: '#666',
     lineHeight: 20,
     marginBottom: 12,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   alertAmount: {
-    fontWeight: 'bold',
     color: '#dc3545',
+
+    fontFamily: 'Roboto-Medium',
   },
   alertActions: {
     flexDirection: 'row',
@@ -872,8 +926,10 @@ const styles = StyleSheet.create({
   alertPrimaryButtonText: {
     color: '#fff',
     fontSize: 14,
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   alertSecondaryButton: {
     flex: 1,
     backgroundColor: '#fff',
@@ -886,7 +942,8 @@ const styles = StyleSheet.create({
   alertSecondaryButtonText: {
     color: '#666',
     fontSize: 14,
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
 });
 

@@ -76,30 +76,16 @@ const DashboardShimmer: React.FC = () => {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor="#f6fafc" />
 
-      {/* Header Shimmer */}
+      {/* Header Shimmer (left only) */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
           <ShimmerCircle size={40} />
           <ShimmerBox width={120} height={20} />
         </View>
-        <View style={styles.headerRight}>
-          <ShimmerCircle size={40} />
-          <ShimmerCircle size={40} />
-        </View>
+        {/* headerRight shimmer removed */}
       </View>
 
-      {/* Profile Card Shimmer */}
-      <View style={styles.profileCard}>
-        <View style={styles.profileInfo}>
-          <ShimmerCircle size={60} />
-          <View style={styles.profileDetails}>
-            <ShimmerBox width={150} height={18} marginBottom={4} />
-            <ShimmerBox width={120} height={14} marginBottom={4} />
-            <ShimmerBox width={100} height={14} />
-          </View>
-        </View>
-        <ShimmerBox width={100} height={32} borderRadius={8} />
-      </View>
+      {/* Profile Card shimmer removed */}
 
       {/* Stats Section Shimmer */}
       <View style={styles.statsContainer}>
@@ -236,6 +222,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: 16,
     marginBottom: 16,
+    marginTop: 12,
   },
   statCard: {
     backgroundColor: '#fff',

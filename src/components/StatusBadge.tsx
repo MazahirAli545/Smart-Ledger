@@ -51,7 +51,8 @@ const styles = StyleSheet.create({
   statusText: {
     color: '#fff',
     fontSize: 12,
-    fontWeight: 'bold',
+
+    fontFamily: 'Roboto-Medium',
   },
 });
 

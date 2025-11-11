@@ -1,21 +1,28 @@
-import React, { useState, useEffect } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+  useCallback,
+} from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
+  FlatList,
   TouchableOpacity,
   ActivityIndicator,
   Modal,
-  StatusBar,
+  Dimensions,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { BASE_URL } from '../api';
+import { unifiedApi } from '../api/unifiedApiService';
 import { useSubscription } from '../context/SubscriptionContext';
 import { getUserIdFromToken } from '../utils/storage';
+import { jwtDecode } from 'jwt-decode';
 import PaymentApiService, { CapturePaymentDto } from '../api/payments';
 import RazorpayCheckout from 'react-native-razorpay';
 import PaymentDetailsDisplay from '../components/PaymentDetailsDisplay';
@@ -27,11 +34,41 @@ import {
 } from '../services/paymentService';
 import { useTransactionLimit } from '../context/TransactionLimitContext';
 import { useAlert } from '../context/AlertContext';
+import { useScreenTracking } from '../hooks/useScreenTracking';
+import { getStatusBarHeight } from 'react-native-status-bar-height';
+import {
+  HEADER_CONTENT_HEIGHT,
+  getSolidHeaderStyle,
+} from '../utils/headerLayout';
+import StableStatusBar from '../components/StableStatusBar';
+import { getStatusBarSpacerHeight } from '../utils/statusBarManager';
+import ContactSalesModal from '../components/ContactSalesModal';
+import { generateNextDocumentNumber } from '../utils/autoNumberGenerator';
 
 // Razorpay Configuration - now using environment variables
 import { getRazorpayConfig } from '../config/env';
 
 const RAZORPAY_CONFIG = getRazorpayConfig();
+const HAS_RAZORPAY = !!(RAZORPAY_CONFIG.key && RAZORPAY_CONFIG.secret);
+const SCREEN_WIDTH = Dimensions.get('window').width;
+// Peeking carousel like MyJio: centered card with slight right preview
+const LIST_SIDE_PADDING = 16; // symmetric side padding
+const PEEK = 36; // visible width of the next card on the right
+const CARD_GAP = 12; // space between cards
+const ITEM_MARGIN = 0; // spacing handled via ItemSeparatorComponent
+const RIGHT_PADDING = LIST_SIDE_PADDING + PEEK; // add extra space on right for preview
+const CARD_WIDTH = Math.max(
+  0,
+  SCREEN_WIDTH - (LIST_SIDE_PADDING + RIGHT_PADDING),
+);
+const H_PADDING = LIST_SIDE_PADDING; // left padding
+
+// Debug Razorpay configuration
+console.log('🔧 Razorpay Configuration Debug:');
+console.log('  - RAZORPAY_CONFIG:', RAZORPAY_CONFIG);
+console.log('  - HAS_RAZORPAY:', HAS_RAZORPAY);
+console.log('  - Key exists:', !!RAZORPAY_CONFIG.key);
+console.log('  - Secret exists:', !!RAZORPAY_CONFIG.secret);
 
 /**
  * SubscriptionPlanScreen - Updated with Direct Razorpay Integration
@@ -99,6 +136,11 @@ interface BillingSummary {
   pendingInvoices: number;
   overdueInvoices: number;
   currency: string;
+  // Extended fields for subscription stats UI
+  totalSubscriptions?: number;
+  activeSubscriptions?: number;
+  expiredSubscriptions?: number;
+  totalSpent?: number;
 }
 
 interface TransactionLimitInfo {
@@ -120,16 +162,375 @@ interface BillingHistoryItem {
   billingPeriod: string;
   billingDate: string;
   dueDate: string;
-  amount: number;
+  amount: number; // backend unit (unknown rupees/paisa)
   status: string;
   planType: string;
   planName: string;
   paymentId?: string; // Add payment ID for linking to payment details
+
+  // Additional plan tracking fields for upgrades/downgrades
+  originalPlanName?: string;
+  targetPlanName?: string;
+  subscriptionPlan?: string;
+  plan?: { name: string };
+  isUpgrade?: boolean;
+  isDowngrade?: boolean;
+  fromPlan?: string;
+  toPlan?: string;
+
+  // Derived/normalized fields (frontend-only)
+  amountRupees?: number;
+  displayPlanName?: string;
+  // Preferred lookup id for details
+  lookupId?: string;
 }
+
+// Extracted component to avoid calling hooks conditionally inside render
+const PlansCarousel: React.FC<{
+  cleanedPlans: any[];
+  currentSubscription: any;
+  paymentProcessing: boolean;
+  planActionLoading: string | null;
+  paymentError: string | null;
+  successMessage: string;
+  onPlanPress: (plan: any) => void;
+  setSelectedPlanId: (id: string) => void;
+  getPlanIcon: (name: string) => string;
+  getPlanColor: (name: string) => string;
+  getPlanFeature: (name: string) => string;
+  getPlanCardStyle: (name: string) => any;
+}> = ({
+  cleanedPlans,
+  currentSubscription,
+  paymentProcessing,
+  planActionLoading,
+  paymentError,
+  successMessage,
+  onPlanPress,
+  setSelectedPlanId,
+  getPlanIcon,
+  getPlanColor,
+  getPlanFeature,
+  getPlanCardStyle,
+}) => {
+  const listRef = useRef<any>(null);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const currentIndexRef = useRef(0);
+  const [isInitialized, setIsInitialized] = useState(false);
+
+  const PlanSlide = React.memo(
+    ({ plan, isCurrent, isUpgradeTier, isDowngradeTier, onPress }: any) => (
+      <View style={[styles.slide, getPlanCardStyle(plan.name)]}>
+        <View style={styles.planIconContainer}>
+          <MaterialCommunityIcons
+            name={getPlanIcon(plan.name)}
+            size={28}
+            color={getPlanColor(plan.name)}
+          />
+        </View>
+        <Text style={styles.planSummaryName}>{plan.name}</Text>
+        <Text style={styles.planSubtitle}>{getPlanFeature(plan.name)}</Text>
+        <View style={styles.priceContainer}>
+          <Text style={styles.planSummaryPrice}>
+            ₹{plan.price.toLocaleString('en-IN')}
+          </Text>
+          <Text style={styles.planSummaryPeriod}>/{plan.period}</Text>
+        </View>
+        <View style={styles.featuresListCompact}>
+          {(plan.features || [])
+            .slice(0, 4)
+            .map((feature: string, index: number) => (
+              <View key={index} style={styles.featureItemCompact}>
+                <MaterialCommunityIcons
+                  name="check"
+                  size={18}
+                  color="#28a745"
+                />
+                <Text style={styles.featureTextCompact}>{feature}</Text>
+              </View>
+            ))}
+        </View>
+        <View style={styles.cardDivider} />
+        <TouchableOpacity
+          style={[
+            styles.planButton,
+            styles.planButtonFull,
+            isCurrent && styles.currentPlanButton,
+            isUpgradeTier && styles.upgradeButton,
+            isDowngradeTier && styles.downgradeButton,
+            !isCurrent &&
+              !isUpgradeTier &&
+              !isDowngradeTier &&
+              styles.contactButton,
+            paymentProcessing && styles.processingButton,
+            planActionLoading === plan.id && styles.processingButton,
+          ]}
+          onPress={onPress}
+          disabled={
+            isCurrent || paymentProcessing || planActionLoading === plan.id
+          }
+        >
+          {paymentProcessing || planActionLoading === plan.id ? (
+            <View style={styles.processingButtonContent}>
+              <ActivityIndicator size="small" color="#fff" />
+              <Text style={styles.processingButtonText}>Processing...</Text>
+            </View>
+          ) : (
+            <Text
+              style={[
+                styles.planButtonText,
+                isCurrent && styles.currentPlanButtonText,
+              ]}
+            >
+              {isCurrent
+                ? 'Current Plan'
+                : isUpgradeTier
+                ? 'Upgrade Now'
+                : isDowngradeTier
+                ? 'Downgrade'
+                : 'Choose Plan'}
+            </Text>
+          )}
+        </TouchableOpacity>
+        {false && paymentError && (
+          <View style={styles.errorContainer}>
+            <MaterialCommunityIcons
+              name="alert-circle"
+              size={20}
+              color="#dc3545"
+            />
+            <Text style={styles.errorText}>{paymentError}</Text>
+          </View>
+        )}
+        {successMessage && (
+          <View style={styles.successContainer}>
+            <MaterialCommunityIcons
+              name="check-circle"
+              size={20}
+              color="#28a745"
+            />
+            <Text style={styles.successText}>{successMessage}</Text>
+          </View>
+        )}
+      </View>
+    ),
+  );
+
+  const getScrollPosition = (index: number) => index * (CARD_WIDTH + CARD_GAP);
+
+  // Find the current plan's index to start from user's current plan
+  const getInitialIndex = () => {
+    if (!currentSubscription?.planName || !cleanedPlans.length) return 0;
+
+    const currentPlanName = currentSubscription.planName.toLowerCase();
+    const currentPlanIndex = cleanedPlans.findIndex(
+      plan => plan.name.toLowerCase() === currentPlanName,
+    );
+
+    console.log('🎯 Finding current plan:', {
+      currentPlanName,
+      availablePlans: cleanedPlans.map(p => p.name),
+      foundIndex: currentPlanIndex,
+    });
+
+    // If current plan found, start from that index, otherwise start from 0
+    return currentPlanIndex >= 0 ? currentPlanIndex : 0;
+  };
+
+  // Precompute exact snap offsets (account for 24px left padding)
+  const snapOffsets = useMemo(
+    () => cleanedPlans.map((_, i) => i * (CARD_WIDTH + CARD_GAP)),
+    [cleanedPlans],
+  );
+
+  const snapToIndex = useCallback(
+    (index: number, animated: boolean = true) => {
+      const clampedIndex = Math.max(
+        0,
+        Math.min(index, cleanedPlans.length - 1),
+      );
+      if (listRef.current?.scrollToOffset) {
+        try {
+          listRef.current.scrollToOffset({
+            offset: getScrollPosition(clampedIndex),
+            animated,
+          });
+          setCurrentIndex(clampedIndex);
+          currentIndexRef.current = clampedIndex;
+          // Do not auto-select a plan on scroll
+        } catch (error) {
+          console.log('Scroll error:', error);
+        }
+      }
+    },
+    [cleanedPlans, setSelectedPlanId],
+  );
+
+  const onMomentumScrollEnd = useCallback(
+    (e: any) => {
+      const offsetX = e.nativeEvent.contentOffset.x;
+      const index = Math.round(offsetX / (CARD_WIDTH + CARD_GAP));
+      const clampedIndex = Math.max(
+        0,
+        Math.min(index, cleanedPlans.length - 1),
+      );
+      if (clampedIndex !== currentIndexRef.current) {
+        setCurrentIndex(clampedIndex);
+        currentIndexRef.current = clampedIndex;
+        // Do not auto-select on momentum end
+      }
+    },
+    [cleanedPlans, setSelectedPlanId],
+  );
+
+  // With snapToOffsets we only need to update the index on momentum end
+  const onScrollEndDrag = useCallback(() => {}, []);
+
+  useEffect(() => {
+    if (isInitialized) return;
+    if (!cleanedPlans.length) return;
+    const initialIndex = getInitialIndex();
+    setCurrentIndex(initialIndex);
+    currentIndexRef.current = initialIndex;
+    // Do not preselect any plan on init
+    const timer = setTimeout(() => {
+      // Scroll to the current plan's position instead of always starting from 0
+      if (listRef.current?.scrollToOffset) {
+        try {
+          const initialOffset = getScrollPosition(initialIndex);
+          listRef.current.scrollToOffset({
+            offset: initialOffset,
+            animated: false,
+          });
+        } catch {}
+      }
+      setIsInitialized(true);
+    }, 50);
+    return () => clearTimeout(timer);
+  }, [
+    cleanedPlans,
+    isInitialized,
+    setSelectedPlanId,
+    snapToIndex,
+    currentSubscription,
+  ]);
+
+  return (
+    <View style={styles.carouselContainer}>
+      <FlatList
+        ref={listRef}
+        data={cleanedPlans}
+        horizontal
+        keyExtractor={(item: any) => String(item.id)}
+        showsHorizontalScrollIndicator={false}
+        decelerationRate="fast"
+        snapToOffsets={snapOffsets}
+        snapToAlignment="start"
+        nestedScrollEnabled
+        bounces={false}
+        scrollEventThrottle={16}
+        contentContainerStyle={{
+          paddingLeft: H_PADDING,
+          paddingRight: RIGHT_PADDING,
+          alignItems: 'center',
+        }}
+        ItemSeparatorComponent={() => <View style={{ width: CARD_GAP }} />}
+        getItemLayout={(_: any, index: number) => ({
+          length: CARD_WIDTH + CARD_GAP,
+          offset: (CARD_WIDTH + CARD_GAP) * index,
+          index,
+        })}
+        windowSize={3}
+        initialNumToRender={3}
+        maxToRenderPerBatch={3}
+        updateCellsBatchingPeriod={16}
+        removeClippedSubviews
+        onMomentumScrollEnd={onMomentumScrollEnd}
+        onScrollEndDrag={onScrollEndDrag}
+        renderItem={({ item: plan }: any) => {
+          const isCurrent =
+            String(currentSubscription?.planName || '').toLowerCase() ===
+            String(plan.name || '').toLowerCase();
+          const currentAmount = Number(currentSubscription?.amount || 0);
+          const planPrice = Number(plan.price || 0);
+          const isUpgradeTier = !isCurrent && planPrice > currentAmount;
+          const isDowngradeTier = !isCurrent && planPrice < currentAmount;
+          return (
+            <PlanSlide
+              plan={plan}
+              isCurrent={isCurrent}
+              isUpgradeTier={isUpgradeTier}
+              isDowngradeTier={isDowngradeTier}
+              onPress={() => {
+                if (plan?.id) setSelectedPlanId(plan.id);
+                const action = isCurrent
+                  ? 'current'
+                  : isUpgradeTier
+                  ? 'upgrade'
+                  : isDowngradeTier
+                  ? 'downgrade'
+                  : 'contact';
+                console.log('🖱️ Plan button tapped:', {
+                  name: plan?.name,
+                  id: plan?.id,
+                  isCurrent,
+                  isUpgradeTier,
+                  isDowngradeTier,
+                  resolvedAction: action,
+                });
+                onPlanPress({ ...plan, buttonAction: action });
+              }}
+            />
+          );
+        }}
+      />
+      <View style={styles.dotsRow}>
+        {cleanedPlans.map((_, i: number) => (
+          <TouchableOpacity
+            key={`dot-${i}`}
+            style={[styles.dot, i === currentIndex && styles.dotActive]}
+            onPress={() => {
+              setCurrentIndex(i);
+              snapToIndex(i, true);
+            }}
+            activeOpacity={0.7}
+          />
+        ))}
+      </View>
+    </View>
+  );
+};
 
 const SubscriptionPlanScreen: React.FC = () => {
   const navigation = useNavigation();
   const { showAlert } = useAlert();
+
+  // Screen tracking hook
+  useScreenTracking();
+
+  // Simple StatusBar configuration - let StableStatusBar handle it
+  const preciseStatusBarHeight = getStatusBarHeight(true);
+  const effectiveStatusBarHeight = Math.max(
+    preciseStatusBarHeight || 0,
+    getStatusBarSpacerHeight(),
+  );
+
+  const handleHeaderBack = () => {
+    try {
+      if ((navigation as any)?.canGoBack && (navigation as any).canGoBack()) {
+        (navigation as any).goBack();
+        return;
+      }
+    } catch {}
+    try {
+      // Navigate to Customer screen as it's the main screen in the app
+      (navigation as any).navigate('AppStack', { screen: 'Customer' });
+    } catch {
+      try {
+        (navigation as any).navigate('Customer');
+      } catch {}
+    }
+  };
 
   const {
     currentSubscription,
@@ -141,6 +542,50 @@ const SubscriptionPlanScreen: React.FC = () => {
     downgradePlan: contextDowngradePlan,
     cancelSubscription,
   } = useSubscription();
+
+  // Normalize and de-duplicate plans for clean UI (avoid duplicate "Free" etc.)
+  const cleanedPlans = useMemo(() => {
+    if (!availablePlans || availablePlans.length === 0) return [] as any[];
+
+    // Normalize entries and pick the best candidate per name
+    const byName: Map<string, any> = new Map();
+    for (const plan of availablePlans) {
+      const key = (plan.name || '').toLowerCase().trim();
+      const normalized = {
+        ...plan,
+        period:
+          (plan.period || '').toLowerCase() === 'monthly'
+            ? 'month'
+            : plan.period,
+      };
+
+      if (!byName.has(key)) {
+        byName.set(key, normalized);
+      } else {
+        const existing = byName.get(key);
+        // Prefer the one with: (1) non-null features, (2) higher sort of info, (3) higher price if both 0
+        const existingFeatureScore = Array.isArray(existing.features)
+          ? existing.features.length
+          : 0;
+        const newFeatureScore = Array.isArray(normalized.features)
+          ? normalized.features.length
+          : 0;
+        const shouldReplace =
+          newFeatureScore > existingFeatureScore ||
+          (existing.price === 0 && normalized.price > 0);
+        if (shouldReplace) byName.set(key, normalized);
+      }
+    }
+
+    const result = Array.from(byName.values());
+    // Sort: free/lowest price first, then by name for stability
+    result.sort((a, b) => {
+      const priceDiff = (a.price || 0) - (b.price || 0);
+      if (priceDiff !== 0) return priceDiff;
+      return String(a.name).localeCompare(String(b.name));
+    });
+    return result;
+  }, [availablePlans]);
 
   // Transaction limit context to control popups during plan upgrades
   const { stopLimitMonitoring, startLimitMonitoring } = useTransactionLimit();
@@ -161,9 +606,15 @@ const SubscriptionPlanScreen: React.FC = () => {
     [],
   );
   const [apiLoading, setApiLoading] = useState(false);
+  const [userPermissions, setUserPermissions] = useState<string[] | null>(null);
+  const [nextBillingDateApi, setNextBillingDateApi] = useState<string | null>(
+    null,
+  );
 
   // New state for better error handling (like web version)
   const [paymentError, setPaymentError] = useState<string | null>(null);
+  const [suppressPaymentError, setSuppressPaymentError] =
+    useState<boolean>(false);
   const [planActionLoading, setPlanActionLoading] = useState<string | null>(
     null,
   );
@@ -171,33 +622,71 @@ const SubscriptionPlanScreen: React.FC = () => {
   // Payment details state
   const [showPaymentDetails, setShowPaymentDetails] = useState(false);
   const [paymentDetails, setPaymentDetails] = useState<any>(null);
+  // Contact Sales modal state
+  const [showContactSalesModal, setShowContactSalesModal] = useState(false);
+  // Guard against rapid double-taps opening Razorpay twice
+  const upgradingLockRef = useRef<boolean>(false);
+  // Track if Razorpay sheet is currently open to block re-entry
+  const razorpayOpenRef = useRef<boolean>(false);
+  // Throttle rapid taps (covers UI frame before state/refs propagate)
+  const lastUpgradeTapRef = useRef<number>(0);
+
+  // Helpers for resilient network calls
+  const safeJson = useCallback(async (res: Response) => {
+    try {
+      return await res.json();
+    } catch {
+      const text = await res.text().catch(() => '');
+      try {
+        return JSON.parse(text);
+      } catch {
+        return text || null;
+      }
+    }
+  }, []);
 
   useEffect(() => {
     console.log('SubscriptionPlanScreen mounted');
+    // Load permissions for RBAC-aware API calls
+    (async () => {
+      try {
+        const permsJson = await AsyncStorage.getItem('userPermissions');
+        if (permsJson) setUserPermissions(JSON.parse(permsJson));
+      } catch (e) {
+        console.warn('Failed to load userPermissions:', e);
+      }
+    })();
 
     // 🚨 REMOVED: All loading logic and timeout - direct data fetch
     fetchSubscriptionData();
     fetchBillingData();
   }, []);
 
-  // Set recommended plan as default selected plan when data loads
+  // Debug: Log available plans count
   useEffect(() => {
-    if (availablePlans.length > 0 && currentSubscription) {
-      const recommendedPlan = availablePlans.find(plan =>
-        getRecommendedPlan(plan.name),
-      );
-      if (recommendedPlan) {
-        setSelectedPlanId(recommendedPlan.id);
-      }
+    console.log('📊 Available Plans Count:', availablePlans.length);
+    console.log('📊 Available Plans Data:', availablePlans);
+    if (availablePlans.length > 0) {
+      console.log('📊 Plan Details:');
+      availablePlans.forEach((plan, index) => {
+        console.log(
+          `  ${index + 1}. ${plan.name} - ₹${plan.price}/${plan.period}`,
+        );
+      });
     }
-  }, [availablePlans, currentSubscription]);
+  }, [availablePlans]);
+
+  // Do not auto-select any plan; selection happens only on user interaction
+  useEffect(() => {
+    // Clear any prior selection when plans change
+    setSelectedPlanId(null);
+  }, [availablePlans]);
 
   // New function to fetch billing data from backend APIs with better error handling
   const fetchBillingData = async () => {
     try {
       setApiLoading(true);
       setPaymentError(null);
-
       const token = await AsyncStorage.getItem('accessToken');
       if (!token) {
         console.log('No auth token, skipping billing data fetch');
@@ -207,83 +696,445 @@ const SubscriptionPlanScreen: React.FC = () => {
       const headers = {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
-      };
+      } as const;
 
-      // Fetch billing summary with error handling
+      const controller = new AbortController();
+      const { signal } = controller;
+
+      const hasPerm = (_key: string) => true; // Always fetch on mobile
+
+      // Fetch transaction limits from dedicated endpoint
       try {
-        const billingSummaryResponse = await fetch(
-          `${BASE_URL}/billing/summary`,
-          { headers },
+        console.log(
+          '📈 Fetching transaction limits from /transactions/limits endpoint...',
         );
-        if (billingSummaryResponse.ok) {
-          const billingData = await billingSummaryResponse.json();
-          if (billingData.code === 200) {
-            setBillingSummary(billingData.data);
-          } else {
-            console.error('Billing summary API error:', billingData);
-          }
-        } else {
-          console.error(
-            'Billing summary HTTP error:',
-            billingSummaryResponse.status,
-          );
+
+        // Get user ID for the request
+        const userId = await getUserIdFromToken();
+        if (!userId) {
+          console.log('❌ No user ID available for transaction limits');
+          return;
         }
+
+        console.log('🔍 SubscriptionPlanScreen: userId type and value:', {
+          originalUserId: userId,
+          userIdType: typeof userId,
+        });
+
+        // Use unified API for transaction limits - get() returns data directly
+        // Pass userId to getTransactionLimits() method
+        const response = await unifiedApi.getTransactionLimits(userId);
+        // unifiedApi.getTransactionLimits() returns data directly, not wrapped in {data, status, headers}
+        const limitsData: any = (response as any)?.data ?? response ?? {};
+        console.log(
+          '📈 Transaction limits response (normalized root):',
+          limitsData,
+        );
+        console.log(
+          '📈 Current subscription plan:',
+          currentSubscription?.planName,
+        );
+
+        // Normalize fields from various possible backend shapes
+        const usedCountRaw =
+          limitsData.currentCount ??
+          limitsData.used ??
+          limitsData.transactionsUsed ??
+          limitsData.count ??
+          limitsData.current ??
+          0;
+        const maxAllowedRaw =
+          limitsData.maxAllowed ??
+          limitsData.max ??
+          limitsData.limit ??
+          limitsData.monthlyLimit ??
+          limitsData.transactionsLimit ??
+          0;
+        const nextResetRaw =
+          limitsData.nextResetDate ??
+          limitsData.nextReset ??
+          limitsData.resetAt;
+
+        const usedCount = Number(usedCountRaw) || 0;
+        const isUnlimited =
+          String(maxAllowedRaw).toLowerCase() === 'unlimited' ||
+          Number(maxAllowedRaw) === -1;
+        const maxAllowed = isUnlimited ? 999999 : Number(maxAllowedRaw) || 50;
+        const remaining = isUnlimited
+          ? 999999
+          : Math.max(0, maxAllowed - usedCount);
+        const percentageUsed = isUnlimited
+          ? 0
+          : Math.min(
+              100,
+              Math.round((usedCount / Math.max(1, maxAllowed)) * 100),
+            );
+
+        setTransactionLimits({
+          currentCount: usedCount,
+          maxAllowed,
+          remaining,
+          planName: currentSubscription?.planName || 'Free',
+          canCreate: limitsData.canCreate ?? true,
+          percentageUsed,
+          isNearLimit: isUnlimited
+            ? false
+            : percentageUsed >= 80 && percentageUsed < 100,
+          isAtLimit: isUnlimited ? false : usedCount >= maxAllowed,
+          nextResetDate: nextResetRaw || null,
+          nextResetFormatted: nextResetRaw
+            ? new Date(nextResetRaw as string).toLocaleDateString()
+            : '',
+        });
       } catch (error) {
-        console.error('Billing summary fetch error:', error);
+        console.warn('Transaction limits fetch error:', error);
+        // Fallback to hardcoded limits if API fails
+        const getTransactionLimit = (planName: string): number => {
+          const planLimits: { [key: string]: number } = {
+            free: 50,
+            starter: 500,
+            professional: 1000,
+            enterprise: -1, // unlimited
+            enterprise_plan: -1, // handle enterprise_plan naming
+          };
+          return planLimits[planName?.toLowerCase()] || 50;
+        };
+
+        const maxAllowed = getTransactionLimit(
+          currentSubscription?.planName || 'free',
+        );
+        const isUnlimited = maxAllowed === -1;
+
+        // 🎯 FIXED: Preserve previous currentCount if available instead of resetting to 0
+        // This prevents showing 0 when API fails temporarily after plan change
+        const previousCount = transactionLimits?.currentCount || 0;
+
+        setTransactionLimits({
+          currentCount: previousCount, // Preserve previous count instead of 0
+          maxAllowed: isUnlimited ? 999999 : maxAllowed,
+          remaining: isUnlimited
+            ? 999999
+            : Math.max(0, maxAllowed - previousCount),
+          planName: currentSubscription?.planName || 'Free',
+          canCreate: true,
+          percentageUsed:
+            isUnlimited || maxAllowed === 0
+              ? 0
+              : Math.min(
+                  100,
+                  Math.round((previousCount / Math.max(1, maxAllowed)) * 100),
+                ),
+          isNearLimit:
+            isUnlimited || maxAllowed === 0
+              ? false
+              : previousCount >= maxAllowed * 0.8 && previousCount < maxAllowed,
+          isAtLimit: isUnlimited ? false : previousCount >= maxAllowed,
+          nextResetDate: new Date(
+            new Date().getFullYear(),
+            new Date().getMonth() + 1,
+            1,
+          ).toISOString(),
+          nextResetFormatted: new Date(
+            new Date().getFullYear(),
+            new Date().getMonth() + 1,
+            1,
+          ).toLocaleDateString(),
+        });
       }
 
-      // Fetch transaction limits with error handling
+      // Fetch normalized next billing date from backend
       try {
-        const transactionLimitsResponse = await fetch(
-          `${BASE_URL}/transaction-limits/info`,
-          { headers },
+        // Use unified API
+        const nbResponse = (await unifiedApi.get(
+          '/subscriptions/next-billing',
+        )) as { data: any; status: number; headers: Headers };
+        const nb = nbResponse.data || nbResponse;
+        console.log('🧾 Next billing from API:', nb);
+        setNextBillingDateApi(
+          nb?.nextBillingDate ?? nb?.data?.nextBillingDate ?? null,
         );
-        if (transactionLimitsResponse.ok) {
-          const limitsData = await transactionLimitsResponse.json();
-          if (limitsData.code === 200) {
-            setTransactionLimits(limitsData.data);
-          } else {
-            console.error('Transaction limits API error:', limitsData);
-          }
-        } else {
-          console.error(
-            'Transaction limits HTTP error:',
-            transactionLimitsResponse.status,
-          );
-        }
-      } catch (error) {
-        console.error('Transaction limits fetch error:', error);
+      } catch (e) {
+        console.warn('next-billing fetch error:', e);
+        setNextBillingDateApi(null);
       }
 
-      // Fetch billing history with error handling
+      // Fetch billing data from new subscription billing endpoints
       try {
-        const billingHistoryResponse = await fetch(
-          `${BASE_URL}/billing/history`,
-          { headers },
+        console.log(
+          '📊 Fetching billing summary from /subscriptions/billing/summary...',
         );
-        if (billingHistoryResponse.ok) {
-          const historyData = await billingHistoryResponse.json();
-          if (historyData.code === 200) {
-            setBillingHistory(historyData.data || []);
-          } else {
-            console.error('Billing history API error:', historyData);
-          }
-        } else {
-          console.error(
-            'Billing history HTTP error:',
-            billingHistoryResponse.status,
+        // Use unified API
+        const summaryResponse = (await unifiedApi.get(
+          '/subscriptions/billing/summary',
+        )) as { data: any; status: number; headers: Headers };
+        const summaryData = summaryResponse.data || summaryResponse;
+        console.log('📊 Billing summary response:', summaryData);
+        console.log(
+          '📊 Total amount from backend (assumed INR):',
+          summaryData.totalAmount,
+          'Type:',
+          typeof summaryData.totalAmount,
+        );
+        // Backend returns rupees; use as-is
+        const totalAmountRupees = Number(summaryData.totalAmount || 0);
+        const totalInvoices = Number(summaryData.totalInvoices || 0);
+        // Also fetch subscription stats for dashboard tiles
+        try {
+          // Use unified API
+          const subStatsRes = (await unifiedApi.get(
+            '/subscriptions/stats',
+          )) as { data: any; status: number; headers: Headers };
+          const subStats =
+            subStatsRes.status >= 200 && subStatsRes.status < 300
+              ? subStatsRes.data || subStatsRes
+              : null;
+
+          setBillingSummary({
+            totalInvoices,
+            totalAmount: totalAmountRupees,
+            averageAmount:
+              totalInvoices > 0 ? totalAmountRupees / totalInvoices : 0,
+            pendingInvoices: summaryData.pending || 0,
+            overdueInvoices: summaryData.overdue || 0,
+            currency: 'INR',
+            // Strictly use raw backend values for tiles
+            totalSubscriptions: subStats?.total,
+            activeSubscriptions: subStats?.active,
+            expiredSubscriptions: subStats?.expired,
+            // Total spent should reflect payments; use billing summary total
+            totalSpent: totalAmountRupees,
+          });
+        } catch (e) {
+          setBillingSummary({
+            totalInvoices,
+            totalAmount: totalAmountRupees,
+            averageAmount:
+              totalInvoices > 0 ? totalAmountRupees / totalInvoices : 0,
+            pendingInvoices: summaryData.pending || 0,
+            overdueInvoices: summaryData.overdue || 0,
+            currency: 'INR',
+          });
+        }
+
+        console.log(
+          '📊 Fetching billing history from /subscriptions/billing/history...',
+        );
+        // Use unified API with pagination - get() returns data directly
+        const historyResponse = await unifiedApi.get(
+          '/subscriptions/billing/history?page=1&limit=50',
+        );
+        console.log('📊 Billing history response:', historyResponse);
+
+        // unifiedApi.get() returns data directly, not wrapped in {data, status, headers}
+        const historyData = (historyResponse as any)?.data ?? historyResponse;
+        console.log('📊 Billing history data type:', typeof historyData);
+        console.log('📊 Billing history is array:', Array.isArray(historyData));
+        console.log(
+          '📊 Billing history has data property:',
+          !!historyData?.data,
+        );
+
+        // Extract the actual array of invoices
+        let invoicesArray: any[] = [];
+        if (Array.isArray(historyData)) {
+          invoicesArray = historyData;
+        } else if (historyData?.data && Array.isArray(historyData.data)) {
+          invoicesArray = historyData.data;
+        } else if (
+          historyData?.invoices &&
+          Array.isArray(historyData.invoices)
+        ) {
+          invoicesArray = historyData.invoices;
+        } else if (historyData && typeof historyData === 'object') {
+          // Try to find any array property
+          const arrayKeys = Object.keys(historyData).filter(key =>
+            Array.isArray(historyData[key]),
           );
+          if (arrayKeys.length > 0) {
+            invoicesArray = historyData[arrayKeys[0]];
+            console.log(`📊 Found invoices in property: ${arrayKeys[0]}`);
+          }
+        }
+
+        console.log(
+          '📊 Extracted invoices array length:',
+          invoicesArray.length,
+        );
+
+        // Check if we have valid data
+        let normalized: BillingHistoryItem[] = [];
+        if (invoicesArray && invoicesArray.length > 0) {
+          normalized = invoicesArray.map((inv: any, index: number) => {
+            console.log(`🔍 Processing invoice ${index + 1}:`, {
+              invoiceNumber: inv.invoiceNumber,
+              planName: inv.planName,
+              amount: inv.amount,
+              amountType: typeof inv.amount,
+              // Check all possible plan fields
+              targetPlanName: inv.targetPlanName,
+              originalPlanName: inv.originalPlanName,
+              subscriptionPlan: inv.subscriptionPlan,
+              plan: inv.plan,
+              // Check upgrade/downgrade fields
+              isUpgrade: inv.isUpgrade,
+              isDowngrade: inv.isDowngrade,
+              fromPlan: inv.fromPlan,
+              toPlan: inv.toPlan,
+              // Check other possible fields
+              planType: inv.planType,
+              billingPeriod: inv.billingPeriod,
+            });
+
+            const amountRaw = Number(inv.amount || 0);
+            // Backend history returns rupees; use as-is for display
+            const amountRupees: number = amountRaw;
+
+            // Use backend-provided names only; do not infer on frontend
+            const name: string | undefined =
+              inv.displayPlanName ||
+              (inv.plan && (inv.plan.displayName || inv.plan.name)) ||
+              inv.planName ||
+              inv.subscriptionPlan ||
+              inv.targetPlanName ||
+              inv.originalPlanName;
+
+            // Prefer showing final plan; avoid constructing arrows on the client
+            const display = name || 'Plan';
+
+            console.log(`🔍 Final display name for invoice ${index + 1}:`, {
+              display,
+              isUpgrade: inv.isUpgrade,
+              isDowngrade: inv.isDowngrade,
+              fromPlan: inv.fromPlan,
+              toPlan: inv.toPlan,
+              finalName: name,
+            });
+
+            const out: BillingHistoryItem = {
+              ...inv,
+              amount: amountRaw,
+              amountRupees: amountRupees,
+              displayPlanName: display,
+              // Lookup key for fetching details reliably
+              lookupId:
+                inv.razorpayPaymentId ||
+                inv.paymentId ||
+                inv.razorpay_payment_id ||
+                inv.razorpayOrderId ||
+                inv.razorpay_order_id ||
+                inv.invoiceNumber,
+            };
+            return out;
+          });
+          console.log(
+            '📊 Normalized billing history items:',
+            normalized.length,
+          );
+          setBillingHistory(normalized);
+        } else {
+          console.warn('📊 Billing history empty or invalid response:', {
+            historyData,
+            invoicesArrayLength: invoicesArray.length,
+            historyDataType: typeof historyData,
+            isArray: Array.isArray(historyData),
+            hasData: !!historyData?.data,
+          });
+          // Set empty history initially
+          setBillingHistory([]);
+        }
+
+        // Fallback: if billing history is still empty, try building from payments endpoint
+        if (!normalized || normalized.length === 0) {
+          try {
+            console.log('📊 Billing history empty; fetching from /payments...');
+            // Use unified API - get() returns data directly
+            const paymentsResponse = await unifiedApi.get('/payments?limit=50');
+            // unifiedApi.get() returns data directly
+            const paymentsBody =
+              (paymentsResponse as any)?.data ?? paymentsResponse;
+            const rows = Array.isArray(paymentsBody?.data)
+              ? paymentsBody.data
+              : Array.isArray(paymentsBody)
+              ? paymentsBody
+              : [];
+
+            const planById = new Map(
+              availablePlans.map((p: any) => [Number(p.id), p]),
+            );
+
+            const paymentsAsHistory: BillingHistoryItem[] = rows.map(
+              (p: any) => {
+                const targetId = Number(p.targetPlanId || p.planId);
+                const planMeta = planById.get(targetId);
+                const name = planMeta?.name || p?.plan?.name || 'Subscription';
+                const amountRaw = Number(p.amount || 0); // DB stores rupees
+                const amountRupees =
+                  amountRaw > 1000 ? amountRaw / 100 : amountRaw;
+
+                return {
+                  id: p.id,
+                  invoiceNumber: p.razorpayOrderId || `INV-${p.id}`,
+                  billingPeriod: 'Monthly',
+                  billingDate: p.createdAt || new Date().toISOString(),
+                  dueDate: p.createdAt || new Date().toISOString(),
+                  amount: amountRaw,
+                  status:
+                    (p.status || 'paid').toString().toLowerCase() === 'success'
+                      ? 'paid'
+                      : p.status || 'paid',
+                  planType: 'subscription',
+                  planName: name,
+                  paymentId: p.razorpayPaymentId || String(p.id),
+                  amountRupees,
+                  displayPlanName: name,
+                } as BillingHistoryItem;
+              },
+            );
+
+            console.log(
+              '📊 Payments fallback normalized items:',
+              paymentsAsHistory.length,
+            );
+            if (paymentsAsHistory.length > 0) {
+              setBillingHistory(paymentsAsHistory);
+            }
+          } catch (fbErr) {
+            console.warn('Billing history payments fallback failed:', fbErr);
+          }
         }
       } catch (error) {
-        console.error('Billing history fetch error:', error);
+        console.warn('Billing API fetch error:', error);
+        // Fallback to empty billing data
+        setBillingSummary({
+          totalInvoices: 0,
+          totalAmount: 0,
+          averageAmount: 0,
+          pendingInvoices: 0,
+          overdueInvoices: 0,
+          currency: 'INR',
+        });
+        setBillingHistory([]);
       }
     } catch (error) {
-      console.error('Error fetching billing data:', error);
+      console.warn('Error fetching billing data:', error);
       setPaymentError('Failed to load billing information. Please try again.');
     } finally {
       setApiLoading(false);
     }
   };
+
+  // Auto-refresh Billing History whenever subscription changes (plan/amount/date)
+  useEffect(() => {
+    // Avoid firing on first mount before data is available
+    if (!currentSubscription) return;
+    try {
+      fetchBillingData();
+    } catch {}
+  }, [
+    currentSubscription?.planName,
+    currentSubscription?.amount,
+    currentSubscription?.nextBillingDate,
+  ]);
 
   // Function to refresh billing data
   const refreshBillingData = async () => {
@@ -316,23 +1167,115 @@ const SubscriptionPlanScreen: React.FC = () => {
         return;
       }
 
-      const response = await fetch(`${BASE_URL}/payments/${paymentId}`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-      });
+      // Use payments endpoint to fetch payment details
+      console.log('💳 Fetching payment details from payments endpoint...');
+      const isRzpId =
+        typeof paymentId === 'string' && paymentId.startsWith('pay_');
+      // Use unified API - get() returns data directly
+      const url = isRzpId
+        ? `/payments?razorpayPaymentId=${paymentId}`
+        : `/payments/${encodeURIComponent(paymentId)}`;
+      const paymentResponse = await unifiedApi.get(url);
+      console.log('💳 Payment details response:', paymentResponse);
+      // unifiedApi.get() returns data directly, not wrapped in {data, status, headers}
+      const paymentData = (paymentResponse as any)?.data ?? paymentResponse;
+      const payments = paymentData?.data ?? paymentData ?? {};
+      const payment = Array.isArray(payments) ? payments[0] : payments;
 
-      if (response.ok) {
-        const paymentData = await response.json();
-        if (paymentData.code === 200 && paymentData.data) {
-          setPaymentDetails(paymentData.data);
-          setShowPaymentDetails(true);
-        } else {
-          console.error('Failed to fetch payment details:', paymentData);
-        }
+      // Check if we have valid payment data
+      if (
+        payment &&
+        (payment.id || payment.paymentId || payment.razorpayPaymentId)
+      ) {
+        console.log('💳 Payment data for transformation:', payment);
+        console.log('💳 Payment createdAt:', payment.createdAt);
+        console.log('💳 Payment amount:', payment.amount);
+        console.log('💳 Payment razorpayPaymentId:', payment.razorpayPaymentId);
+        console.log('💳 Payment razorpayOrderId:', payment.razorpayOrderId);
+
+        console.log('🔍 Original payment data from backend:', {
+          amount: payment.amount,
+          amountType: typeof payment.amount,
+          currency: payment.currency,
+          method: payment.paymentMethod,
+        });
+
+        // Resolve plan name from targetPlanId/planId using availablePlans
+        const resolvedPlanId = Number(payment.targetPlanId || payment.planId);
+        const resolvedPlanMeta = availablePlans.find(
+          (p: any) => Number(p.id) === resolvedPlanId,
+        );
+        const resolvedPlanName =
+          resolvedPlanMeta?.name || payment?.plan?.name || undefined;
+
+        // Compute expiry date from current subscription if available
+        const expiryIso = currentSubscription?.nextBillingDate
+          ? new Date(currentSubscription.nextBillingDate).toISOString()
+          : undefined;
+
+        const transformedPaymentData = {
+          id: payment.id,
+          // Pass amount in paisa for PaymentDetailsDisplay component
+          amount:
+            typeof payment.amount === 'number'
+              ? Math.round(payment.amount * 100)
+              : 0,
+          currency: payment.currency || 'INR',
+          status: payment.status || 'success',
+          method: payment.paymentMethod || 'unknown',
+          description:
+            payment.paymentDescription ||
+            (resolvedPlanName
+              ? `Payment for ${resolvedPlanName} plan` +
+                (expiryIso
+                  ? ` (Expires: ${new Date(expiryIso).toLocaleDateString()})`
+                  : '')
+              : 'Subscription Payment'),
+          created_at: payment.createdAt
+            ? Math.floor(new Date(payment.createdAt).getTime() / 1000)
+            : Math.floor(Date.now() / 1000),
+          customer: {
+            name: payment.customerName || '',
+            email: payment.customerEmail || '',
+            phone: payment.customerPhone || '',
+          },
+          invoice_number: payment.razorpayOrderId || `INV-${payment.id}`,
+          // Fix field names to match PaymentDetailsDisplay component
+          razorpay_payment_id: payment.razorpayPaymentId || '',
+          razorpay_order_id: payment.razorpayOrderId || '',
+          razorpay_signature: payment.razorpaySignature || '',
+          ...payment, // Include all original data
+          plan_name: resolvedPlanName,
+          expiry_date: expiryIso,
+        };
+
+        console.log(
+          '💳 Final transformed payment data:',
+          transformedPaymentData,
+        );
+        console.log('🔍 Transformed amount details:', {
+          amount: transformedPaymentData.amount,
+          amountType: typeof transformedPaymentData.amount,
+          currency: transformedPaymentData.currency,
+        });
+        console.log(
+          '💳 Final created_at timestamp:',
+          transformedPaymentData.created_at,
+        );
+        console.log('💳 Final amount:', transformedPaymentData.amount);
+        console.log(
+          '💳 Final razorpay_payment_id:',
+          transformedPaymentData.razorpay_payment_id,
+        );
+        console.log(
+          '💳 Final razorpay_order_id:',
+          transformedPaymentData.razorpay_order_id,
+        );
+
+        setPaymentDetails(transformedPaymentData);
+        setShowPaymentDetails(true);
       } else {
-        console.error('Failed to fetch payment details:', response.status);
+        console.error('No payment found with ID:', paymentId);
       }
     } catch (error) {
       console.error('Error fetching payment details:', error);
@@ -355,6 +1298,21 @@ const SubscriptionPlanScreen: React.FC = () => {
     }
   };
 
+  // Helper to format INR currency cleanly
+  const formatINR = (value: number): string => {
+    try {
+      const amount = Number(value || 0);
+      return amount.toLocaleString('en-IN', {
+        style: 'currency',
+        currency: 'INR',
+        maximumFractionDigits: 2,
+        minimumFractionDigits: 0,
+      });
+    } catch {
+      return `₹${Number(value || 0).toFixed(2)}`;
+    }
+  };
+
   // Get the currently selected plan for detailed view with better null safety
   const getSelectedPlan = () => {
     if (!selectedPlanId || !availablePlans || availablePlans.length === 0)
@@ -365,42 +1323,122 @@ const SubscriptionPlanScreen: React.FC = () => {
     // Create a plan object with all required properties for display
     const isCurrent =
       currentSubscription?.planName.toLowerCase() === plan.name.toLowerCase();
-    const isRecommended = getRecommendedPlan(plan.name);
+    const isRecommended = false; // Recommended flag removed per requirements
 
-    return {
+    // Determine if this is a downgrade (lower price than current plan)
+    const isDowngrade = plan.price < (currentSubscription?.amount || 0);
+    const isUpgrade = plan.price > (currentSubscription?.amount || 0);
+
+    // For Free plan (price = 0), only show downgrade if current plan is paid
+    const shouldShowDowngrade =
+      isDowngrade && (plan.price > 0 || (currentSubscription?.amount || 0) > 0);
+
+    const base = {
       ...plan,
       isCurrent,
       isRecommended,
       buttonText: isCurrent
         ? 'Current Plan'
-        : isRecommended
-        ? 'Upgrade Now'
-        : plan.price > (currentSubscription?.amount || 0)
+        : isUpgrade
         ? 'Upgrade'
-        : 'Downgrade',
+        : shouldShowDowngrade
+        ? 'Downgrade'
+        : 'Contact Sales',
       buttonAction: isCurrent
         ? 'current'
-        : plan.price > (currentSubscription?.amount || 0)
+        : isUpgrade
         ? 'upgrade'
-        : ('downgrade' as 'upgrade' | 'downgrade' | 'current' | 'contact'),
-    };
+        : shouldShowDowngrade
+        ? 'downgrade'
+        : 'contact',
+    } as any;
+
+    // If Razorpay is not configured, show upgrade button but handle payment differently
+    if (!HAS_RAZORPAY && base.buttonAction === 'upgrade') {
+      console.log(
+        '⚠️ Razorpay not configured, but allowing upgrade with alternative payment',
+      );
+      console.log('  - Plan:', plan.name);
+      console.log('  - Button action:', base.buttonAction);
+      console.log('  - Button text:', base.buttonText);
+      // Keep the upgrade action but the payment flow will handle the missing Razorpay config
+    } else {
+      console.log('✅ Razorpay configured, keeping upgrade button');
+      console.log('  - Plan:', plan.name);
+      console.log('  - Button action:', base.buttonAction);
+      console.log('  - Button text:', base.buttonText);
+    }
+
+    return base;
+  };
+
+  // Resolve the intended action for a plan even if buttonAction isn't provided
+  const resolveActionForPlan = (
+    plan: any,
+  ): 'upgrade' | 'downgrade' | 'current' | 'contact' => {
+    try {
+      if (!plan) return 'contact';
+      const planName = String(plan.name || '').toLowerCase();
+      const isCurrent =
+        String(currentSubscription?.planName || '').toLowerCase() === planName;
+      if (isCurrent) return 'current';
+
+      const currentAmount = Number(currentSubscription?.amount || 0);
+      const planPrice = Number(plan.price || 0);
+      if (Number.isFinite(planPrice) && Number.isFinite(currentAmount)) {
+        if (planPrice > currentAmount) return 'upgrade';
+        if (planPrice < currentAmount) return 'downgrade';
+      }
+      // Default to upgrade for equal/unknown pricing (user intent from UI)
+      return 'upgrade';
+    } catch {
+      return 'upgrade';
+    }
   };
 
   const handlePlanAction = async (plan: PlanDisplayData) => {
-    switch (plan.buttonAction) {
+    console.log('🔍 handlePlanAction called with:', {
+      planName: plan.name,
+      planId: plan.id,
+      buttonAction: plan.buttonAction,
+    });
+
+    const action = (plan as any).buttonAction || resolveActionForPlan(plan);
+    switch (action) {
       case 'upgrade':
-        // Direct upgrade without transaction limit check - let Razorpay handle payment
-        upgradePlan(plan);
+        console.log('🚀 Upgrade action triggered');
+        // Debounce: prevent double trigger before React state updates
+        const nowTs = Date.now();
+        if (nowTs - (lastUpgradeTapRef.current || 0) < 1200) {
+          console.log('⏸️ Upgrade ignored (throttled)');
+          return;
+        }
+        if (
+          upgradingLockRef.current ||
+          paymentProcessing ||
+          razorpayOpenRef.current
+        ) {
+          console.log('⏸️ Upgrade ignored (already in progress)');
+          return;
+        }
+        lastUpgradeTapRef.current = nowTs;
+        // Immediately flip UI to processing to disable the button on this frame
+        setPaymentProcessing(true);
+        upgradingLockRef.current = true;
+        try {
+          // Direct upgrade without transaction limit check - let Razorpay handle payment
+          await upgradePlan(plan);
+        } finally {
+          upgradingLockRef.current = false;
+          // Do not touch paymentProcessing here; upgradePlan controls it end-to-end
+          // Final safety to ensure state allows next attempt if something aborted early
+          razorpayOpenRef.current = false;
+        }
         break;
       case 'downgrade':
-        showAlert({
-          title: 'Downgrade Plan',
-          message: `Are you sure you want to downgrade to ${plan.name}? This will take effect at the end of your current billing cycle.`,
-          type: 'confirm',
-          confirmText: 'Downgrade',
-          cancelText: 'Cancel',
-          onConfirm: () => downgradePlan(plan),
-        });
+        console.log('⬇️ Downgrade action triggered - calling immediately');
+        // Call directly to ensure the action triggers reliably
+        downgradePlan(plan);
         break;
       case 'contact':
         showAlert({
@@ -456,6 +1494,235 @@ const SubscriptionPlanScreen: React.FC = () => {
     }
   };
 
+  // 🎯 DISABLED: Create transaction entry for plan upgrade
+  // NOTE: This function is currently disabled because the backend already creates
+  // a subscription transaction via createSubscriptionTransaction() in the payment service.
+  // Creating transactions from the frontend would result in duplicate entries.
+  // If you need to re-enable this, remove the backend transaction creation first.
+  const createPlanUpgradeTransaction = async (
+    plan: PlanDisplayData,
+    paymentId?: string,
+  ) => {
+    // Function disabled - backend handles transaction creation
+    console.log(
+      '⚠️ createPlanUpgradeTransaction is disabled - backend creates transactions',
+    );
+    return;
+    try {
+      console.log('📝 Creating transaction entry for plan upgrade...');
+      const userId = await getUserIdFromToken();
+      if (!userId) {
+        console.warn(
+          '⚠️ No user ID available, skipping transaction entry creation',
+        );
+        return;
+      }
+
+      // 🎯 FIXED: Create or find "Subscription Payment" customer
+      let subscriptionCustomerId: number | undefined;
+      try {
+        // Try to find existing "Subscription Payment" customer
+        const customersResponse = await unifiedApi.get('/customers');
+        const customersData =
+          (customersResponse as any)?.data ?? customersResponse;
+        const customersList = Array.isArray(customersData)
+          ? customersData
+          : customersData?.data || [];
+
+        const existingCustomer = customersList.find(
+          (c: any) =>
+            (c.partyName || '').toString().trim().toLowerCase() ===
+            'subscription payment',
+        );
+
+        if (existingCustomer && existingCustomer.id) {
+          subscriptionCustomerId = Number(existingCustomer.id);
+          console.log(
+            '✅ Found existing Subscription Payment customer:',
+            subscriptionCustomerId,
+          );
+        } else {
+          // Create new "Subscription Payment" customer
+          const newCustomer = await unifiedApi.createCustomer({
+            partyName: 'Subscription Payment',
+            partyType: 'Customer',
+            phoneNumber: undefined,
+            address: undefined,
+          });
+          const customerData = (newCustomer as any)?.data ?? newCustomer;
+          subscriptionCustomerId = Number(customerData?.id);
+          console.log(
+            '✅ Created Subscription Payment customer:',
+            subscriptionCustomerId,
+          );
+        }
+      } catch (customerError) {
+        console.warn(
+          '⚠️ Failed to create/find Subscription Payment customer:',
+          customerError,
+        );
+        // Continue without customer ID - backend might allow it or we'll skip transaction creation
+      }
+
+      // Generate document number for receipt
+      let receiptNumber = '';
+      try {
+        receiptNumber = await generateNextDocumentNumber('receipt', true);
+      } catch (error) {
+        console.warn('⚠️ Failed to generate receipt number:', error);
+        receiptNumber = `REC-${Date.now()}`;
+      }
+
+      // Get current date in YYYY-MM-DD format
+      const today = new Date();
+      const currentDate = today.toISOString().split('T')[0];
+
+      // Create transaction body similar to ReceiptScreen
+      const transactionBody: any = {
+        user_id: userId,
+        createdBy: userId,
+        updatedBy: userId,
+        type: 'credit', // Receipt type
+        amount: Number(plan.price.toFixed(2)),
+        date: currentDate,
+        transactionDate: currentDate,
+        receiptDate: currentDate,
+        transaction_date: currentDate,
+        receipt_date: currentDate,
+        status: 'Complete',
+        description: `Plan upgrade to ${plan.name} plan`,
+        notes: paymentId
+          ? `Subscription payment - Payment ID: ${paymentId}`
+          : `Subscription payment for ${plan.name} plan`,
+        partyName: 'Subscription Payment',
+        partyPhone: '',
+        partyAddress: '',
+        method: 'Subscription',
+        category: 'Subscription',
+        items: [],
+        receiptNumber: receiptNumber,
+      };
+
+      // 🎯 FIXED: Add customer ID if available
+      if (subscriptionCustomerId) {
+        transactionBody.partyId = subscriptionCustomerId;
+        transactionBody.customer_id = subscriptionCustomerId;
+      }
+
+      // Include user's primary role id for backend auditing/mapping
+      try {
+        const { addRoleIdToBody } = await import('../utils/roleHelper');
+        await addRoleIdToBody(transactionBody);
+      } catch (e) {
+        console.warn(
+          '⚠️ SubscriptionPlanScreen: Failed to add role ID to transaction:',
+          e,
+        );
+      }
+
+      // Create the transaction entry
+      const transactionResponse = await unifiedApi.createTransaction(
+        transactionBody,
+      );
+      console.log(
+        '✅ Plan upgrade transaction entry created:',
+        transactionResponse,
+      );
+
+      // Also create an invoice entry (Sell voucher) for the same upgrade
+      try {
+        // Generate document number for invoice
+        let invoiceNumber = '';
+        try {
+          invoiceNumber = await generateNextDocumentNumber('sell', true);
+        } catch (error) {
+          console.warn('⚠️ Failed to generate invoice number:', error);
+          invoiceNumber = `SEL-${Date.now()}`;
+        }
+
+        // Create invoice transaction body similar to InvoiceScreen
+        const invoiceTransactionBody: any = {
+          user_id: userId,
+          createdBy: userId,
+          updatedBy: userId,
+          type: 'credit', // Invoice/Sell type
+          amount: Number(plan.price.toFixed(2)),
+          date: currentDate,
+          transactionDate: currentDate,
+          invoiceDate: currentDate,
+          documentDate: currentDate,
+          transaction_date: currentDate,
+          document_date: currentDate,
+          invoice_date: currentDate,
+          status: 'Complete',
+          description: `Plan upgrade to ${plan.name} plan`,
+          notes: paymentId
+            ? `Subscription payment - Payment ID: ${paymentId}`
+            : `Subscription payment for ${plan.name} plan`,
+          partyName: 'Subscription Payment',
+          partyPhone: '',
+          partyAddress: '',
+          method: 'Sell',
+          category: 'Subscription',
+          items: [
+            {
+              name: `Subscription - ${plan.name} Plan`,
+              description: `Subscription - ${plan.name} Plan`,
+              quantity: 1,
+              rate: Number(plan.price.toFixed(2)),
+              amount: Number(plan.price.toFixed(2)),
+              gstPct: 0,
+            },
+          ],
+          invoiceNumber: invoiceNumber,
+          gstPct: 0,
+          subTotal: Number(plan.price.toFixed(2)),
+          totalAmount: Number(plan.price.toFixed(2)),
+          syncYN: 'Y',
+        };
+
+        // 🎯 FIXED: Add customer ID if available
+        if (subscriptionCustomerId) {
+          invoiceTransactionBody.partyId = subscriptionCustomerId;
+          invoiceTransactionBody.customer_id = subscriptionCustomerId;
+          invoiceTransactionBody.customerId = subscriptionCustomerId;
+        }
+
+        // Include user's primary role id
+        try {
+          const { addRoleIdToBody } = await import('../utils/roleHelper');
+          await addRoleIdToBody(invoiceTransactionBody);
+        } catch (e) {
+          console.warn(
+            '⚠️ SubscriptionPlanScreen: Failed to add role ID to invoice transaction:',
+            e,
+          );
+        }
+
+        // Create the invoice transaction entry
+        const invoiceTransactionResponse = await unifiedApi.createTransaction(
+          invoiceTransactionBody,
+        );
+        console.log(
+          '✅ Plan upgrade invoice entry created:',
+          invoiceTransactionResponse,
+        );
+      } catch (invoiceError) {
+        console.warn(
+          '⚠️ Failed to create invoice transaction entry:',
+          invoiceError,
+        );
+        // Don't block the flow if invoice creation fails
+      }
+    } catch (error) {
+      console.error(
+        '❌ Failed to create plan upgrade transaction entry:',
+        error,
+      );
+      // Don't block the flow if transaction creation fails
+    }
+  };
+
   // 🎯 UPDATED: Handle payment success with backend capture endpoint (simplified like web version)
   // ... existing code ...
   const handlePaymentSuccess = async (
@@ -476,11 +1743,11 @@ const SubscriptionPlanScreen: React.FC = () => {
       }
 
       // Validate Razorpay response
-      if (
-        !razorpayResponse.razorpay_payment_id ||
-        !razorpayResponse.razorpay_order_id
-      ) {
-        console.error('❌ Invalid Razorpay response:', razorpayResponse);
+      if (!razorpayResponse.razorpay_payment_id) {
+        console.error(
+          '❌ Invalid Razorpay response (missing payment id):',
+          razorpayResponse,
+        );
         throw new Error('Invalid payment response from Razorpay');
       }
 
@@ -860,9 +2127,8 @@ const SubscriptionPlanScreen: React.FC = () => {
       try {
         console.log('🔍 Fetching user data from token...');
 
-        // 🎯 FIXED: Get user data from token instead of non-existent API endpoint
-        // The token contains user information, so we can extract it directly
-        const tokenPayload = JSON.parse(atob(token.split('.')[1]));
+        // 🎯 FIXED: Get user data from token using jwtDecode (atob not available in RN)
+        const tokenPayload: any = jwtDecode(token);
         console.log('🔍 Token payload:', tokenPayload);
 
         if (tokenPayload) {
@@ -1111,43 +2377,71 @@ const SubscriptionPlanScreen: React.FC = () => {
         capturePayload.JSON_LOG ? Object.keys(capturePayload.JSON_LOG) : 'N/A',
       );
 
-      // 🎯 FIXED: Call backend capture endpoint directly with correct field names
-      const response = await fetch(`${BASE_URL}/payments/capture`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(capturePayload),
+      // 🎯 Verify payment using backend payments endpoint (RN SDK doesn't return signature)
+      console.log('💳 Verifying payment via backend /payments/verify...');
+      // Use unified API - post() returns data directly, not wrapped in {data, status, headers}
+      const responseData = await unifiedApi.post('/payments/verify', {
+        razorpayPaymentId: razorpayResponse.razorpay_payment_id,
+        razorpayOrderId: razorpayResponse.razorpay_order_id || undefined,
+        razorpaySignature: razorpayResponse.razorpay_signature || undefined,
       });
+      console.log('📥 Backend capture response:', responseData);
 
-      const responseData = await response.json();
-      console.log('📥 Backend capture response status:', response.status);
-      console.log('📥 Backend capture response data:', responseData);
+      // unifiedApi.post() returns data directly, not wrapped in {data, status, headers}
+      const responseDataValue = (responseData as any)?.data ?? responseData;
 
-      if (!response.ok) {
-        console.error(
-          '❌ Backend capture failed with status:',
-          response.status,
-        );
-        console.error('❌ Backend error response:', responseData);
-        throw new Error(
-          responseData.message ||
-            `Payment capture failed with status ${response.status}`,
-        );
-      }
-
-      // Check if payment was successful
-      if (responseData.success || responseData.code === 200) {
+      // Check if payment verification was successful (responseDataValue should have payment data)
+      if (
+        responseDataValue &&
+        (responseDataValue.id ||
+          responseDataValue.paymentId ||
+          responseDataValue.razorpayPaymentId)
+      ) {
+        // Complete the subscription upgrade on the backend using the verified payment id
+        let upgradeCompleted = false;
+        try {
+          const verifiedPayment = responseDataValue;
+          const paymentIdToUse =
+            verifiedPayment?.id ||
+            verifiedPayment?.paymentId ||
+            verifiedPayment?.razorpayPaymentId;
+          if (paymentIdToUse) {
+            const completeRes = await unifiedApi.post(
+              '/subscriptions/upgrade/complete',
+              { paymentId: paymentIdToUse },
+            );
+            // unifiedApi.post() returns data directly
+            const completeBody = completeRes as any;
+            console.log('🔁 Upgrade completion response:', completeBody);
+            // Check if upgrade was successful by looking for success indicators
+            upgradeCompleted = !!(
+              completeBody?.success ||
+              completeBody?.id ||
+              completeBody?.subscriptionId ||
+              (completeBody && !completeBody.error)
+            );
+          } else {
+            console.warn('No payment id returned from verification');
+          }
+        } catch (e) {
+          console.warn('Upgrade completion error:', e);
+        }
         // ✅ Payment successful - plan activated
-        console.log('✅ Payment captured successfully:', responseData);
+        console.log('✅ Payment captured successfully:', responseDataValue);
 
         // Store payment details for display
         const paymentDetailsData = {
           ...razorpayResponse,
-          amount: plan.price * 100,
+          // Ensure amount in paisa for PaymentDetailsDisplay
+          amount: Math.round(plan.price * 100),
           currency: 'INR',
-          description: `Payment for ${plan.name} plan`,
+          description:
+            `Payment for ${plan.name} plan` +
+            (currentSubscription?.nextBillingDate
+              ? ` (Next billing: ${new Date(
+                  currentSubscription.nextBillingDate,
+                ).toLocaleDateString()})`
+              : ''),
           created_at: Math.floor(Date.now() / 1000),
 
           // 🎯 CRITICAL FIX: Use detected payment method, not unknown
@@ -1178,9 +2472,13 @@ const SubscriptionPlanScreen: React.FC = () => {
         console.log('🔍 Full Razorpay response:', razorpayResponse);
         setPaymentDetails(paymentDetailsData);
 
-        // Update subscription in context
-        const success = await contextUpgradePlan(plan.id);
-        if (success) {
+        // Refresh subscription data from backend; only show success if upgradeCompleted
+        // Only fetch subscription data (not plans) since plans don't change
+        await fetchSubscriptionData(false); // false = don't refresh plans
+        if (upgradeCompleted) {
+          // 🎯 REMOVED: Backend already creates subscription transaction via createSubscriptionTransaction
+          // No need to create duplicate transactions from frontend
+
           // Show success message with app UI
           setSuccessMessage(
             `Payment completed! Your plan has been successfully upgraded to ${plan.name}!`,
@@ -1199,9 +2497,32 @@ const SubscriptionPlanScreen: React.FC = () => {
             // Don't block the flow if notification fails
           }
 
-          // Refresh subscription data and transaction limits
-          fetchSubscriptionData();
-          fetchBillingData(); // This will refresh transaction limit data
+          // 🎯 FIXED: Add delay before refreshing subscription data to allow backend to update
+          // This ensures the current plan is immediately updated in the UI
+          setTimeout(async () => {
+            console.log(
+              '🔄 Refreshing subscription data after plan upgrade (with delay)...',
+            );
+            // Refresh subscription data again after delay to get updated plan
+            await fetchSubscriptionData(false); // false = don't refresh plans
+          }, 1000); // Wait 1 second for backend to update subscription
+
+          // 🎯 FIXED: Add delay before fetching transaction limits to allow backend to update subscription
+          // This prevents the transaction count from showing 0 after plan change
+          setTimeout(async () => {
+            console.log(
+              '🔄 Refreshing transaction limits after plan upgrade (with delay)...',
+            );
+            await fetchBillingData();
+
+            // Retry once more after additional delay to ensure accurate count
+            setTimeout(async () => {
+              console.log(
+                '🔄 Retrying transaction limits fetch to ensure accuracy...',
+              );
+              await fetchBillingData();
+            }, 1500);
+          }, 1500); // Wait 1.5 seconds for backend to update subscription
 
           // 🎯 FIXED: Clear session flags and restart transaction limit monitoring with updated data
           console.log(
@@ -1235,12 +2556,35 @@ const SubscriptionPlanScreen: React.FC = () => {
         }
       } else {
         console.error('❌ Backend capture failed:', responseData);
-        throw new Error(
-          `Payment capture failed: ${responseData.message || 'Unknown error'}`,
-        );
+        const errorMessage =
+          (responseDataValue as any)?.message ||
+          (responseDataValue as any)?.error?.message ||
+          (responseData as any)?.message ||
+          (responseData as any)?.error?.message ||
+          'Unknown error';
+        throw new Error(`Payment capture failed: ${errorMessage}`);
       }
     } catch (error: any) {
       console.error('❌ Payment capture failed:', error);
+
+      // Import error handler
+      const { handleApiError } = require('../utils/apiErrorHandler');
+      const errorInfo = handleApiError(error);
+
+      // Handle 403 Forbidden errors with user-friendly message
+      if (errorInfo.isForbidden) {
+        if (!suppressPaymentError) setPaymentError(errorInfo.message);
+        showAlert({
+          title: 'Access Denied',
+          message: errorInfo.message,
+          type: 'error',
+          confirmText: 'OK',
+          onConfirm: () => {
+            console.log('User acknowledged access denied error');
+          },
+        });
+        return;
+      }
 
       // 🎯 IMPROVED: Better error handling with specific messages
       let errorMessage =
@@ -1261,9 +2605,12 @@ const SubscriptionPlanScreen: React.FC = () => {
       ) {
         errorMessage =
           'Network error. Please check your internet connection and try again.';
+      } else {
+        // Use error handler message if available
+        errorMessage = errorInfo.message || errorMessage;
       }
 
-      setPaymentError(errorMessage);
+      if (!suppressPaymentError) setPaymentError(errorMessage);
       showAlert({
         title: 'Payment Error',
         message: errorMessage,
@@ -1289,6 +2636,7 @@ const SubscriptionPlanScreen: React.FC = () => {
       // Set payment processing state
       setPaymentProcessing(true);
       setPaymentError(null);
+      setSuppressPaymentError(false);
 
       // 🎯 FIXED: Temporarily stop transaction limit monitoring to prevent popup interference
       console.log(
@@ -1296,15 +2644,82 @@ const SubscriptionPlanScreen: React.FC = () => {
       );
       await stopLimitMonitoring();
 
-      // Validate Razorpay configuration
-      if (!RAZORPAY_CONFIG.key || !RAZORPAY_CONFIG.secret) {
-        console.error('❌ Razorpay configuration missing:', RAZORPAY_CONFIG);
-        setPaymentError('Payment configuration error. Please contact support.');
+      // Handle Razorpay configuration
+      if (!HAS_RAZORPAY) {
+        console.log(
+          '⚠️ Razorpay not configured, using alternative upgrade method',
+        );
+
+        // Show a more informative message about the upgrade process
         showAlert({
-          title: 'Configuration Error',
-          message: 'Payment configuration error. Please contact support.',
-          type: 'error',
-          confirmText: 'OK',
+          title: 'Upgrade Plan',
+          message: `Upgrade to ${plan.name} plan for ₹${plan.price}? This will be processed through our backend payment system.`,
+          type: 'confirm',
+          confirmText: 'Upgrade Now',
+          cancelText: 'Cancel',
+          onConfirm: async () => {
+            try {
+              setPaymentProcessing(true);
+              setPaymentError(null);
+
+              // Call the context upgrade function directly
+              const success = await contextUpgradePlan(plan.id);
+              if (success) {
+                setSuccessMessage(
+                  `Successfully upgraded to ${plan.name} plan!`,
+                );
+                setShowSuccessModal(true);
+                // Only fetch subscription data (not plans) since plans don't change
+                await fetchSubscriptionData(false); // false = don't refresh plans
+
+                // 🎯 REMOVED: Backend already creates subscription transaction via createSubscriptionTransaction
+                // No need to create duplicate transactions from frontend
+
+                // 🎯 FIXED: Add delay before refreshing subscription data to allow backend to update
+                setTimeout(async () => {
+                  console.log(
+                    '🔄 Refreshing subscription data after plan upgrade (with delay)...',
+                  );
+                  // Refresh subscription data again after delay to get updated plan
+                  await fetchSubscriptionData(false); // false = don't refresh plans
+                }, 1000); // Wait 1 second for backend to update subscription
+
+                // 🎯 FIXED: Add delay before fetching transaction limits to allow backend to update
+                setTimeout(async () => {
+                  console.log(
+                    '🔄 Refreshing transaction limits after plan upgrade...',
+                  );
+                  await fetchBillingData();
+
+                  // Retry to ensure accurate count
+                  setTimeout(async () => {
+                    await fetchBillingData();
+                  }, 1500);
+                }, 1500);
+              } else {
+                setPaymentError('Failed to upgrade plan. Please try again.');
+                showAlert({
+                  title: 'Upgrade Failed',
+                  message:
+                    'Failed to upgrade plan. Please try again or contact support.',
+                  type: 'error',
+                  confirmText: 'OK',
+                });
+              }
+            } catch (error) {
+              console.error('Upgrade error:', error);
+              setPaymentError('Failed to upgrade plan. Please try again.');
+              showAlert({
+                title: 'Upgrade Failed',
+                message:
+                  'Failed to upgrade plan. Please try again or contact support.',
+                type: 'error',
+                confirmText: 'OK',
+              });
+            } finally {
+              setPaymentProcessing(false);
+            }
+          },
         });
         return;
       }
@@ -1367,7 +2782,33 @@ const SubscriptionPlanScreen: React.FC = () => {
               // Don't block the flow if notification fails
             }
 
-            fetchSubscriptionData();
+            // Only fetch subscription data (not plans) since plans don't change
+            await fetchSubscriptionData(false); // false = don't refresh plans
+
+            // 🎯 REMOVED: Backend already creates subscription transaction via createSubscriptionTransaction
+            // No need to create duplicate transactions from frontend
+
+            // 🎯 FIXED: Add delay before refreshing subscription data to allow backend to update
+            setTimeout(async () => {
+              console.log(
+                '🔄 Refreshing subscription data after free plan update (with delay)...',
+              );
+              // Refresh subscription data again after delay to get updated plan
+              await fetchSubscriptionData(false); // false = don't refresh plans
+            }, 1000); // Wait 1 second for backend to update subscription
+
+            // 🎯 FIXED: Add delay before fetching transaction limits to allow backend to update
+            setTimeout(async () => {
+              console.log(
+                '🔄 Refreshing transaction limits after free plan update...',
+              );
+              await fetchBillingData();
+
+              // Retry to ensure accurate count
+              setTimeout(async () => {
+                await fetchBillingData();
+              }, 1500);
+            }, 1500);
           } else {
             setPaymentError('Failed to upgrade plan');
             showAlert({
@@ -1389,54 +2830,33 @@ const SubscriptionPlanScreen: React.FC = () => {
         return;
       }
 
-      // 🎯 FIXED: Use the same working approach as Test Simple Checkout
+      // 🎯 FIXED: Use backend API to create Razorpay order instead of direct API call
       try {
-        console.log('🎯 Opening Razorpay checkout for plan upgrade...');
+        console.log('🎯 Creating Razorpay order through backend API...');
 
-        // Create a simple order first, then use it in checkout
+        // Create order through backend API instead of direct Razorpay API
         const orderData = {
           amount: plan.price * 100,
           currency: 'INR',
           receipt: `plan_${plan.id}_${Date.now()}`,
+          planId: parseInt(plan.id.toString()),
         };
 
-        // Create order using Razorpay credentials
-        const credentials = `${RAZORPAY_CONFIG.key}:${RAZORPAY_CONFIG.secret}`;
-        const base64Credentials = btoa(credentials);
-
-        const orderResponse = await fetch(
-          'https://api.razorpay.com/v1/orders',
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Basic ${base64Credentials}`,
-            },
-            body: JSON.stringify(orderData),
-          },
-        );
-
-        if (!orderResponse.ok) {
-          throw new Error('Failed to create Razorpay order');
-        }
-
-        const order = await orderResponse.json();
-        console.log('✅ Razorpay order created:', order.id);
-
-        // Get real user data from token
+        // Get real user data from token first
         let realUserMobile: string | null = null;
         let realUserName: string | null = null;
         let realUserEmail: string | null = null;
 
         try {
-          console.log('🔍 Fetching user data from token for Razorpay...');
-          const tokenPayload = JSON.parse(atob(token.split('.')[1]));
+          console.log('🔍 Fetching user data from token for payment...');
+          const tokenPayload: any = jwtDecode(token);
           console.log('🔍 Token payload:', tokenPayload);
 
           if (tokenPayload) {
-            realUserMobile = tokenPayload.mobileNumber || null;
-            realUserName = tokenPayload.ownerName || null;
-            realUserEmail = tokenPayload.email || null;
+            // JWT token only contains 'sub' (user ID) and 'phone' fields
+            realUserMobile = tokenPayload.phone || null;
+            realUserName = tokenPayload.name || null; // This might not exist in token
+            realUserEmail = tokenPayload.email || null; // This might not exist in token
 
             console.log('✅ Real user data extracted from token:', {
               mobile: realUserMobile,
@@ -1446,13 +2866,280 @@ const SubscriptionPlanScreen: React.FC = () => {
           }
         } catch (error) {
           console.log('⚠️ Token parsing error:', error);
-          // Fallback to AsyncStorage data
-          realUserMobile = await AsyncStorage.getItem('userMobile');
-          realUserName = await AsyncStorage.getItem('userName');
-          realUserEmail = await AsyncStorage.getItem('userEmail');
         }
 
+        // Fallback to AsyncStorage data if token doesn't have the required fields
+        if (!realUserMobile) {
+          realUserMobile = await AsyncStorage.getItem('userMobile');
+          console.log('📱 Using mobile from AsyncStorage:', realUserMobile);
+        }
+        if (!realUserName) {
+          realUserName = await AsyncStorage.getItem('userName');
+          console.log('👤 Using name from AsyncStorage:', realUserName);
+        }
+        if (!realUserEmail) {
+          realUserEmail = await AsyncStorage.getItem('userEmail');
+          console.log('📧 Using email from AsyncStorage:', realUserEmail);
+        }
+
+        // 🎯 CRITICAL: Sanitize and validate mobile number format for backend
+        const sanitizeMobileNumber = (mobile: string | null): string => {
+          if (!mobile) return '+919999999999'; // Fallback for testing with +91 prefix
+
+          // Remove all non-digit characters
+          const numericMobile = mobile.replace(/[^\d]/g, '');
+
+          // Handle different formats
+          let processedMobile = numericMobile;
+
+          // If starts with 91 and has 12 digits, remove 91 prefix
+          if (numericMobile.startsWith('91') && numericMobile.length === 12) {
+            processedMobile = numericMobile.substring(2);
+          }
+          // If starts with 0 and has 11 digits, remove 0 prefix
+          else if (
+            numericMobile.startsWith('0') &&
+            numericMobile.length === 11
+          ) {
+            processedMobile = numericMobile.substring(1);
+          }
+          // If has 10 digits, use as is
+          else if (numericMobile.length === 10) {
+            processedMobile = numericMobile;
+          }
+
+          // Validate length and format
+          if (processedMobile.length !== 10) {
+            console.warn(
+              `⚠️ Invalid mobile length: ${processedMobile.length}, using fallback`,
+            );
+            return '+919999999999';
+          }
+
+          // Validate Indian mobile prefix (6-9)
+          if (!/^[6-9]/.test(processedMobile)) {
+            console.warn(
+              `⚠️ Invalid mobile prefix: ${processedMobile}, using fallback`,
+            );
+            return '+919999999999';
+          }
+
+          // Return with +91 prefix as expected by backend SanitizationService
+          const result = `+91${processedMobile}`;
+          console.log(`✅ Mobile sanitized: ${mobile} -> ${result}`);
+          return result;
+        };
+
+        // Sanitize the mobile number
+        const sanitizedMobile = sanitizeMobileNumber(realUserMobile);
+        console.log('🔍 Mobile number sanitization:', {
+          original: realUserMobile,
+          sanitized: sanitizedMobile,
+        });
+
+        console.log('📤 Plan object details:', {
+          plan: plan,
+          planId: plan.id,
+          planIdType: typeof plan.id,
+          planIdValue: plan.id,
+          planName: plan.name,
+          planPrice: plan.price,
+        });
+
+        console.log('📤 Sending payment creation request to backend:', {
+          subscriptionId: parseInt(plan.id.toString()),
+          targetPlanId: Number(plan.id),
+          planId: plan.id,
+          planIdType: typeof plan.id,
+          amount: plan.price,
+          currency: 'INR',
+          customerName: realUserName || 'User',
+          customerEmail: realUserEmail || 'user@example.com',
+          customerPhone: sanitizedMobile,
+        });
+
+        let order;
+
+        try {
+          // Try backend API first - use the correct endpoint
+          // Ensure subscriptionId is always a valid number (never NaN)
+          const resolvedSubscriptionIdRaw =
+            (currentSubscription as any)?.id ??
+            (currentSubscription as any)?.subscriptionId ??
+            (currentSubscription as any)?.planId ??
+            0;
+          const resolvedSubscriptionId = Number(resolvedSubscriptionIdRaw);
+
+          const safeSubscriptionId = Number.isFinite(resolvedSubscriptionId)
+            ? resolvedSubscriptionId
+            : 0;
+
+          const requestBody = {
+            // Backend expects an existing subscriptionId; 0 is acceptable when absent
+            subscriptionId: safeSubscriptionId,
+            // And the plan we want to upgrade/downgrade to
+            // Ensure we have a valid plan ID - try multiple approaches
+            targetPlanId: (() => {
+              const planId = plan.id;
+              console.log('🔍 Plan ID extraction:', {
+                originalId: planId,
+                type: typeof planId,
+                isString: typeof planId === 'string',
+                isNumber: typeof planId === 'number',
+                parsed: Number(planId),
+                isNaN: isNaN(Number(planId)),
+                planName: plan.name,
+                planPrice: plan.price,
+              });
+
+              // Try to extract a valid number from the plan ID
+              if (typeof planId === 'number' && !isNaN(planId) && planId > 0) {
+                console.log('✅ Using numeric plan ID:', planId);
+                return planId;
+              } else if (typeof planId === 'string' && planId.trim() !== '') {
+                const parsed = parseInt(planId.trim(), 10);
+                if (!isNaN(parsed) && parsed > 0) {
+                  console.log('✅ Using parsed string plan ID:', parsed);
+                  return parsed;
+                }
+              }
+
+              // Fallback: try to map plan name to ID
+              const planNameToId: { [key: string]: number } = {
+                free: 1,
+                starter: 2,
+                professional: 3,
+                enterprise: 4,
+              };
+
+              const mappedId = planNameToId[plan.name?.toLowerCase()];
+              if (mappedId) {
+                console.log('✅ Using mapped plan ID from name:', mappedId);
+                return mappedId;
+              }
+
+              // Last resort fallback
+              console.warn(
+                '⚠️ Could not extract valid plan ID, using fallback ID 1',
+              );
+              return 1;
+            })(),
+            amount: plan.price,
+            currency: 'INR',
+            paymentMethod: 'razorpay',
+            paymentDescription: `Upgrade to ${plan.name} plan`,
+            customerName: realUserName || 'User',
+            customerEmail: realUserEmail || 'user@example.com',
+            customerPhone: sanitizedMobile, // Use sanitized mobile number
+          };
+
+          // Include user's primary role id for backend auditing/mapping
+          try {
+            const { addRoleIdToBody } = await import('../utils/roleHelper');
+            await addRoleIdToBody(requestBody);
+          } catch (e) {
+            console.warn(
+              '⚠️ SubscriptionPlanScreen: Failed to add role ID to payment request:',
+              e,
+            );
+          }
+
+          console.log('📤 Request body being sent to backend:', requestBody);
+          console.log(
+            '📤 targetPlanId in request body:',
+            requestBody.targetPlanId,
+          );
+          console.log('📤 targetPlanId type:', typeof requestBody.targetPlanId);
+          console.log(
+            '📤 subscriptionId in request body:',
+            requestBody.subscriptionId,
+          );
+          console.log(
+            '📤 subscriptionId type:',
+            typeof requestBody.subscriptionId,
+          );
+
+          const orderResponse = (await unifiedApi.post(
+            '/payments',
+            requestBody,
+          )) as { data: any; status: number; headers: Headers };
+
+          // unifiedApi returns { data, status, headers } structure
+          if (orderResponse.status < 200 || orderResponse.status >= 300) {
+            let errorMessage = `HTTP ${orderResponse.status}`;
+            const errorData = orderResponse.data || orderResponse;
+            console.error('❌ Backend payment creation failed:', errorData);
+            errorMessage = errorData?.message || errorMessage;
+            throw new Error(`Backend failed: ${errorMessage}`);
+          }
+
+          const paymentData = orderResponse.data || orderResponse;
+          console.log('✅ Payment created through backend:', paymentData);
+
+          // Extract order from payment data
+          order = paymentData.order || paymentData;
+          console.log('✅ Razorpay order extracted:', order);
+        } catch (backendError) {
+          console.log(
+            '⚠️ Backend payment creation failed, trying direct Razorpay API...',
+          );
+
+          // Fallback to direct Razorpay API if backend fails
+          if (
+            !RAZORPAY_CONFIG.key ||
+            !RAZORPAY_CONFIG.secret ||
+            RAZORPAY_CONFIG.key === 'rzp_test_xxxxxxxxxxxxx' ||
+            RAZORPAY_CONFIG.secret === 'your_secret_key_here'
+          ) {
+            throw new Error(
+              'Razorpay credentials not configured. Please contact support to enable payments.',
+            );
+          }
+
+          const credentials = `${RAZORPAY_CONFIG.key}:${RAZORPAY_CONFIG.secret}`;
+          const base64Credentials = btoa(credentials);
+
+          const directOrderResponse = await fetch(
+            'https://api.razorpay.com/v1/orders',
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Basic ${base64Credentials}`,
+              },
+              body: JSON.stringify({
+                amount: orderData.amount,
+                currency: orderData.currency,
+                receipt: orderData.receipt,
+              }),
+            },
+          );
+
+          if (!directOrderResponse.ok) {
+            const errorData = await directOrderResponse.json();
+            console.error(
+              '❌ Direct Razorpay order creation failed:',
+              errorData,
+            );
+            throw new Error(
+              `Failed to create Razorpay order: ${
+                errorData.error?.description || 'Unknown error'
+              }`,
+            );
+          }
+
+          order = await directOrderResponse.json();
+          console.log('✅ Razorpay order created through direct API:', order);
+        }
+
+        // Extract 10-digit mobile number for Razorpay (remove +91 prefix)
+        const razorpayMobile = sanitizedMobile.startsWith('+91')
+          ? sanitizedMobile.substring(3)
+          : sanitizedMobile;
+
         // Use the exact same options that work in Test Simple Checkout with real user data
+        const merchantName =
+          (RAZORPAY_CONFIG as any).merchantName || 'Smart Ledger';
         const options = {
           order_id: order.id,
           description: `Subscription for ${plan.name} plan`,
@@ -1460,10 +3147,10 @@ const SubscriptionPlanScreen: React.FC = () => {
           currency: 'INR',
           key: RAZORPAY_CONFIG.key,
           amount: plan.price * 100,
-          name: 'Your App Name',
+          name: merchantName,
           prefill: {
             email: realUserEmail || 'user@example.com',
-            contact: realUserMobile || '9999999999',
+            contact: razorpayMobile, // Use 10-digit mobile number for Razorpay
             name: realUserName || 'User',
           },
           theme: { color: '#4f8cff' },
@@ -1472,36 +3159,108 @@ const SubscriptionPlanScreen: React.FC = () => {
         console.log('🎯 Opening Razorpay checkout with real user data:');
         console.log('  - User Name:', realUserName || 'User (fallback)');
         console.log(
-          '  - User Mobile:',
-          realUserMobile || '9999999999 (fallback)',
+          '  - User Mobile (Original):',
+          realUserMobile || 'Not available',
         );
+        console.log(
+          '  - User Mobile (Sanitized for Backend):',
+          sanitizedMobile,
+        );
+        console.log('  - User Mobile (For Razorpay):', razorpayMobile);
         console.log(
           '  - User Email:',
           realUserEmail || 'user@example.com (fallback)',
         );
         console.log('  - Full options:', JSON.stringify(options, null, 2));
 
-        const paymentData = await RazorpayCheckout.open(options);
-        console.log('🎉 Payment completed:', paymentData);
+        try {
+          // Mark sheet as open to block any re-entry while UI thread hands off
+          razorpayOpenRef.current = true;
+          const paymentData = await RazorpayCheckout.open(options);
+          console.log('🎉 Payment completed:', paymentData);
 
-        if (!paymentData.razorpay_payment_id) {
-          throw new Error('No payment ID received from Razorpay');
+          if (!paymentData.razorpay_payment_id) {
+            throw new Error('No payment ID received from Razorpay');
+          }
+
+          // Step 3: Handle payment success
+          await handlePaymentSuccess(paymentData, plan);
+        } catch (razorpayError: any) {
+          // Handle specific Razorpay errors first (avoid logging as error on cancels)
+          if (
+            razorpayError.code === 'PAYMENT_CANCELLED' ||
+            razorpayError.code === 'USER_CANCELLED'
+          ) {
+            console.log('🔄 User cancelled payment');
+            setPaymentError(null);
+            setSuppressPaymentError(true);
+            return;
+          }
+
+          // Broad cancellation detection (SDK variants)
+          const desc = (
+            (razorpayError &&
+              (razorpayError.description || razorpayError.message)) ||
+            String(razorpayError || '')
+          )
+            .toString()
+            .toLowerCase();
+          if (
+            desc.includes('cancel') ||
+            desc.includes('dismiss') ||
+            desc.includes('back') ||
+            desc.includes('closed')
+          ) {
+            console.log('🔄 Detected cancellation via description');
+            setPaymentError(null);
+            setSuppressPaymentError(true);
+            return;
+          }
+
+          console.error('❌ Razorpay checkout error:', razorpayError);
+
+          throw razorpayError;
+        } finally {
+          // Ensure flag resets even if user closes/cancels
+          razorpayOpenRef.current = false;
+          // If we marked a user-driven cancellation anywhere above, hard-clear any lingering error banner
+          if (suppressPaymentError) {
+            setPaymentError(null);
+          }
         }
-
-        // Step 3: Handle payment success
-        await handlePaymentSuccess(paymentData, plan);
       } catch (error: any) {
-        console.error('❌ Payment process failed:', error);
-
-        // 🎯 FIXED: Handle Razorpay modal dismissal and user cancellation
+        // Handle cancellation first to avoid showing failure UI/logs
         if (
           error.code === 'PAYMENT_CANCELLED' ||
           error.code === 'USER_CANCELLED'
         ) {
           console.log('🔄 User cancelled payment');
-          setPaymentError('Payment was cancelled');
+          setPaymentError(null);
+          setSuppressPaymentError(true);
           return;
         }
+
+        // Broad cancellation detection on outer catch as well
+        const errDesc = (
+          (error && (error.description || error.message)) ||
+          String(error || '')
+        )
+          .toString()
+          .toLowerCase()
+          .trim();
+        if (
+          errDesc.includes('cancel') ||
+          errDesc.includes('dismiss') ||
+          errDesc.includes('back') ||
+          errDesc.includes('closed')
+        ) {
+          console.log('🔄 Detected cancellation via outer description');
+          setPaymentError(null);
+          setSuppressPaymentError(true);
+          return;
+        }
+
+        console.error('❌ Payment process failed:', error);
 
         let errorMessage = 'Payment failed. Please try again.';
 
@@ -1525,13 +3284,33 @@ const SubscriptionPlanScreen: React.FC = () => {
       }
     } catch (error) {
       console.error('Plan upgrade error:', error);
-      setPaymentError('Failed to upgrade plan. Please try again.');
-      showAlert({
-        title: 'Error',
-        message: 'Failed to upgrade plan. Please try again.',
-        type: 'error',
-        confirmText: 'OK',
-      });
+
+      // Import error handler
+      const { handleApiError } = require('../utils/apiErrorHandler');
+      const errorInfo = handleApiError(error);
+
+      // Handle 403 Forbidden errors with user-friendly message
+      if (errorInfo.isForbidden) {
+        if (!suppressPaymentError) setPaymentError(errorInfo.message);
+        showAlert({
+          title: 'Access Denied',
+          message: errorInfo.message,
+          type: 'error',
+          confirmText: 'OK',
+        });
+      } else {
+        if (!suppressPaymentError)
+          setPaymentError(
+            errorInfo.message || 'Failed to upgrade plan. Please try again.',
+          );
+        showAlert({
+          title: 'Error',
+          message:
+            errorInfo.message || 'Failed to upgrade plan. Please try again.',
+          type: 'error',
+          confirmText: 'OK',
+        });
+      }
 
       // 🎯 FIXED: Restart transaction limit monitoring if payment fails
       console.log(
@@ -1550,14 +3329,187 @@ const SubscriptionPlanScreen: React.FC = () => {
       // Reset payment processing state
       setPaymentProcessing(false);
       console.log('🏁 Payment flow completed');
+      // Ensure lock is released
+      upgradingLockRef.current = false;
     }
   };
 
   // 🎯 UPDATED: Better downgradePlan function with loading state (like web version)
   const downgradePlan = async (plan: PlanDisplayData) => {
+    console.log('🔄 downgradePlan called with:', {
+      planName: plan.name,
+      planId: plan.id,
+      planPrice: plan.price,
+    });
+
     try {
       setPlanActionLoading(plan.id);
-      const success = await contextDowngradePlan(plan.id);
+
+      // 🎯 FIXED: Check if user is already on this plan before attempting downgrade
+      const currentPlanName = String(
+        currentSubscription?.planName || '',
+      ).toLowerCase();
+      const targetPlanName = String(plan.name || '').toLowerCase();
+
+      if (currentPlanName === targetPlanName) {
+        console.log('⚠️ User is already on this plan:', targetPlanName);
+        setPlanActionLoading(null);
+        showAlert({
+          title: 'Already on This Plan',
+          message: `You are already subscribed to the ${plan.name} plan.`,
+          type: 'info',
+          confirmText: 'OK',
+        });
+        return;
+      }
+
+      console.log('📞 Calling contextDowngradePlan...');
+      // Ensure plan id is numeric for API compatibility; resolve from availablePlans by name if needed
+      const numericPlanId = (() => {
+        const tryNum = (v: any) => {
+          const n = Number(v);
+          return Number.isFinite(n) && n > 0 ? n : undefined;
+        };
+        const rawFromProp = tryNum((plan as any)?.id);
+        if (rawFromProp) return rawFromProp;
+        // Try to resolve using name match from availablePlans
+        try {
+          const match = (availablePlans || []).find(
+            (p: any) =>
+              String(p?.name || '').toLowerCase() ===
+              String((plan as any)?.name || '').toLowerCase(),
+          );
+          if (match) {
+            const m: any = match as any;
+            return (
+              tryNum(m.id) ||
+              tryNum(m.planId) ||
+              tryNum(m.targetPlanId) ||
+              undefined
+            );
+          }
+        } catch {}
+        // Fallback mapping by common plan names
+        const map: Record<string, number> = {
+          free: 1,
+          starter: 2,
+          professional: 3,
+          enterprise: 4,
+        };
+        const key = String((plan as any)?.name || '').toLowerCase();
+        if (map[key]) return map[key];
+        return undefined;
+      })();
+
+      if (!numericPlanId) {
+        console.warn(
+          '❌ Downgrade: could not resolve numeric plan id for',
+          plan,
+        );
+        showAlert({
+          title: 'Downgrade Failed',
+          message: 'Could not resolve the selected plan. Please try again.',
+          type: 'error',
+          confirmText: 'OK',
+        });
+        setPlanActionLoading(null);
+        return;
+      }
+      console.log('🔢 Resolved downgrade numericPlanId:', numericPlanId);
+      console.log(
+        '🗂️ Available plans snapshot:',
+        (availablePlans || []).map((p: any) => ({
+          id: p?.id,
+          name: p?.name,
+          price: p?.price,
+        })),
+      );
+
+      let success = false;
+      let errorMessage: string | null = null;
+
+      try {
+        success = await contextDowngradePlan(String(numericPlanId));
+        console.log('📞 contextDowngradePlan result:', success);
+
+        // Fallback to direct API if context returns false
+        if (!success) {
+          try {
+            const token = await AsyncStorage.getItem('accessToken');
+            if (!token) throw new Error('No token');
+            console.log(
+              '📡 Fallback: POST /subscriptions/upgrade (downgrade pathway)',
+            );
+            // Use unified API
+            const res = await unifiedApi.post('/subscriptions/upgrade', {
+              planId: numericPlanId,
+            });
+            console.log('📡 Downgrade (upgrade endpoint) response:', res);
+
+            // Check if response indicates success
+            // unifiedApi.post() returns data directly, check for success indicators
+            const responseData = (res as any)?.data ?? res;
+            success = !!(
+              responseData?.success ||
+              responseData?.id ||
+              responseData?.subscriptionId ||
+              (responseData &&
+                !responseData.error &&
+                !responseData.message?.includes('error'))
+            );
+
+            if (!success) {
+              const errorMsg =
+                responseData?.message ||
+                'Server responded with error. Please try again later.';
+              // Check if it's the "already subscribed" error
+              if (
+                errorMsg.toLowerCase().includes('already subscribed') ||
+                errorMsg.toLowerCase().includes('already on this plan')
+              ) {
+                errorMessage = `You are already subscribed to the ${plan.name} plan.`;
+                console.log('ℹ️ User is already on this plan');
+              } else {
+                errorMessage = errorMsg;
+                console.warn('❌ Downgrade failed:', errorMessage);
+              }
+            }
+          } catch (e: any) {
+            const errorMsg =
+              e?.message ||
+              'Network error while requesting downgrade. Please try again.';
+            // Check if it's the "already subscribed" error
+            if (
+              errorMsg.toLowerCase().includes('already subscribed') ||
+              errorMsg.toLowerCase().includes('already on this plan')
+            ) {
+              errorMessage = `You are already subscribed to the ${plan.name} plan.`;
+              console.log('ℹ️ User is already on this plan');
+            } else {
+              errorMessage = errorMsg;
+              console.warn('❌ Downgrade fallback failed:', errorMessage);
+            }
+            success = false;
+          }
+        }
+      } catch (error: any) {
+        const errorMsg =
+          error?.message || 'Failed to downgrade plan. Please try again.';
+        // Check if it's the "already subscribed" error
+        if (
+          errorMsg.toLowerCase().includes('already subscribed') ||
+          errorMsg.toLowerCase().includes('already on this plan')
+        ) {
+          errorMessage = `You are already subscribed to the ${plan.name} plan.`;
+          console.log('ℹ️ User is already on this plan');
+        } else {
+          errorMessage = errorMsg;
+          console.error('❌ Downgrade error:', errorMessage);
+        }
+        success = false;
+      }
+
+      // Only show success if operation actually succeeded
       if (success) {
         setSuccessMessage(`Successfully downgraded to ${plan.name} plan!`);
         setShowSuccessModal(true);
@@ -1574,22 +3526,121 @@ const SubscriptionPlanScreen: React.FC = () => {
           // Don't block the flow if notification fails
         }
 
-        fetchSubscriptionData();
+        // 🎯 FIXED: Invalidate subscription cache to ensure fresh data
+        try {
+          unifiedApi.invalidateCachePattern('.*/subscriptions.*');
+          unifiedApi.invalidateCachePattern('.*/users/profile.*');
+          console.log('✅ Invalidated subscription cache after downgrade');
+        } catch (cacheError) {
+          console.warn('⚠️ Failed to invalidate cache:', cacheError);
+        }
+
+        // 🎯 FIXED: Force refresh sequence with delay to ensure backend commits are visible
+        // Only fetch subscription data (not plans) since plans don't change
+        await fetchSubscriptionData(false); // false = don't refresh plans
+
+        // 🎯 FIXED: Add multiple retries with increasing delays to ensure backend updates are visible
+        setTimeout(async () => {
+          console.log(
+            '🔄 First retry: Refreshing subscription data after plan downgrade (1s delay)...',
+          );
+          // Invalidate cache again before retry
+          try {
+            unifiedApi.invalidateCachePattern('.*/subscriptions.*');
+            unifiedApi.invalidateCachePattern('.*/users/profile.*');
+          } catch {}
+          // Refresh subscription data again after delay to get updated plan
+          await fetchSubscriptionData(false); // false = don't refresh plans
+
+          // Second retry with longer delay
+          setTimeout(async () => {
+            console.log(
+              '🔄 Second retry: Refreshing subscription data after plan downgrade (2.5s delay)...',
+            );
+            // Invalidate cache again before retry
+            try {
+              unifiedApi.invalidateCachePattern('.*/subscriptions.*');
+              unifiedApi.invalidateCachePattern('.*/users/profile.*');
+            } catch {}
+            await fetchSubscriptionData(false); // false = don't refresh plans
+
+            // Third retry with even longer delay
+            setTimeout(async () => {
+              console.log(
+                '🔄 Third retry: Refreshing subscription data after plan downgrade (4s delay)...',
+              );
+              // Invalidate cache again before retry
+              try {
+                unifiedApi.invalidateCachePattern('.*/subscriptions.*');
+                unifiedApi.invalidateCachePattern('.*/users/profile.*');
+              } catch {}
+              await fetchSubscriptionData(false); // false = don't refresh plans
+            }, 1500); // Wait another 1.5 seconds (total 4s from first retry)
+          }, 1500); // Wait another 1.5 seconds (total 2.5s from first retry)
+        }, 1000); // Wait 1 second for backend to update subscription
+
+        // Add delay before fetching transaction limits to allow backend to update subscription
+        setTimeout(async () => {
+          console.log(
+            '🔄 Refreshing transaction limits after plan downgrade (with delay)...',
+          );
+          await fetchBillingData();
+
+          // Retry once more to ensure accurate count
+          setTimeout(async () => {
+            console.log(
+              '🔄 Retrying transaction limits fetch after downgrade...',
+            );
+            await fetchBillingData();
+          }, 1500);
+        }, 1500); // Wait 1.5 seconds for backend to update subscription
       } else {
-        setPaymentError('Failed to downgrade plan');
+        // Operation failed - show error and clear any success messages
+        const finalErrorMessage =
+          errorMessage || 'Failed to downgrade plan. Please try again.';
+
+        // Check if it's the "already subscribed" error - show info instead of error
+        const isAlreadySubscribed =
+          finalErrorMessage.toLowerCase().includes('already subscribed') ||
+          finalErrorMessage.toLowerCase().includes('already on this plan');
+
+        setPaymentError(finalErrorMessage);
+        setSuccessMessage(''); // Clear success message if error occurs
+        setShowSuccessModal(false); // Hide success modal if error occurs
+
         showAlert({
-          title: 'Error',
-          message: 'Failed to downgrade plan',
-          type: 'error',
+          title: isAlreadySubscribed
+            ? 'Already on This Plan'
+            : 'Downgrade Failed',
+          message: finalErrorMessage,
+          type: isAlreadySubscribed ? 'info' : 'error',
           confirmText: 'OK',
         });
       }
-    } catch (error) {
-      setPaymentError('Failed to downgrade plan');
+    } catch (error: any) {
+      // Catch any unexpected errors
+      const finalErrorMessage =
+        error?.message || 'Failed to downgrade plan. Please try again.';
+
+      // Check if it's the "already subscribed" error - show info instead of error
+      const isAlreadySubscribed =
+        finalErrorMessage.toLowerCase().includes('already subscribed') ||
+        finalErrorMessage.toLowerCase().includes('already on this plan');
+
+      if (!isAlreadySubscribed) {
+        console.error('❌ Unexpected downgrade error:', error);
+      }
+
+      setPaymentError(finalErrorMessage);
+      setSuccessMessage(''); // Clear success message if error occurs
+      setShowSuccessModal(false); // Hide success modal if error occurs
+
       showAlert({
-        title: 'Error',
-        message: 'Failed to downgrade plan',
-        type: 'error',
+        title: isAlreadySubscribed
+          ? 'Already on This Plan'
+          : 'Downgrade Failed',
+        message: finalErrorMessage,
+        type: isAlreadySubscribed ? 'info' : 'error',
         confirmText: 'OK',
       });
     } finally {
@@ -1613,7 +3664,10 @@ const SubscriptionPlanScreen: React.FC = () => {
               'Your subscription has been cancelled successfully.',
             );
             setShowSuccessModal(true);
-            fetchSubscriptionData();
+            // Only fetch subscription data (not plans) since plans don't change
+            fetchSubscriptionData(false); // false = don't refresh plans
+            // Immediately reflect cancellation in Billing History
+            fetchBillingData();
           } else {
             showAlert({
               title: 'Error',
@@ -1635,12 +3689,7 @@ const SubscriptionPlanScreen: React.FC = () => {
   };
 
   const contactSales = () => {
-    showAlert({
-      title: 'Contact Sales',
-      message: 'Please contact our sales team for assistance.',
-      type: 'info',
-      confirmText: 'OK',
-    });
+    setShowContactSalesModal(true);
   };
 
   const getPlanIcon = (planName: string) => {
@@ -1673,6 +3722,25 @@ const SubscriptionPlanScreen: React.FC = () => {
     }
   };
 
+  const getPlanCardStyle = (planName: string) => {
+    switch (planName.toLowerCase()) {
+      case 'free':
+        return styles.freePlanCard;
+      case 'starter':
+        return styles.starterPlanCard;
+      case 'professional':
+        return styles.professionalPlanCard;
+      case 'enterprise':
+        return styles.enterprisePlanCard;
+      case 'premium':
+        return styles.premiumPlanCard;
+      case 'basic':
+        return styles.basicPlanCard;
+      default:
+        return styles.freePlanCard; // Default to free plan style
+    }
+  };
+
   const getPlanFeature = (planName: string) => {
     switch (planName.toLowerCase()) {
       case 'free':
@@ -1688,33 +3756,18 @@ const SubscriptionPlanScreen: React.FC = () => {
     }
   };
 
-  const getRecommendedPlan = (planName: string) => {
-    // Fetch user's current plan from token/subscription context
-    if (!currentSubscription) return false;
-
-    const currentPlanName = currentSubscription.planName.toLowerCase();
-    const planNameLower = planName.toLowerCase();
-
-    // Define the upgrade path - show next plan as recommended
-    const upgradePath: { [key: string]: string } = {
-      free: 'starter',
-      starter: 'professional',
-      professional: 'enterprise',
-      enterprise: 'enterprise', // No upgrade from enterprise
-    };
-
-    // Check if this plan is the recommended upgrade for user's current plan
-    const isRecommended = upgradePath[currentPlanName] === planNameLower;
-
-    return isRecommended;
-  };
+  // Recommended logic removed – no badges or hints
 
   // 🚨 REMOVED: Loading screen completely - no more loading states
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="dark-content" backgroundColor="#f6fafc" />
-
+    <View style={styles.container}>
+      <StableStatusBar
+        backgroundColor="#4f8cff"
+        barStyle="light-content"
+        translucent={false}
+        animated={true}
+      />
       {/* Success Modal */}
       <Modal
         visible={showSuccessModal}
@@ -1727,7 +3780,7 @@ const SubscriptionPlanScreen: React.FC = () => {
             <View style={styles.successIconContainer}>
               <MaterialCommunityIcons
                 name="check-circle"
-                size={64}
+                size={40}
                 color="#28a745"
               />
             </View>
@@ -1772,143 +3825,222 @@ const SubscriptionPlanScreen: React.FC = () => {
       {/* Payment Details Modal */}
       <Modal
         visible={showPaymentDetails}
-        animationType="slide"
+        animationType="fade"
+        transparent={true}
         onRequestClose={() => setShowPaymentDetails(false)}
       >
-        {paymentDetails && (
-          <PaymentDetailsDisplay
-            paymentData={paymentDetails}
-            onClose={() => setShowPaymentDetails(false)}
-          />
-        )}
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            justifyContent: 'center',
+            alignItems: 'center',
+            paddingHorizontal: 16,
+          }}
+        >
+          <View
+            style={{
+              width: '100%',
+              maxWidth: 560,
+              height: '85%',
+              borderRadius: 20,
+              overflow: 'hidden',
+              backgroundColor: '#FFFFFF',
+            }}
+          >
+            {/* Enable nested scrolling inside the modal content */}
+            <ScrollView
+              nestedScrollEnabled
+              showsVerticalScrollIndicator
+              contentContainerStyle={{ flexGrow: 1 }}
+              keyboardShouldPersistTaps="handled"
+            >
+              {paymentDetails && (
+                <PaymentDetailsDisplay
+                  paymentData={paymentDetails}
+                  onClose={() => setShowPaymentDetails(false)}
+                />
+              )}
+            </ScrollView>
+          </View>
+        </View>
       </Modal>
+
+      {/* Fixed Header */}
+      <View
+        style={[styles.header, getSolidHeaderStyle(effectiveStatusBarHeight)]}
+      >
+        <View style={{ height: HEADER_CONTENT_HEIGHT }} />
+        <TouchableOpacity style={styles.backButton} onPress={handleHeaderBack}>
+          <MaterialCommunityIcons name="arrow-left" size={25} color="#fff" />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>Subscription Plans</Text>
+      </View>
 
       <ScrollView
         showsVerticalScrollIndicator={false}
         style={styles.scrollView}
       >
-        {/* Header */}
-        <View style={styles.header}>
-          <TouchableOpacity
-            style={styles.backButton}
-            onPress={() => navigation.goBack()}
-          >
-            <MaterialCommunityIcons name="arrow-left" size={24} color="#222" />
-          </TouchableOpacity>
+        {/* Header Content Section removed to eliminate extra top space */}
 
-          <View style={styles.headerContent}>
-            <Text style={styles.title}>Subscription Plans</Text>
-            <Text style={styles.subtitle}>
-              Choose the plan that best fits your business needs
-            </Text>
-            <View style={styles.headerBadge}>
-              <MaterialCommunityIcons
-                name="shield-check"
-                size={16}
-                color="#28a745"
-              />
-              <Text style={styles.headerBadgeText}>Secure & Reliable</Text>
+        {/* Current Plan Status Section - Hidden */}
+        {false && (
+          <View style={styles.currentPlanSection}>
+            <View style={styles.currentPlanCard}>
+              <View style={styles.currentPlanHeader}>
+                <View style={styles.currentPlanInfo}>
+                  <Text style={styles.currentPlanTitle}>
+                    {currentSubscription?.planName || 'Free'} Plan
+                  </Text>
+                  <View style={styles.activeBadge}>
+                    <Text style={styles.activeBadgeText}>Active</Text>
+                  </View>
+                </View>
+                <TouchableOpacity
+                  style={styles.refreshButton}
+                  onPress={refreshBillingData}
+                >
+                  {apiLoading ? (
+                    <ActivityIndicator size="small" color="#4f8cff" />
+                  ) : (
+                    <MaterialCommunityIcons
+                      name="refresh"
+                      size={16}
+                      color="#4f8cff"
+                    />
+                  )}
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.currentPlanDetails}>
+                ₹{currentSubscription?.amount || 0}/month •{' '}
+                {getPlanFeature(currentSubscription?.planName || 'free')}
+              </Text>
+
+              <View style={styles.usageSection}>
+                <View style={styles.usageCard}>
+                  <View style={styles.usageIcon}>
+                    <MaterialCommunityIcons
+                      name="file-document-outline"
+                      size={18}
+                      color="#4f8cff"
+                    />
+                  </View>
+                  <Text style={styles.usageTitle}>
+                    Transactions Monthly Limit
+                  </Text>
+                  <View style={styles.usageAmount}>
+                    <Text style={styles.usageUsed}>
+                      {transactionLimits?.currentCount || 0}
+                    </Text>
+                    <Text style={styles.usageTotal}>
+                      /{' '}
+                      {transactionLimits?.maxAllowed === 999999
+                        ? 'Unlimited'
+                        : transactionLimits?.maxAllowed || 50}
+                    </Text>
+                  </View>
+                  <Text style={styles.usagePercentage}>
+                    {transactionLimits?.maxAllowed === 999999
+                      ? 'Unlimited transactions'
+                      : transactionLimits
+                      ? `${transactionLimits?.percentageUsed || 0}% used`
+                      : '0% used'}
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.billingInfo}>
+                <View style={styles.billingRow}>
+                  <View style={styles.billingItem}>
+                    <MaterialCommunityIcons
+                      name="calendar-clock"
+                      size={14}
+                      color="#666"
+                    />
+                    <Text style={styles.billingLabel}>Next Billing Date</Text>
+                    <Text style={styles.billingValue}>
+                      {(() => {
+                        const planName = String(
+                          currentSubscription?.planName || '',
+                        ).toLowerCase();
+                        const nextBillingDate =
+                          nextBillingDateApi ||
+                          currentSubscription?.nextBillingDate;
+
+                        console.log('🔍 Next Billing Date Debug:', {
+                          planName,
+                          nextBillingDate,
+                          isFree: planName === 'free',
+                          hasDate: !!nextBillingDate,
+                        });
+
+                        if (planName === 'free') {
+                          return '-';
+                        }
+
+                        if (nextBillingDate) {
+                          try {
+                            const date = new Date(nextBillingDate as string);
+                            if (isNaN(date.getTime())) {
+                              console.warn(
+                                '⚠️ Invalid date format:',
+                                nextBillingDate,
+                              );
+                              return '-';
+                            }
+                            // Display as dd/mm/yyyy
+                            return date.toLocaleDateString('en-GB', {
+                              day: '2-digit',
+                              month: '2-digit',
+                              year: 'numeric',
+                            });
+                          } catch (error) {
+                            console.warn('⚠️ Date parsing error:', error);
+                            return '-';
+                          }
+                        }
+
+                        return '-';
+                      })()}
+                    </Text>
+                  </View>
+                  <View style={styles.billingDivider} />
+                  <View style={styles.billingItem}>
+                    <MaterialCommunityIcons
+                      name="receipt"
+                      size={14}
+                      color="#666"
+                    />
+                    <Text style={styles.billingLabel}>Billing Amount</Text>
+                    <Text style={styles.billingValue}>
+                      {(() => {
+                        const planName = String(
+                          currentSubscription?.planName || '',
+                        ).toLowerCase();
+                        const amount = Number(currentSubscription?.amount || 0);
+
+                        console.log('🔍 Billing Amount Debug:', {
+                          planName,
+                          amount,
+                          isFree: planName === 'free',
+                          isZeroOrNegative: amount <= 0,
+                        });
+
+                        if (planName === 'free' || amount <= 0) {
+                          return '-';
+                        }
+
+                        return `₹${amount}`;
+                      })()}
+                    </Text>
+                  </View>
+                </View>
+                {/* Billing History button removed per request */}
+              </View>
             </View>
           </View>
-        </View>
-
-        {/* Current Plan Status Section */}
-        <View style={styles.currentPlanSection}>
-          <View style={styles.currentPlanCard}>
-            <View style={styles.currentPlanHeader}>
-              <View style={styles.currentPlanInfo}>
-                <Text style={styles.currentPlanTitle}>
-                  {currentSubscription?.planName || 'Free'} Plan
-                </Text>
-                <View style={styles.activeBadge}>
-                  <Text style={styles.activeBadgeText}>Active</Text>
-                </View>
-              </View>
-              <TouchableOpacity
-                style={styles.refreshButton}
-                onPress={refreshBillingData}
-              >
-                {apiLoading ? (
-                  <ActivityIndicator size="small" color="#4f8cff" />
-                ) : (
-                  <MaterialCommunityIcons
-                    name="refresh"
-                    size={20}
-                    color="#4f8cff"
-                  />
-                )}
-              </TouchableOpacity>
-            </View>
-
-            <Text style={styles.currentPlanDetails}>
-              ₹{currentSubscription?.amount || 0}/month •{' '}
-              {getPlanFeature(currentSubscription?.planName || 'free')}
-            </Text>
-
-            <View style={styles.usageSection}>
-              <View style={styles.usageCard}>
-                <View style={styles.usageIcon}>
-                  <MaterialCommunityIcons
-                    name="file-document-outline"
-                    size={24}
-                    color="#4f8cff"
-                  />
-                </View>
-                <Text style={styles.usageTitle}>
-                  Transactions Monthly Limit
-                </Text>
-                <View style={styles.usageAmount}>
-                  <Text style={styles.usageUsed}>
-                    {transactionLimits?.currentCount || 0}
-                  </Text>
-                  <Text style={styles.usageTotal}>
-                    / {transactionLimits?.maxAllowed || 50}
-                  </Text>
-                </View>
-                <Text style={styles.usagePercentage}>
-                  {transactionLimits
-                    ? `${transactionLimits.percentageUsed}% used`
-                    : '0% used'}
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.billingInfo}>
-              <View style={styles.billingRow}>
-                <View style={styles.billingItem}>
-                  <MaterialCommunityIcons
-                    name="calendar-clock"
-                    size={20}
-                    color="#666"
-                  />
-                  <Text style={styles.billingLabel}>Next Billing Date</Text>
-                  <Text style={styles.billingValue}>
-                    No active subscription
-                  </Text>
-                </View>
-                <View style={styles.billingItem}>
-                  <MaterialCommunityIcons
-                    name="receipt"
-                    size={20}
-                    color="#666"
-                  />
-                  <Text style={styles.billingLabel}>Billing Amount</Text>
-                  <Text style={styles.billingValue}>
-                    ₹{currentSubscription?.amount || 0}
-                  </Text>
-                </View>
-              </View>
-              <TouchableOpacity style={styles.billingHistoryButton}>
-                <MaterialCommunityIcons
-                  name="calendar"
-                  size={16}
-                  color="#fff"
-                />
-                <Text style={styles.billingHistoryText}>Billing History</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
+        )}
 
         {/* Transaction Limits Section */}
         <View style={styles.transactionLimitsSection}>
@@ -1918,11 +4050,13 @@ const SubscriptionPlanScreen: React.FC = () => {
                 Transaction Limits
               </Text>
               <View style={styles.allGoodBadge}>
-                <MaterialCommunityIcons
-                  name="check-circle"
-                  size={20}
-                  color="#ffffff"
-                />
+                <View style={styles.allGoodIconContainer}>
+                  <MaterialCommunityIcons
+                    name="check"
+                    size={12}
+                    color="#16A34A"
+                  />
+                </View>
                 <Text style={styles.allGoodText}>All Good</Text>
               </View>
             </View>
@@ -1943,23 +4077,30 @@ const SubscriptionPlanScreen: React.FC = () => {
                       style={[
                         styles.progressFill,
                         {
-                          width: transactionLimits
-                            ? `${Math.min(
-                                transactionLimits.percentageUsed,
-                                100,
-                              )}%`
-                            : '0%',
+                          width:
+                            transactionLimits?.maxAllowed === 999999
+                              ? '0%' // No progress bar for unlimited plans
+                              : transactionLimits
+                              ? `${Math.min(
+                                  transactionLimits.percentageUsed,
+                                  100,
+                                )}%`
+                              : '0%',
                         },
                       ]}
                     />
                   </View>
                   <Text style={styles.progressText}>
                     {transactionLimits?.currentCount || 0} /{' '}
-                    {transactionLimits?.maxAllowed || 50}
+                    {transactionLimits?.maxAllowed === 999999
+                      ? 'Unlimited'
+                      : transactionLimits?.maxAllowed || 50}
                   </Text>
                 </View>
                 <Text style={styles.remainingText}>
-                  {transactionLimits?.remaining || 0} remaining
+                  {transactionLimits?.maxAllowed === 999999
+                    ? 'Unlimited remaining'
+                    : `${transactionLimits?.remaining || 0} remaining`}
                 </Text>
               </View>
 
@@ -1971,154 +4112,241 @@ const SubscriptionPlanScreen: React.FC = () => {
                 />
                 <Text style={styles.resetText}>
                   Next reset:{' '}
-                  {transactionLimits?.nextResetFormatted || 'End of month'}
+                  {(() => {
+                    const planName = String(
+                      currentSubscription?.planName || '',
+                    ).toLowerCase();
+                    if (planName === 'free') return '-';
+                    const fromLimits = transactionLimits?.nextResetFormatted;
+                    if (fromLimits) return fromLimits;
+                    // Fallback: if subscription has nextBillingDate, show same
+                    const nbd = currentSubscription?.nextBillingDate;
+                    if (nbd) {
+                      try {
+                        const date = new Date(nbd);
+                        if (!isNaN(date.getTime())) {
+                          // Display as dd/mm/yyyy
+                          return date.toLocaleDateString('en-GB', {
+                            day: '2-digit',
+                            month: '2-digit',
+                            year: 'numeric',
+                          });
+                        }
+                      } catch {}
+                    }
+                    return 'End of month';
+                  })()}
                 </Text>
               </View>
             </View>
           </View>
         </View>
 
-        {/* Billing Summary Section */}
-        <View style={styles.billingSummarySection}>
-          <View style={styles.billingSummaryHeader}>
-            <Text style={styles.billingSummaryTitle}>Billing Summary</Text>
-            {apiLoading && <ActivityIndicator size="small" color="#4f8cff" />}
-          </View>
-          <View style={styles.billingMetrics}>
-            {/* Row 1 */}
+        {/* Billing Summary Section (Dashboard Tiles) - Hidden */}
+        {false && (
+          <View style={styles.billingSummarySection}>
+            <View style={styles.billingSummaryHeader}>
+              <Text style={styles.billingSummaryTitle}>Billing Summary</Text>
+              {apiLoading && <ActivityIndicator size="small" color="#4f8cff" />}
+            </View>
+
             <View style={styles.metricRow}>
               <View style={styles.metricItem}>
                 <View style={styles.metricIconContainer}>
                   <MaterialCommunityIcons
-                    name="file-document-multiple"
-                    size={16}
+                    name="trending-up"
+                    size={20}
                     color="#4f8cff"
                   />
                 </View>
-                <Text style={[styles.metricValue, { color: '#4f8cff' }]}>
-                  {billingSummary?.totalInvoices || 0}
+                <Text
+                  style={[
+                    styles.metricValue,
+                    { color: '#1a1a1a', fontSize: 24 },
+                  ]}
+                >
+                  {billingSummary?.totalSubscriptions ?? 0}
                 </Text>
-                <Text style={styles.metricLabel}>Total Invoices</Text>
+                <Text style={styles.metricLabel}>Total Subscriptions</Text>
               </View>
+
               <View style={styles.metricItem}>
                 <View style={styles.metricIconContainer}>
                   <MaterialCommunityIcons
-                    name="currency-inr"
-                    size={16}
+                    name="check-circle"
+                    size={20}
                     color="#28a745"
                   />
                 </View>
-                <Text style={[styles.metricValue, { color: '#28a745' }]}>
-                  ₹{billingSummary?.totalAmount || 0}
+                <Text
+                  style={[
+                    styles.metricValue,
+                    { color: '#28a745', fontSize: 24 },
+                  ]}
+                >
+                  {billingSummary?.activeSubscriptions ?? 0}
                 </Text>
-                <Text style={styles.metricLabel}>Total Amount</Text>
+                <Text style={styles.metricLabel}>Active</Text>
               </View>
             </View>
 
-            {/* Row 2 */}
             <View style={styles.metricRow}>
               <View style={styles.metricItem}>
                 <View style={styles.metricIconContainer}>
                   <MaterialCommunityIcons
-                    name="clock-outline"
-                    size={16}
-                    color="#fd7e14"
-                  />
-                </View>
-                <Text style={[styles.metricValue, { color: '#fd7e14' }]}>
-                  {billingSummary?.pendingInvoices || 0}
-                </Text>
-                <Text style={styles.metricLabel}>Pending</Text>
-              </View>
-              <View style={styles.metricItem}>
-                <View style={styles.metricIconContainer}>
-                  <MaterialCommunityIcons
-                    name="alert-circle-outline"
-                    size={16}
+                    name="close-circle"
+                    size={20}
                     color="#dc3545"
                   />
                 </View>
-                <Text style={[styles.metricValue, { color: '#dc3545' }]}>
-                  {billingSummary?.overdueInvoices || 0}
+                <Text
+                  style={[
+                    styles.metricValue,
+                    { color: '#dc3545', fontSize: 24 },
+                  ]}
+                >
+                  {billingSummary?.expiredSubscriptions ?? 0}
                 </Text>
-                <Text style={styles.metricLabel}>Overdue</Text>
+                <Text style={styles.metricLabel}>Expired</Text>
+              </View>
+
+              <View style={styles.metricItem}>
+                <View style={styles.metricIconContainer}>
+                  <MaterialCommunityIcons
+                    name="credit-card"
+                    size={20}
+                    color="#8b5cf6"
+                  />
+                </View>
+                <Text
+                  style={[
+                    styles.metricValue,
+                    { color: '#1a1a1a', fontSize: 22 },
+                  ]}
+                >
+                  {formatINR(billingSummary?.totalSpent ?? 0)}
+                </Text>
+                <Text style={styles.metricLabel}>Total Spent</Text>
               </View>
             </View>
           </View>
-        </View>
+        )}
 
         {/* Billing History Section */}
         <View style={styles.billingHistorySection}>
           <View style={styles.billingHistoryHeader}>
             <Text style={styles.billingHistoryTitle}>Billing History</Text>
-            <TouchableOpacity
-              style={styles.refreshHistoryButton}
-              onPress={refreshBillingData}
-            >
-              <Text style={styles.refreshHistoryText}>Refresh</Text>
-            </TouchableOpacity>
+            {false && (
+              <TouchableOpacity
+                style={styles.refreshHistoryButton}
+                onPress={refreshBillingData}
+              >
+                <Text style={styles.refreshHistoryText}>Refresh</Text>
+              </TouchableOpacity>
+            )}
           </View>
 
-          {billingHistory.length > 0 ? (
-            <View style={styles.billingHistoryList}>
-              {billingHistory.map(invoice => (
-                <View key={invoice.id} style={styles.billingHistoryItem}>
-                  <View style={styles.billingHistoryItemHeader}>
-                    <Text style={styles.billingHistoryItemTitle}>
-                      {invoice.invoiceNumber}
-                    </Text>
-                    <View
-                      style={[
-                        styles.billingHistoryItemStatus,
-                        { backgroundColor: getStatusColor(invoice.status) },
-                      ]}
-                    >
-                      <Text style={styles.billingHistoryItemStatusText}>
-                        {invoice.status}
+          {(() => {
+            const historyItems = billingHistory
+              .filter(x => (x.status || '').toLowerCase() !== 'pending')
+              .slice()
+              .sort(
+                (a, b) =>
+                  new Date(b.billingDate).getTime() -
+                  new Date(a.billingDate).getTime(),
+              );
+            if (historyItems.length === 0) return null as any;
+            const content = (
+              <View style={styles.billingHistoryList}>
+                {historyItems.map((invoice, index) => (
+                  <View key={invoice.id} style={styles.billingHistoryItem}>
+                    <View style={styles.billingHistoryItemHeader}>
+                      <Text style={styles.billingHistoryItemTitle}>
+                        {invoice.invoiceNumber}
                       </Text>
+                      <View
+                        style={[
+                          styles.billingHistoryItemStatus,
+                          { backgroundColor: getStatusColor(invoice.status) },
+                        ]}
+                      >
+                        <Text style={styles.billingHistoryItemStatusText}>
+                          {invoice.status}
+                        </Text>
+                      </View>
+                    </View>
+                    <Text style={styles.billingHistoryItemPlan}>
+                      {invoice.displayPlanName
+                        ? `${invoice.displayPlanName} - ${invoice.billingPeriod}`
+                        : `${invoice.planName} - ${invoice.billingPeriod}`}
+                    </Text>
+                    <View style={styles.billingHistoryItemFooter}>
+                      <Text style={styles.billingHistoryItemAmount}>
+                        {formatINR(
+                          typeof invoice.amountRupees === 'number'
+                            ? invoice.amountRupees
+                            : Number(invoice.amount || 0),
+                        )}
+                      </Text>
+                      <Text style={styles.billingHistoryItemDate}>
+                        {new Date(invoice.billingDate).toLocaleDateString()}
+                      </Text>
+
+                      {/* View Payment Details Button (only for newest subscription payment) */}
+                      {index === 0 && (
+                        <TouchableOpacity
+                          style={styles.viewPaymentButton}
+                          onPress={() => {
+                            // Derive a reliable key for fetching details
+                            const derivedId =
+                              (invoice as any).paymentId ||
+                              (invoice as any).lookupId ||
+                              (invoice as any).razorpayPaymentId ||
+                              (invoice as any).razorpay_payment_id ||
+                              (invoice as any).razorpayOrderId ||
+                              (invoice as any).razorpay_order_id ||
+                              invoice.invoiceNumber;
+                            if (derivedId) {
+                              fetchPaymentDetails(String(derivedId));
+                            }
+                          }}
+                        >
+                          <MaterialCommunityIcons
+                            name="eye"
+                            size={14}
+                            color="#4f8cff"
+                          />
+                          <Text style={styles.viewPaymentButtonText}>
+                            Details
+                          </Text>
+                        </TouchableOpacity>
+                      )}
                     </View>
                   </View>
-                  <Text style={styles.billingHistoryItemPlan}>
-                    {invoice.planName} - {invoice.billingPeriod}
-                  </Text>
-                  <View style={styles.billingHistoryItemFooter}>
-                    <Text style={styles.billingHistoryItemAmount}>
-                      ₹{invoice.amount}
-                    </Text>
-                    <Text style={styles.billingHistoryItemDate}>
-                      {new Date(invoice.billingDate).toLocaleDateString()}
-                    </Text>
-
-                    {/* View Payment Details Button */}
-                    {invoice.paymentId && (
-                      <TouchableOpacity
-                        style={styles.viewPaymentButton}
-                        onPress={() => {
-                          // Fetch payment details from backend and show
-                          if (invoice.paymentId) {
-                            fetchPaymentDetails(invoice.paymentId);
-                          }
-                        }}
-                      >
-                        <MaterialCommunityIcons
-                          name="receipt-text"
-                          size={16}
-                          color="#4f8cff"
-                        />
-                        <Text style={styles.viewPaymentButtonText}>
-                          Details
-                        </Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-                </View>
-              ))}
-            </View>
-          ) : (
+                ))}
+              </View>
+            );
+            if (historyItems.length > 3) {
+              return (
+                <ScrollView
+                  style={styles.billingHistoryScroll}
+                  contentContainerStyle={{ paddingBottom: 2 }}
+                  nestedScrollEnabled
+                  showsVerticalScrollIndicator
+                >
+                  {content}
+                </ScrollView>
+              ) as any;
+            }
+            return content as any;
+          })()}
+          {billingHistory.filter(
+            x => (x.status || '').toLowerCase() !== 'pending',
+          ).length === 0 ? (
             <View style={styles.noHistoryContainer}>
               <MaterialCommunityIcons
                 name="file-document-outline"
-                size={48}
+                size={40}
                 color="#ccc"
               />
               <Text style={styles.noHistoryTitle}>
@@ -2128,227 +4356,69 @@ const SubscriptionPlanScreen: React.FC = () => {
                 Your invoices will appear here once generated.
               </Text>
             </View>
-          )}
+          ) : null}
         </View>
 
-        {/* Plans Summary Grid */}
+        {/* Plans Slider (Carousel) */}
         <View style={styles.plansSummaryContainer}>
           <View style={styles.plansSummaryHeader}>
             <Text style={styles.plansSummaryTitle}>Choose Your Plan</Text>
             <Text style={styles.plansSummarySubtitle}>
               Select the perfect plan for your business needs
             </Text>
+            {/* Recommended hint intentionally removed per latest UX */}
           </View>
-          <View style={styles.plansGrid}>
-            {(() => {
-              // Create a 2x2 grid layout
-              const plans = availablePlans.slice(0, 4);
-              const rows = [];
 
-              for (let i = 0; i < plans.length; i += 2) {
-                const row = plans.slice(i, i + 2);
-                rows.push(
-                  <View key={`row-${i}`} style={styles.planRow}>
-                    {row.map((plan: any) => {
-                      const isRecommended = getRecommendedPlan(plan.name);
-                      const isCurrent =
-                        currentSubscription?.planName.toLowerCase() ===
-                        plan.name.toLowerCase();
-                      const isSelected = selectedPlanId === plan.id;
-
-                      return (
-                        <TouchableOpacity
-                          key={plan.id}
-                          style={[
-                            styles.planSummaryCard,
-                            plan.isPopular &&
-                              !isRecommended &&
-                              !isCurrent &&
-                              styles.popularPlanCard,
-                            isCurrent && styles.currentPlanSelectionCard,
-                            isRecommended && styles.recommendedPlanCard,
-                            isSelected && styles.selectedPlanSummaryCard,
-                          ]}
-                          onPress={() => setSelectedPlanId(plan.id)}
-                          activeOpacity={0.7}
-                        >
-                          {/* Priority: Current > Recommended > Popular */}
-                          {isCurrent && (
-                            <View style={styles.currentBadge}>
-                              <Text style={styles.currentBadgeText}>
-                                Current
-                              </Text>
-                            </View>
-                          )}
-                          {isRecommended && !isCurrent && (
-                            <View style={styles.recommendedBadge}>
-                              <Text style={styles.recommendedBadgeText}>
-                                Recommended
-                              </Text>
-                            </View>
-                          )}
-                          {plan.isPopular && !isRecommended && !isCurrent && (
-                            <View style={styles.popularBadge}>
-                              <Text style={styles.popularBadgeText}>
-                                Most Popular
-                              </Text>
-                            </View>
-                          )}
-                          <View style={styles.planIconContainer}>
-                            <MaterialCommunityIcons
-                              name={getPlanIcon(plan.name)}
-                              size={28}
-                              color={getPlanColor(plan.name)}
-                            />
-                          </View>
-                          <Text style={styles.planSummaryName}>
-                            {plan.name}
-                          </Text>
-                          <View style={styles.priceContainer}>
-                            <Text style={styles.planSummaryPrice}>
-                              ₹{plan.price.toLocaleString('en-IN')}
-                            </Text>
-                            <Text style={styles.planSummaryPeriod}>
-                              /{plan.period}
-                            </Text>
-                          </View>
-                          <View style={styles.planFeatures}>
-                            <Text style={styles.planFeatureText}>
-                              {getPlanFeature(plan.name)}
-                            </Text>
-                          </View>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>,
-                );
-              }
-
-              return rows;
-            })()}
-          </View>
+          {/* Only show loading when actually fetching plans (first load) */}
+          {loading && availablePlans.length === 0 ? (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="large" color="#4f8cff" />
+              <Text style={styles.loadingText}>Loading Plans...</Text>
+            </View>
+          ) : cleanedPlans.length > 0 ? (
+            <PlansCarousel
+              cleanedPlans={cleanedPlans}
+              currentSubscription={currentSubscription}
+              paymentProcessing={paymentProcessing}
+              planActionLoading={planActionLoading}
+              paymentError={suppressPaymentError ? null : paymentError}
+              successMessage={successMessage}
+              onPlanPress={(plan: any) => handlePlanAction(plan)}
+              setSelectedPlanId={(id: string) => setSelectedPlanId(id)}
+              getPlanIcon={getPlanIcon}
+              getPlanColor={getPlanColor}
+              getPlanFeature={getPlanFeature}
+              getPlanCardStyle={getPlanCardStyle}
+            />
+          ) : (
+            <View style={styles.noPlansContainer}>
+              <MaterialCommunityIcons
+                name="package-variant"
+                size={48}
+                color="#ccc"
+              />
+              <Text style={styles.noPlansTitle}>No Plans Available</Text>
+              <Text style={styles.noPlansSubtitle}>
+                Plans are currently being set up. Please check back later or
+                contact support.
+              </Text>
+              <TouchableOpacity
+                style={styles.contactSupportButton}
+                onPress={contactSales}
+              >
+                <MaterialCommunityIcons name="headset" size={16} color="#fff" />
+                <Text style={styles.contactSupportText}>Contact Support</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
-
-        {/* Selected Plan Details */}
-        {getSelectedPlan() && (
-          <View style={styles.plansContainer}>
-            <Text style={styles.plansTitle}>Plan Details</Text>
-            {(() => {
-              const plan = getSelectedPlan();
-              if (!plan) return null;
-
-              return (
-                <View
-                  style={[
-                    styles.planCard,
-                    plan.isCurrent && styles.selectedPlanCard,
-                    plan.isPopular && styles.popularPlanCard,
-                  ]}
-                >
-                  {plan.isPopular && !plan.isCurrent && (
-                    <View style={styles.popularBadgeTop}>
-                      <Text style={styles.popularText}>Popular</Text>
-                    </View>
-                  )}
-                  {plan.isCurrent && (
-                    <View style={styles.currentBadgeTop}>
-                      <Text style={styles.currentText}>Current Plan</Text>
-                    </View>
-                  )}
-
-                  <Text style={styles.planName}>{plan.name}</Text>
-                  <Text style={styles.planDescription}>{plan.description}</Text>
-
-                  <View style={styles.planPrice}>
-                    <Text style={styles.priceAmount}>
-                      ₹{plan.price.toLocaleString('en-IN')}
-                    </Text>
-                    <Text style={styles.pricePeriod}>/{plan.period}</Text>
-                  </View>
-
-                  <View style={styles.featuresList}>
-                    {plan.features.map((feature: string, index: number) => (
-                      <View key={index} style={styles.featureItem}>
-                        <MaterialCommunityIcons
-                          name="check"
-                          size={16}
-                          color="#28a745"
-                        />
-                        <Text style={styles.featureText}>{feature}</Text>
-                      </View>
-                    ))}
-                  </View>
-
-                  <TouchableOpacity
-                    style={[
-                      styles.planButton,
-                      plan.isCurrent && styles.currentPlanButton,
-                      plan.buttonAction === 'upgrade' && styles.upgradeButton,
-                      plan.buttonAction === 'downgrade' &&
-                        styles.downgradeButton,
-                      plan.buttonAction === 'contact' && styles.contactButton,
-                      paymentProcessing && styles.processingButton,
-                      planActionLoading === plan.id && styles.processingButton,
-                    ]}
-                    onPress={() => handlePlanAction(plan)}
-                    disabled={
-                      plan.isCurrent ||
-                      paymentProcessing ||
-                      planActionLoading === plan.id
-                    }
-                  >
-                    {paymentProcessing || planActionLoading === plan.id ? (
-                      <View style={styles.processingButtonContent}>
-                        <ActivityIndicator size="small" color="#fff" />
-                        <Text style={styles.processingButtonText}>
-                          Processing...
-                        </Text>
-                      </View>
-                    ) : (
-                      <Text
-                        style={[
-                          styles.planButtonText,
-                          plan.isCurrent && styles.currentPlanButtonText,
-                        ]}
-                      >
-                        {plan.buttonText}
-                      </Text>
-                    )}
-                  </TouchableOpacity>
-
-                  {/* Error and Success Messages */}
-                  {paymentError && (
-                    <View style={styles.errorContainer}>
-                      <MaterialCommunityIcons
-                        name="alert-circle"
-                        size={20}
-                        color="#dc3545"
-                      />
-                      <Text style={styles.errorText}>{paymentError}</Text>
-                    </View>
-                  )}
-                  {successMessage && (
-                    <View style={styles.successContainer}>
-                      <MaterialCommunityIcons
-                        name="check-circle"
-                        size={20}
-                        color="#28a745"
-                      />
-                      <Text style={styles.successText}>{successMessage}</Text>
-                    </View>
-                  )}
-                </View>
-              );
-            })()}
-          </View>
-        )}
 
         {/* Payment Security Section */}
         <View style={styles.securitySection}>
           <View style={styles.securityHeader}>
             <MaterialCommunityIcons
               name="shield-check"
-              size={20}
+              size={16}
               color="#28a745"
             />
             <Text style={styles.securityTitle}>Secure Payment</Text>
@@ -2372,14 +4442,20 @@ const SubscriptionPlanScreen: React.FC = () => {
           </TouchableOpacity>
         </View>
       </ScrollView>
-    </SafeAreaView>
+
+      {/* Contact Sales Modal */}
+      <ContactSalesModal
+        visible={showContactSalesModal}
+        onClose={() => setShowContactSalesModal(false)}
+      />
+    </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f6fafc',
+    backgroundColor: '#F8FAFC',
   },
   scrollView: {
     flex: 1,
@@ -2388,97 +4464,113 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#f6fafc',
+    backgroundColor: '#F8FAFC',
   },
   loadingText: {
     marginTop: 16,
     fontSize: 16,
-    color: '#666',
+    color: '#6B7280',
+    fontFamily: 'Roboto-Medium',
   },
-  // 🚨 REMOVED: Unused loading styles
+
+  // Header Section - Compact and Clean
   header: {
-    paddingHorizontal: 16,
-    paddingTop: 20,
-    paddingBottom: 20,
-    backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
-    position: 'relative',
+    paddingHorizontal: 12,
+    backgroundColor: '#4f8cff',
+    borderBottomWidth: 0,
+    borderBottomColor: 'transparent',
+    flexDirection: 'row',
     alignItems: 'center',
-    minHeight: 120,
+    justifyContent: 'flex-start',
+    position: 'relative',
   },
   headerContent: {
     alignItems: 'center',
     width: '100%',
   },
+  headerContentSection: {
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 16,
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+  },
   headerBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#f8f9fa',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-    marginTop: 12,
+    backgroundColor: '#DCFCE7',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
   },
   headerBadgeText: {
-    marginLeft: 6,
-    fontSize: 14,
-    fontWeight: '500',
-    color: '#28a745',
+    marginLeft: 4,
+    fontSize: 12,
+    color: '#16A34A',
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
 
   backButton: {
-    position: 'absolute',
-    left: 16,
-    top: 20,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#f8f9fa',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 1,
+    padding: 10,
+    marginRight: 6,
+    borderRadius: 8,
+  },
+  headerTitle: {
+    fontSize: 19,
+    fontWeight: '800',
+    color: '#fff',
+    fontFamily: 'Roboto-Medium',
+    marginLeft: 6,
   },
   title: {
-    fontSize: 28,
-    fontWeight: 'bold',
-    color: '#222',
-    marginBottom: 8,
-    textAlign: 'center',
+    display: 'none',
   },
+
   subtitle: {
-    fontSize: 16,
-    color: '#666',
-    lineHeight: 22,
+    fontSize: 14,
+    color: '#6B7280',
+    lineHeight: 20,
     textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
   },
+
   plansSummaryContainer: {
     paddingHorizontal: 16,
-    marginBottom: 32,
-    marginTop: 16,
+    marginBottom: 20,
+    marginTop: 8,
   },
   plansSummaryHeader: {
     alignItems: 'center',
-    marginBottom: 24,
+    marginBottom: 16,
   },
   plansSummaryTitle: {
-    fontSize: 28,
-    fontWeight: '800',
-    color: '#1a1a1a',
-    marginBottom: 8,
+    fontSize: 18,
+    color: '#111827',
+    marginBottom: 6,
     textAlign: 'center',
-    letterSpacing: 0.5,
+    fontFamily: 'Roboto-Bold',
+    fontWeight: '700',
   },
+
   plansSummarySubtitle: {
-    fontSize: 16,
-    color: '#666',
+    fontSize: 14,
+    color: '#6B7280',
     textAlign: 'center',
-    lineHeight: 22,
-    fontWeight: '400',
+    lineHeight: 20,
+    fontFamily: 'Roboto-Medium',
+  },
+
+  plansScrollView: {
+    maxHeight: 600, // Limit height to prevent excessive scrolling
   },
   plansGrid: {
     flexDirection: 'column',
     gap: 16,
+    paddingBottom: 20, // Add padding at bottom for better UX
   },
   planRow: {
     flexDirection: 'row',
@@ -2495,11 +4587,11 @@ const styles = StyleSheet.create({
     borderColor: '#f0f0f0',
     minHeight: 160,
     position: 'relative',
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 3,
+    // shadowColor: '#000',
+    // shadowOpacity: 0.05,
+    // shadowRadius: 10,
+    // shadowOffset: { width: 0, height: 2 },
+    // elevation: 3,
   },
   popularPlanCard: {
     borderColor: '#4f8cff',
@@ -2535,8 +4627,10 @@ const styles = StyleSheet.create({
   popularBadgeText: {
     color: '#fff',
     fontSize: 12,
-    fontWeight: 'bold',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   currentBadge: {
     position: 'absolute',
     top: -8,
@@ -2554,8 +4648,10 @@ const styles = StyleSheet.create({
   currentBadgeText: {
     color: '#fff',
     fontSize: 12,
-    fontWeight: 'bold',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   recommendedBadge: {
     position: 'absolute',
     top: -8,
@@ -2573,62 +4669,82 @@ const styles = StyleSheet.create({
   recommendedBadgeText: {
     color: '#fff',
     fontSize: 12,
-    fontWeight: 'bold',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   planIconContainer: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: '#f8f9fa',
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'rgba(255, 255, 255, 0.8)',
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
   },
   priceContainer: {
-    alignItems: 'center',
-    marginBottom: 12,
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'center',
+    marginBottom: 10,
   },
   planFeatures: {
     alignItems: 'center',
   },
   planFeatureText: {
-    fontSize: 12,
-    color: '#666',
+    fontSize: 13,
+    color: '#6B7280',
     textAlign: 'center',
-    lineHeight: 16,
-    fontWeight: '400',
+    lineHeight: 18,
+    fontFamily: 'Roboto-Medium',
   },
+
   planSummaryName: {
     fontSize: 18,
-    fontWeight: '700',
-    color: '#1a1a1a',
-    marginBottom: 12,
+    color: '#111827',
+    marginBottom: 6,
     textAlign: 'center',
-    letterSpacing: 0.3,
+    fontFamily: 'Roboto-Bold',
+    fontWeight: '700',
   },
+  planSubtitle: {
+    fontSize: 13,
+    color: '#6B7280',
+    textAlign: 'center',
+    marginTop: -2,
+    marginBottom: 6,
+    fontFamily: 'Roboto-Medium',
+  },
+
   planSummaryPrice: {
     fontSize: 24,
-    fontWeight: '800',
-    color: '#4f8cff',
-    marginBottom: 4,
-    letterSpacing: 0.5,
+    color: '#2563EB',
+    marginBottom: 0,
+    fontFamily: 'Roboto-Bold',
+    fontWeight: '700',
   },
+
   planSummaryPeriod: {
-    fontSize: 16,
-    color: '#666',
-    fontWeight: '500',
-    letterSpacing: 0.2,
+    fontSize: 13,
+    color: '#6B7280',
+    marginLeft: 4,
+    fontFamily: 'Roboto-Medium',
   },
+
   plansContainer: {
     paddingHorizontal: 16,
     marginBottom: 20,
   },
   plansTitle: {
     fontSize: 20,
-    fontWeight: 'bold',
     color: '#222',
     marginBottom: 16,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   planCard: {
     backgroundColor: '#fff',
     borderRadius: 16,
@@ -2676,89 +4792,125 @@ const styles = StyleSheet.create({
   currentText: {
     color: '#fff',
     fontSize: 12,
-    fontWeight: 'bold',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   popularText: {
     color: '#fff',
     fontSize: 12,
-    fontWeight: 'bold',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   planName: {
-    fontSize: 24,
-    fontWeight: 'bold',
+    fontSize: 18,
     color: '#222',
     marginBottom: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   planDescription: {
     fontSize: 16,
     color: '#666',
     marginBottom: 16,
     lineHeight: 22,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   planPrice: {
     flexDirection: 'row',
     alignItems: 'baseline',
     marginBottom: 20,
   },
   priceAmount: {
-    fontSize: 32,
-    fontWeight: 'bold',
+    fontSize: 28,
     color: '#222',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   pricePeriod: {
     fontSize: 16,
     color: '#666',
     marginLeft: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   featuresList: {
     marginBottom: 24,
+  },
+  featuresListCompact: {
+    marginBottom: 10,
+    width: '100%',
   },
   featureItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: 8,
+  },
+  featureItemCompact: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
   },
   featureText: {
-    marginLeft: 12,
+    marginLeft: 10,
     fontSize: 14,
-    color: '#666',
+    color: '#374151',
     flex: 1,
     lineHeight: 20,
+    fontFamily: 'Roboto-Medium',
   },
+  featureTextCompact: {
+    marginLeft: 8,
+    fontSize: 13,
+    color: '#6B7280',
+    flex: 1,
+    lineHeight: 18,
+    fontFamily: 'Roboto-Medium',
+  },
+
   planButton: {
-    paddingVertical: 14,
-    paddingHorizontal: 24,
-    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 20,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 4,
+    elevation: 0,
+  },
+  planButtonFull: {
+    alignSelf: 'stretch',
   },
   currentPlanButton: {
-    backgroundColor: '#28a745',
+    backgroundColor: '#16A34A',
   },
   upgradeButton: {
-    backgroundColor: '#4f8cff',
+    backgroundColor: '#2563EB',
   },
   downgradeButton: {
-    backgroundColor: '#6c757d',
+    backgroundColor: '#6B7280',
   },
   contactButton: {
-    backgroundColor: '#343a40',
+    backgroundColor: '#374151',
   },
   processingButton: {
-    backgroundColor: '#6c757d',
+    backgroundColor: '#6B7280',
     opacity: 0.7,
   },
   planButtonText: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#fff',
+    fontSize: 14,
+    color: '#FFFFFF',
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
+
   currentPlanButtonText: {
-    color: '#fff',
+    color: '#FFFFFF',
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
   processingButtonContent: {
     flexDirection: 'row',
@@ -2766,66 +4918,73 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   processingButtonText: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginLeft: 8,
+    fontSize: 13,
+    color: '#FFFFFF',
+    marginLeft: 6,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
+
   contactSection: {
     paddingHorizontal: 16,
-    paddingBottom: 32,
+    paddingBottom: 24,
     alignItems: 'center',
   },
   contactText: {
-    fontSize: 16,
-    color: '#666',
+    fontSize: 14,
+    color: '#6B7280',
     textAlign: 'center',
-    marginBottom: 16,
-    lineHeight: 22,
+    marginBottom: 12,
+    lineHeight: 20,
+    fontFamily: 'Roboto-Medium',
   },
+
   contactSalesButton: {
-    backgroundColor: '#343a40',
+    backgroundColor: '#2563EB',
     paddingVertical: 12,
-    paddingHorizontal: 32,
+    paddingHorizontal: 16,
     borderRadius: 12,
-    shadowColor: '#000',
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 4,
+    alignItems: 'center',
+    alignSelf: 'stretch',
+    marginHorizontal: 16,
+    marginBottom: 40,
   },
   contactSalesText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '700',
   },
+
   securitySection: {
     paddingHorizontal: 16,
-    paddingVertical: 20,
+    paddingVertical: 16,
     marginHorizontal: 16,
-    marginBottom: 20,
-    backgroundColor: '#f8f9fa',
-    borderRadius: 16,
+    marginBottom: 16,
+    backgroundColor: '#F0FDF4',
+    borderRadius: 12,
     borderWidth: 1,
-    borderColor: '#e9ecef',
+    borderColor: '#BBF7D0',
   },
   securityHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: 8,
   },
   securityTitle: {
-    fontSize: 16,
+    fontSize: 13,
+    color: '#16A34A',
+    marginLeft: 6,
+    fontFamily: 'Roboto-Medium',
     fontWeight: '600',
-    color: '#28a745',
-    marginLeft: 8,
   },
+
   securityText: {
-    fontSize: 14,
-    color: '#666',
-    lineHeight: 20,
+    fontSize: 12,
+    color: '#374151',
+    lineHeight: 17,
+    fontFamily: 'Roboto-Medium',
   },
-  // Success Modal Styles
 
   // Success Modal Styles
   successModalOverlay: {
@@ -2863,19 +5022,24 @@ const styles = StyleSheet.create({
     elevation: 8,
   },
   successModalTitle: {
-    fontSize: 24,
-    fontWeight: 'bold',
+    fontSize: 22,
+    fontWeight: '700',
     color: '#28a745',
     marginBottom: 16,
     textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
   },
+
   successModalMessage: {
-    fontSize: 16,
+    fontSize: 15,
     color: '#666',
     textAlign: 'center',
     lineHeight: 22,
     marginBottom: 24,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   successModalButton: {
     backgroundColor: '#28a745',
     paddingVertical: 16,
@@ -2891,9 +5055,11 @@ const styles = StyleSheet.create({
   successModalButtonText: {
     color: '#fff',
     fontSize: 16,
-    fontWeight: 'bold',
+    fontWeight: '700',
     textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
   },
+
   successModalFooter: {
     marginBottom: 20,
     paddingHorizontal: 16,
@@ -2902,8 +5068,9 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#28a745',
     textAlign: 'center',
-    fontStyle: 'italic',
     lineHeight: 20,
+
+    fontFamily: 'Roboto-Medium',
   },
 
   // View Details Button Styles
@@ -2921,110 +5088,127 @@ const styles = StyleSheet.create({
   viewDetailsButtonText: {
     color: '#ffffff',
     fontSize: 16,
-    fontWeight: '600',
     marginLeft: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
 
-  // Current Plan Section Styles
+  // Current Plan Section - Compact Design
   currentPlanSection: {
     paddingHorizontal: 16,
-    marginBottom: 20,
-    marginTop: 20,
+    marginBottom: 16,
+    marginTop: 12,
   },
   currentPlanCard: {
-    backgroundColor: '#fff',
+    backgroundColor: '#E3F2FD',
     borderRadius: 16,
-    padding: 20,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 3,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#BBDEFB',
   },
   currentPlanHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
-    marginBottom: 12,
+    marginBottom: 8,
   },
   currentPlanInfo: {
     flex: 1,
   },
   currentPlanTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#222',
-    marginBottom: 8,
+    fontSize: 18,
+    color: '#111827',
+    marginBottom: 4,
+    fontFamily: 'Roboto-Bold',
+    fontWeight: '700',
   },
+
   activeBadge: {
-    backgroundColor: '#28a745',
+    backgroundColor: '#22C55E',
     paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
+    paddingVertical: 3,
+    borderRadius: 10,
     alignSelf: 'flex-start',
   },
   activeBadgeText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 'bold',
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
+
   refreshButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#f8f9fa',
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: '#FFFFFF',
     justifyContent: 'center',
     alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
   },
   currentPlanDetails: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 20,
-    lineHeight: 20,
+    fontSize: 13,
+    color: '#6B7280',
+    marginBottom: 12,
+    lineHeight: 18,
+    fontFamily: 'Roboto-Medium',
   },
+
   usageSection: {
-    marginBottom: 20,
-  },
-  usageCard: {
-    backgroundColor: '#f8f9fa',
-    borderRadius: 12,
-    padding: 16,
-    alignItems: 'center',
-  },
-  usageIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#e3f2fd',
-    justifyContent: 'center',
-    alignItems: 'center',
     marginBottom: 12,
   },
-  usageTitle: {
-    fontSize: 14,
-    color: '#666',
-    textAlign: 'center',
+  usageCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    padding: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  usageIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#F3F4F6',
+    justifyContent: 'center',
+    alignItems: 'center',
     marginBottom: 8,
   },
+  usageTitle: {
+    fontSize: 13,
+    color: '#374151',
+    textAlign: 'center',
+    marginBottom: 6,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
+  },
+
   usageAmount: {
     flexDirection: 'row',
     alignItems: 'baseline',
-    marginBottom: 4,
+    marginBottom: 2,
   },
   usageUsed: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#4f8cff',
+    fontSize: 20,
+    color: '#2563EB',
+    fontFamily: 'Roboto-Bold',
+    fontWeight: '700',
   },
+
   usageTotal: {
-    fontSize: 16,
-    color: '#666',
+    fontSize: 14,
+    color: '#6B7280',
     marginLeft: 4,
+    fontFamily: 'Roboto-Medium',
   },
+
   usagePercentage: {
-    fontSize: 12,
-    color: '#666',
+    fontSize: 11,
+    color: '#6B7280',
+    fontFamily: 'Roboto-Medium',
   },
+
   billingInfo: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -3032,329 +5216,372 @@ const styles = StyleSheet.create({
   },
   billingRow: {
     flex: 1,
+    flexDirection: 'column',
+    gap: 6,
   },
   billingItem: {
-    marginBottom: 12,
-  },
-  billingLabel: {
-    fontSize: 12,
-    color: '#666',
-    marginBottom: 4,
-  },
-  billingValue: {
-    fontSize: 14,
-    color: '#4f8cff',
-    fontWeight: '500',
-  },
-  billingHistoryButton: {
-    backgroundColor: '#4f8cff',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
+    marginBottom: 8,
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 6,
   },
-  billingHistoryText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 'bold',
-    marginLeft: 6,
+  billingLabel: {
+    fontSize: 11,
+    color: '#6B7280',
+    marginBottom: 0,
+    fontFamily: 'Roboto-Medium',
   },
 
-  // Transaction Limits Section Styles
+  billingValue: {
+    fontSize: 13,
+    color: '#2563EB',
+    marginLeft: 4,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
+  },
+  billingDivider: {
+    height: 1,
+    backgroundColor: '#E5E7EB',
+    alignSelf: 'stretch',
+    marginVertical: 1,
+  },
+
+  billingHistoryButton: {
+    display: 'none',
+  },
+  billingHistoryText: {
+    display: 'none',
+  },
+
+  // Transaction Limits Section - Compact Design
   transactionLimitsSection: {
     paddingHorizontal: 16,
-    marginBottom: 20,
+    marginBottom: 16,
+    marginTop: 12,
   },
   transactionLimitsCard: {
-    backgroundColor: '#fff',
+    backgroundColor: '#FFFFFF',
     borderRadius: 16,
-    padding: 20,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 3,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
   },
   transactionLimitsHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 12,
   },
   transactionLimitsTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#222',
+    fontSize: 16,
+    color: '#111827',
+    fontFamily: 'Roboto-Bold',
+    fontWeight: '700',
   },
+
   allGoodBadge: {
-    backgroundColor: '#28a745',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
+    backgroundColor: '#DCFCE7',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
     flexDirection: 'row',
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: '#ffffff',
-    shadowColor: '#28a745',
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 3,
+    borderColor: '#BBF7D0',
+  },
+  allGoodIconContainer: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 6,
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
   },
   allGoodText: {
-    color: '#ffffff',
-    fontSize: 13,
-    fontWeight: '700',
-    marginLeft: 6,
-    letterSpacing: 0.5,
+    color: '#16A34A',
+    fontSize: 12,
+    marginLeft: 4,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
+
   limitDetails: {
-    gap: 16,
+    gap: 12,
   },
   limitLabel: {
-    fontSize: 14,
-    color: '#666',
+    fontSize: 13,
+    color: '#374151',
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
+
   limitValue: {
-    color: '#4f8cff',
+    color: '#2563EB',
+    fontFamily: 'Roboto-Medium',
     fontWeight: '600',
   },
   limitProgress: {
-    gap: 8,
+    gap: 6,
   },
   limitProgressLabel: {
-    fontSize: 14,
-    color: '#666',
+    fontSize: 13,
+    color: '#6B7280',
+    fontFamily: 'Roboto-Medium',
   },
+
   progressBarContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
   },
   progressBar: {
     flex: 1,
-    height: 8,
-    backgroundColor: '#e9ecef',
-    borderRadius: 4,
+    height: 6,
+    backgroundColor: '#F3F4F6',
+    borderRadius: 3,
     overflow: 'hidden',
   },
   progressFill: {
     height: '100%',
-    backgroundColor: '#28a745',
-    borderRadius: 4,
+    backgroundColor: '#22C55E',
+    borderRadius: 3,
   },
   progressText: {
-    fontSize: 14,
-    color: '#666',
-    fontWeight: '500',
+    fontSize: 13,
+    color: '#374151',
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
+
   remainingText: {
-    fontSize: 12,
-    color: '#666',
+    fontSize: 11,
+    color: '#6B7280',
+    fontFamily: 'Roboto-Medium',
   },
+
   resetInfo: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 6,
   },
   resetText: {
-    fontSize: 12,
-    color: '#666',
+    fontSize: 11,
+    color: '#6B7280',
+    fontFamily: 'Roboto-Medium',
   },
 
-  // Billing Summary Section Styles
+  // Billing Summary Section - Compact Grid Cards
   billingSummarySection: {
     paddingHorizontal: 16,
-    marginBottom: 20,
-    marginTop: 8,
+    marginBottom: 16,
+    marginTop: 4,
   },
   billingSummaryHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 12,
   },
   billingSummaryTitle: {
-    fontSize: 20,
+    fontSize: 18,
+    color: '#111827',
+    fontFamily: 'Roboto-Bold',
     fontWeight: '700',
-    color: '#1a1a1a',
-    letterSpacing: 0.3,
   },
+
   billingMetrics: {
     flexDirection: 'column',
-    gap: 12,
+    gap: 8,
   },
   metricRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    gap: 12,
+    gap: 8,
+    marginBottom: 8,
   },
   metricItem: {
     flex: 1,
     alignItems: 'center',
-    backgroundColor: '#fff',
-    padding: 16,
+    backgroundColor: '#FFFFFF',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
     borderRadius: 12,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
     minHeight: 80,
   },
   metricIconContainer: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#f8f9fa',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#F3F4F6',
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
   },
   metricValue: {
-    fontSize: 24,
+    fontSize: 18,
+    marginBottom: 4,
+    fontFamily: 'Roboto-Bold',
     fontWeight: '700',
-    marginBottom: 6,
-    letterSpacing: 0.3,
-  },
-  metricLabel: {
-    fontSize: 12,
-    color: '#666',
-    textAlign: 'center',
-    fontWeight: '500',
-    letterSpacing: 0.2,
   },
 
-  // Billing History Section Styles
+  metricLabel: {
+    fontSize: 11,
+    color: '#6B7280',
+    textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
+  },
+
+  // Billing History Section - Compact Layout
   billingHistorySection: {
     paddingHorizontal: 16,
-    marginBottom: 20,
+    marginBottom: 16,
+  },
+  billingHistoryScroll: {
+    maxHeight: 320, // ~ fits about 3 items; enables internal scrolling thereafter
   },
   billingHistoryHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 12,
   },
   billingHistoryTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#222',
+    fontSize: 16,
+    color: '#111827',
+    fontFamily: 'Roboto-Bold',
+    fontWeight: '700',
   },
+
   refreshHistoryButton: {
-    backgroundColor: '#4f8cff',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
+    backgroundColor: '#2563EB',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
   },
   refreshHistoryText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 'bold',
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
+
   noHistoryContainer: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 32,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    padding: 24,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 3,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
   },
   noHistoryTitle: {
-    fontSize: 16,
+    fontSize: 15,
+    color: '#374151',
+    marginTop: 12,
+    marginBottom: 6,
+    textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
     fontWeight: '600',
-    color: '#666',
-    marginTop: 16,
-    marginBottom: 8,
-    textAlign: 'center',
   },
+
   noHistorySubtitle: {
-    fontSize: 14,
-    color: '#999',
+    fontSize: 13,
+    color: '#6B7280',
     textAlign: 'center',
-    lineHeight: 20,
+    lineHeight: 18,
+    fontFamily: 'Roboto-Medium',
   },
 
   // Billing History List Styles
   billingHistoryList: {
-    gap: 12,
+    gap: 8,
   },
   billingHistoryItem: {
-    backgroundColor: '#fff',
+    backgroundColor: '#FFFFFF',
     borderRadius: 12,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
   },
   billingHistoryItemHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   billingHistoryItemTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#222',
+    fontSize: 11,
+    color: '#111827',
     flex: 1,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
+
   billingHistoryItemStatus: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 8,
   },
   billingHistoryItemStatusText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: '#fff',
+    fontSize: 10,
+    color: '#FFFFFF',
     textTransform: 'uppercase',
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
+
   billingHistoryItemPlan: {
-    fontSize: 13,
-    color: '#666',
-    marginBottom: 12,
+    fontSize: 12,
+    color: '#6B7280',
+    marginBottom: 8,
+    fontFamily: 'Roboto-Medium',
   },
+
   billingHistoryItemFooter: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     flexWrap: 'wrap',
-    gap: 8,
+    gap: 6,
   },
   billingHistoryItemAmount: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#4f8cff',
+    fontSize: 13,
+    color: '#2563EB',
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
+
   billingHistoryItemDate: {
-    fontSize: 12,
-    color: '#999',
+    fontSize: 11,
+    color: '#6B7280',
+    fontFamily: 'Roboto-Medium',
   },
 
   // View Payment Button Styles
   viewPaymentButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#f0f9ff',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    backgroundColor: '#F0F9FF',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#4f8cff',
+    borderColor: '#2563EB',
   },
   viewPaymentButtonText: {
-    fontSize: 12,
-    color: '#4f8cff',
-    fontWeight: '500',
-    marginLeft: 4,
+    fontSize: 11,
+    color: '#2563EB',
+    marginLeft: 3,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
   },
+
   errorContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -3370,7 +5597,10 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginLeft: 8,
     flex: 1,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   successContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -3386,6 +5616,171 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginLeft: 8,
     flex: 1,
+
+    fontFamily: 'Roboto-Medium',
+  },
+
+  // No Plans Container Styles
+  noPlansContainer: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 32,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOpacity: 0.05,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
+    marginTop: 16,
+  },
+  noPlansTitle: {
+    fontSize: 20,
+    color: '#666',
+    marginTop: 16,
+    marginBottom: 8,
+    textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
+  },
+
+  noPlansSubtitle: {
+    fontSize: 14,
+    color: '#999',
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
+
+    fontFamily: 'Roboto-Medium',
+  },
+
+  contactSupportButton: {
+    backgroundColor: '#4f8cff',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    shadowColor: '#4f8cff',
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 4,
+  },
+  contactSupportText: {
+    color: '#fff',
+    fontSize: 16,
+    marginLeft: 8,
+
+    fontFamily: 'Roboto-Medium',
+  },
+
+  // Carousel styles
+  nextPlanHint: {
+    marginTop: 6,
+    fontSize: 12,
+    color: '#6b7280',
+
+    fontFamily: 'Roboto-Medium',
+  },
+  carouselContainer: {
+    marginTop: 8,
+    overflow: 'visible',
+    paddingBottom: 8,
+  },
+  carousel: {
+    overflow: 'visible',
+    flexGrow: 0,
+  },
+  slide: {
+    width: CARD_WIDTH,
+    marginLeft: 0,
+    marginRight: 0,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    paddingVertical: 16,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    minHeight: 280,
+  },
+  // Plan-specific background colors
+  freePlanCard: {
+    backgroundColor: '#F0F9FF', // Light blue
+    borderColor: '#BFDBFE',
+  },
+  starterPlanCard: {
+    backgroundColor: '#F0FDF4', // Light green
+    borderColor: '#BBF7D0',
+  },
+  professionalPlanCard: {
+    backgroundColor: '#FEF3C7', // Light yellow
+    borderColor: '#FDE68A',
+  },
+  enterprisePlanCard: {
+    backgroundColor: '#F3E8FF', // Light purple
+    borderColor: '#DDD6FE',
+  },
+  premiumPlanCard: {
+    backgroundColor: '#FEE2E2', // Light red
+    borderColor: '#FECACA',
+  },
+  basicPlanCard: {
+    backgroundColor: '#F1F5F9', // Light gray
+    borderColor: '#E2E8F0',
+  },
+  cardDivider: {
+    height: 1,
+    alignSelf: 'stretch',
+    backgroundColor: 'rgba(0, 0, 0, 0.1)',
+    marginTop: 6,
+    marginBottom: 10,
+  },
+  dotsRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 12,
+    gap: 6,
+    paddingHorizontal: 16,
+  },
+  dot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#D1D5DB',
+    marginHorizontal: 2,
+  },
+  dotActive: {
+    backgroundColor: '#2563EB',
+    width: 16,
+    borderRadius: 3,
+  },
+
+  // Recommended Upgrade Badge Styles
+  recommendedUpgradeBadge: {
+    position: 'absolute',
+    top: -8,
+    right: -8,
+    backgroundColor: '#ff6b35',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    shadowColor: '#ff6b35',
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 3,
+    zIndex: 10,
+  },
+  recommendedUpgradeText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+    marginLeft: 4,
+    fontFamily: 'Roboto-Bold',
   },
 });
 

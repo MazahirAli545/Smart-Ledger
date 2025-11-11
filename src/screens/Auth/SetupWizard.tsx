@@ -1,22 +1,12 @@
 import React, { useState } from 'react';
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  Alert,
-  SafeAreaView,
-} from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Alert, SafeAreaView } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import SetupWizardScreen from './SetupWizardScreen';
 import TeamSetupScreen from './TeamSetupScreen';
 import PreferencesScreen from './PreferencesScreen';
 import BankDetailsScreen from './BankDetailsScreen';
 import FinalStepScreen from './FinalStepScreen';
-import {
-  OnboardingProvider,
-  useOnboarding,
-} from '../../context/OnboardingContext';
+import { OnboardingProvider, useOnboarding } from '../../context/OnboardingContext'; 
 
 const steps = [
   { label: 'Business details', component: <SetupWizardScreen /> },
@@ -46,53 +36,57 @@ const SetupWizard: React.FC = () => {
 
   return (
     <OnboardingProvider>
-      <SafeAreaView style={styles.safeArea}>
-        <View style={{ flex: 1, backgroundColor: '#f6fafc' }}>
-          {/* Header and Progress */}
-          <View style={styles.headerContainer}>
-            <Text style={styles.headerTitle}>Smart Ledger</Text>
-            <View style={styles.badgeRow}>
-              <LinearGradient
-                colors={['#4f8cff', '#1ecb81']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-                style={styles.setupBadge}
-              >
-                <Text style={styles.setupBadgeText}>Setup Wizard</Text>
-              </LinearGradient>
-            </View>
+    <SafeAreaView style={styles.safeArea}>
+      <View style={{ flex: 1, backgroundColor: '#f6fafc' }}>
+        {/* Header and Progress */}
+        <View style={styles.headerContainer}>
+          <Text style={styles.headerTitle}>Smart Ledger</Text>
+          <View style={styles.badgeRow}>
+            <LinearGradient
+              colors={['#4f8cff', '#1ecb81']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.setupBadge}
+            >
+              <Text style={styles.setupBadgeText}>Setup Wizard</Text>
+            </LinearGradient>
           </View>
-          {/* Separator */}
-          <View style={styles.separator} />
-          {/* Step Content */}
-          <View style={{ flex: 1 }}>{steps[step].component}</View>
-          {/* Navigation Buttons for non-final steps */}
-          {step < steps.length - 1 && (
-            <View style={styles.buttonRow}>
-              <TouchableOpacity
-                style={[styles.prevButton, step === 0 && styles.disabledButton]}
-                onPress={handlePrev}
-                disabled={step === 0}
-              >
-                <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
-              </TouchableOpacity>
-              <LinearGradient
-                colors={['#4f8cff', '#1ecb81']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 0 }}
-                style={styles.gradientButton}
-              >
-                <TouchableOpacity
-                  style={styles.nextButton}
-                  onPress={handleNext}
-                >
-                  <Text style={styles.nextButtonText}>Next {'\u2192'}</Text>
-                </TouchableOpacity>
-              </LinearGradient>
-            </View>
-          )}
+          <View style={styles.progressRow}>
+            <Text style={styles.progressText}>{`Step ${step + 1} of ${TOTAL_STEPS}`}</Text>
+            <Text style={styles.progressTextRight}>{`${percent}% Complete`}</Text>
+          </View>
+          <View style={styles.progressBarBg}>
+            <View style={[styles.progressBarFill, { width: `${percent}%` }]} />
+          </View>
         </View>
-      </SafeAreaView>
+        {/* Separator */}
+        <View style={styles.separator} />
+        {/* Step Content */}
+        <View style={{ flex: 1 }}>{steps[step].component}</View>
+        {/* Navigation Buttons for non-final steps */}
+        {step < steps.length - 1 && (
+          <View style={styles.buttonRow}>
+            <TouchableOpacity
+              style={[styles.prevButton, step === 0 && styles.disabledButton]}
+              onPress={handlePrev}
+              disabled={step === 0}
+            >
+              <Text style={styles.prevButtonText}>{'\u2190'} Previous</Text>
+            </TouchableOpacity>
+            <LinearGradient
+              colors={['#4f8cff', '#1ecb81']}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+              style={styles.gradientButton}
+            >
+              <TouchableOpacity style={styles.nextButton} onPress={handleNext}>
+                <Text style={styles.nextButtonText}>Next {'\u2192'}</Text>
+              </TouchableOpacity>
+            </LinearGradient>
+          </View>
+        )}
+      </View>
+    </SafeAreaView>
     </OnboardingProvider>
   );
 };
@@ -141,7 +135,35 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     letterSpacing: 0.2,
   },
-
+  progressRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '90%',
+    marginBottom: 2,
+  },
+  progressText: {
+    color: '#222',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  progressTextRight: {
+    color: '#888',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  progressBarBg: {
+    height: 6,
+    backgroundColor: '#e3e7ee',
+    borderRadius: 4,
+    width: '90%',
+    marginBottom: 18,
+  },
+  progressBarFill: {
+    height: 6,
+    backgroundColor: '#222',
+    borderRadius: 4,
+  },
   separator: {
     height: 1,
     backgroundColor: '#e3e7ee',
@@ -194,4 +216,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default SetupWizard;
+export default SetupWizard; 

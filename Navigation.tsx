@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from 'react';
+// Initialize axios auth interceptor once at app start
+import './src/api/axiosConfig';
 import {
   View,
   Image,
@@ -7,6 +9,11 @@ import {
   ActivityIndicator,
   Text,
 } from 'react-native';
+import {
+  getStatusBarConfig,
+  applyStatusBarConfig,
+} from './src/utils/statusBarManager';
+import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import {
   NavigationContainer,
   createNavigationContainerRef,
@@ -18,7 +25,7 @@ import NetworkStatusModal from './src/components/NetworkStatusModal';
 import SignInScreen from './src/screens/Auth/SignInScreen';
 
 import Dashboard from './src/screens/HomeScreen/Dashboard';
-import InvoiceScreen from './src/screens/HomeScreen/InvoiceScreen';
+import InvoiceScreen from './src/screens/HomeScreen/InvoiceScreen_clean';
 import ReceiptScreen from './src/screens/HomeScreen/ReceiptScreen';
 import PaymentScreen from './src/screens/HomeScreen/PaymentScreen';
 import PurchaseScreen from './src/screens/HomeScreen/PurchaseScreen';
@@ -36,6 +43,8 @@ import CustomerDetailScreen from './src/screens/HomeScreen/CustomerDetailScreen'
 import AddNewEntryScreen from './src/screens/HomeScreen/AddNewEntryScreen';
 import SubscriptionPlanScreen from './src/screens/SubscriptionPlanScreen';
 import NotificationScreen from './src/screens/HomeScreen/NotificationScreen';
+import ReportsScreen from './src/screens/ReportsScreen';
+import LinkToCAScreen from './src/screens/LinkToCAScreen';
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from './src/context/AuthContext';
@@ -45,7 +54,16 @@ import GlobalNotificationWrapper from './src/components/GlobalNotificationWrappe
 import GlobalPlanExpiryWrapper from './src/components/GlobalPlanExpiryWrapper';
 import GlobalTransactionLimitWrapper from './src/components/GlobalTransactionLimitWrapper';
 import { TransactionLimitProvider } from './src/context/TransactionLimitContext';
+import { SubscriptionNotificationProvider } from './src/context/SubscriptionNotificationContext';
+import { PlanExpiryProvider } from './src/context/PlanExpiryContext';
 import SessionLogoutPopup from './src/components/SessionLogoutPopup';
+import { AlertProvider } from './src/context/AlertContext';
+import CustomAlert from './src/components/CustomAlert';
+import { VoucherProvider } from './src/context/VoucherContext';
+import { SubscriptionProvider } from './src/context/SubscriptionContext';
+import { NotificationProvider } from './src/context/NotificationContext';
+import { CustomerProvider } from './src/context/CustomerContext';
+import { SupplierProvider } from './src/context/SupplierContext';
 
 import SignInOtpScreen from './src/screens/Auth/SignInOtpScreen';
 
@@ -57,6 +75,8 @@ export const navigationRef = createNavigationContainerRef();
 
 export const ROOT_STACK_AUTH = 'Auth';
 export const ROOT_STACK_APP = 'App';
+
+// StatusBar configuration is now handled by statusBarManager
 
 const SplashScreen: React.FC<{ onFinish: (isLoggedIn: boolean) => void }> = ({
   onFinish,
@@ -236,7 +256,14 @@ const AppStack = () => {
             <Stack.Screen name="Payment" component={PaymentScreen} />
             <Stack.Screen name="Purchase" component={PurchaseScreen} />
             <Stack.Screen name="AddFolder" component={AddFolderScreen} />
-            <Stack.Screen name="FolderScreen" component={FolderScreen} />
+            {/**
+             * Type-narrow the component to satisfy React Navigation generic typing,
+             * since our screen component uses specific props from the stack.
+             */}
+            <Stack.Screen
+              name="FolderScreen"
+              component={FolderScreen as unknown as React.ComponentType<any>}
+            />
             <Stack.Screen name="ProfileScreen" component={ProfileScreen} />
             <Stack.Screen name="Customer" component={CustomerScreen} />
             <Stack.Screen
@@ -261,6 +288,8 @@ const AppStack = () => {
               component={SubscriptionPlanScreen}
             />
             <Stack.Screen name="Notifications" component={NotificationScreen} />
+            <Stack.Screen name="Report" component={ReportsScreen} />
+            <Stack.Screen name="LinkToCA" component={LinkToCAScreen} />
           </Stack.Navigator>
         </GlobalTransactionLimitWrapper>
       </GlobalPlanExpiryWrapper>
@@ -270,7 +299,11 @@ const AppStack = () => {
 
 const AppDrawer = () => (
   <Drawer.Navigator
-    screenOptions={{ headerShown: false }}
+    screenOptions={{
+      headerShown: false,
+      drawerStyle: { width: '100%' },
+      overlayColor: 'rgba(0,0,0,0.35)',
+    }}
     drawerContent={props => <CustomDrawerContent {...props} />}
   >
     <Drawer.Screen
@@ -293,6 +326,18 @@ const RootNavigator = () => {
     handleSessionLogoutConfirm,
   } = useAuth();
 
+  // Initialize with a safe default; avoid touching navigationRef before it's ready
+  const [statusBarConfig, setStatusBarConfig] = useState(() =>
+    getStatusBarConfig(undefined),
+  );
+
+  const updateStatusBarForCurrentRoute = () => {
+    const routeName = navigationRef.getCurrentRoute()?.name;
+    const config = getStatusBarConfig(routeName);
+    setStatusBarConfig(config);
+    applyStatusBarConfig(config);
+  };
+
   console.log('🔍 RootNavigator - Auth state:', {
     isAuthenticated,
     loading,
@@ -311,7 +356,17 @@ const RootNavigator = () => {
     isAuthenticated ? 'App' : 'Auth',
   );
   return (
-    <NavigationContainer ref={navigationRef}>
+    <NavigationContainer
+      ref={navigationRef}
+      onReady={updateStatusBarForCurrentRoute}
+      onStateChange={updateStatusBarForCurrentRoute}
+    >
+      <StatusBar
+        backgroundColor={statusBarConfig.backgroundColor}
+        barStyle={statusBarConfig.barStyle}
+        translucent={!!statusBarConfig.translucent}
+        animated
+      />
       <RootStack.Navigator screenOptions={{ headerShown: false }}>
         {!isAuthenticated ? (
           <RootStack.Screen name={ROOT_STACK_AUTH} component={AuthStack} />
@@ -348,11 +403,29 @@ const Navigation: React.FC = () => {
   }
 
   return (
-    <AuthProvider>
-      <TransactionLimitProvider>
-        <RootNavigator />
-      </TransactionLimitProvider>
-    </AuthProvider>
+    <AlertProvider>
+      <AuthProvider>
+        <NotificationProvider>
+          <CustomerProvider>
+            <SupplierProvider>
+              <VoucherProvider>
+                <SubscriptionProvider>
+                  <TransactionLimitProvider>
+                    <SubscriptionNotificationProvider>
+                      <PlanExpiryProvider>
+                        <RootNavigator />
+                        {/* Global Alert Component */}
+                        <CustomAlert />
+                      </PlanExpiryProvider>
+                    </SubscriptionNotificationProvider>
+                  </TransactionLimitProvider>
+                </SubscriptionProvider>
+              </VoucherProvider>
+            </SupplierProvider>
+          </CustomerProvider>
+        </NotificationProvider>
+      </AuthProvider>
+    </AlertProvider>
   );
 };
 

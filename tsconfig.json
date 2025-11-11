@@ -1,7 +1,3 @@
 {
-  "extends": "@react-native/typescript-config",
-  "compilerOptions": {
-    "jsx": "react-native",
-    "esModuleInterop": true
-  }
+  "extends": "@react-native/typescript-config"
 }

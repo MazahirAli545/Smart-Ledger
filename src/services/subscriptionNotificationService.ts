@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { BASE_URL } from '../api';
+import { unifiedApi } from '../api/unifiedApiService';
 import { Platform } from 'react-native';
 
 export interface SubscriptionData {
@@ -128,26 +128,44 @@ class SubscriptionNotificationService {
     accessToken: string,
   ): Promise<SubscriptionData | null> {
     try {
-      const response = await fetch(`${BASE_URL}/subscriptions/my`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${accessToken}`,
-        },
-      });
+      // Backend endpoint is /subscriptions/current, not /subscriptions/my
+      // The backend uses @CurrentUser() decorator to get user from JWT token
+      // No need to pass userId as parameter - backend extracts it from token
+      console.log(
+        '🔍 SubscriptionNotificationService: Fetching subscription from /subscriptions/current',
+      );
 
-      if (!response.ok) {
-        console.log('❌ Failed to fetch subscription data:', response.status);
+      const result = await unifiedApi.get('/subscriptions/current');
+      const resultData = (result as any)?.data ?? result ?? {};
+
+      // Backend returns { success: true, data: subscription } or { success: false, message: ... }
+      if ((resultData as any).success && (resultData as any).data) {
+        return (resultData as any).data;
+      }
+
+      // Also check if data is directly in result (backward compatibility)
+      if (
+        resultData &&
+        typeof resultData === 'object' &&
+        (resultData as any).id
+      ) {
+        return resultData as SubscriptionData;
+      }
+
+      // If success is false, log the message but don't throw
+      if ((resultData as any).success === false) {
+        console.warn('⚠️ No subscription found:', (resultData as any).message);
         return null;
       }
 
-      const result = await response.json();
-      if (result.success && result.data) {
-        return result.data;
-      }
-
       return null;
-    } catch (error) {
+    } catch (error: any) {
+      // Handle ApiError specifically
+      if (error?.message?.includes('Validation failed')) {
+        console.warn(
+          '⚠️ Subscription validation error - this should not happen with /subscriptions/current',
+        );
+      }
       console.error('❌ Error fetching subscription data:', error);
       return null;
     }

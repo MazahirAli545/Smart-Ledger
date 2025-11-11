@@ -22,7 +22,7 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import DocumentPicker from '@react-native-documents/picker';
 import AudioRecorderPlayer from 'react-native-audio-recorder-player';
 import { wordsToNumbers } from 'words-to-numbers';
-import { BASE_URL } from '../api';
+import { unifiedApi } from '../api/unifiedApiService';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const categories = [
@@ -160,16 +160,9 @@ export default function EntryForm({ onEntryAdded }: EntryFormProps) {
       // formData.append('languageCode', 'hi-IN'); // If your API expects this, uncomment
       const token = await AsyncStorage.getItem('accessToken');
       if (!token) throw new Error('Not authenticated');
-      const url = `${BASE_URL}/api/whisper/transcribe`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-        body: formData,
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Speech recognition failed');
+      // Use unified API - Note: unifiedApi.post handles FormData automatically
+      const data = await unifiedApi.post('/api/whisper/transcribe', formData);
+      if (!data || data.error) throw new Error(data?.message || data?.error || 'Speech recognition failed');
       if (data.amount) setAmount(data.amount);
       if (data.type) setType(data.type);
       if (data.category) setCategory(data.category);
@@ -227,29 +220,24 @@ export default function EntryForm({ onEntryAdded }: EntryFormProps) {
   const handleSubmit = async () => {
     setError('');
     setSuccess('');
-    // Replace with your auth logic
-    const token = 'your_token_here'; // Use SecureStore or Context in real app
-    if (!token) {
-      setError('Not authenticated');
-      return;
-    }
     try {
-      const res = await fetch('https://utility-apis.vercel.app/openai-speech', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: token,
-        },
-        body: JSON.stringify({
-          type,
-          category,
-          amount,
-          description,
-          date: date.toISOString().slice(0, 10),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Entry failed');
+      const token = await AsyncStorage.getItem('accessToken');
+      if (!token) throw new Error('Not authenticated');
+
+      // Map local form values to backend DTO
+      const payload: any = {
+        customerId: undefined, // optionally set
+        type: type === 'income' ? 'RECEIPT' : 'PAYMENT',
+        amount: Number(amount) || 0,
+        description,
+        category,
+        documentDate: date.toISOString().slice(0, 10),
+      };
+
+      // Use unified API
+      const data = await unifiedApi.post('/transactions', payload);
+      if (!data || data.error)
+        throw new Error(data?.message || data?.error || 'Failed to create transaction');
       setSuccess('Entry added!');
       setAmount('');
       setDescription('');
@@ -297,7 +285,7 @@ export default function EntryForm({ onEntryAdded }: EntryFormProps) {
           onPress={isRecording ? stopRecording : startRecording}
           style={styles.voiceBtn}
         >
-          <Text>{isRecording ? '⏹️ Stop' : '🎤 Voice'}</Text>
+          <Text  style={{ fontFamily: 'Roboto-Medium',  }}>{isRecording ? '⏹️ Stop' : '🎤 Voice'}</Text>
         </TouchableOpacity>
         <Picker
           selectedValue={provider}
@@ -308,14 +296,14 @@ export default function EntryForm({ onEntryAdded }: EntryFormProps) {
           <Picker.Item label="Whisper" value="whisper" />
         </Picker>
         <TouchableOpacity onPress={handleFileUpload} style={styles.voiceBtn}>
-          <Text>Upload Audio</Text>
+          <Text  style={{ fontFamily: 'Roboto-Medium',  }}>Upload Audio</Text>
         </TouchableOpacity>
       </View>
       <TouchableOpacity
         onPress={() => setShowDatePicker(true)}
         style={styles.input}
       >
-        <Text>{date.toISOString().slice(0, 10)}</Text>
+        <Text  style={{ fontFamily: 'Roboto-Medium',  }}>{date.toISOString().slice(0, 10)}</Text>
       </TouchableOpacity>
       {showDatePicker && (
         <DateTimePicker
@@ -334,10 +322,11 @@ export default function EntryForm({ onEntryAdded }: EntryFormProps) {
       {success ? <Text style={styles.success}>{success}</Text> : null}
       {text ? (
         <View style={styles.translated}>
-          <Text style={{ fontWeight: 'bold' }}>
+          <Text style={{ fontFamily: 'Roboto-Medium',
+  }}>
             📝 Translated Text (English):
           </Text>
-          <Text>{text}</Text>
+          <Text  style={{ fontFamily: 'Roboto-Medium',  }}>{text}</Text>
         </View>
       ) : null}
     </View>
@@ -354,7 +343,11 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     elevation: 2,
   },
-  title: { fontSize: 22, fontWeight: 'bold', marginBottom: 12 },
+  title: { fontSize: 22, marginBottom: '12', 
+    fontFamily: 'Roboto-Medium',
+ 
+  },
+
   input: {
     borderWidth: 1,
     borderColor: '#ccc',
@@ -372,8 +365,12 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     marginLeft: 6,
   },
-  error: { color: 'red', marginTop: 8 },
-  success: { color: 'green', marginTop: 8 },
+  error: { color: 'red', marginTop: 8
+    fontFamily: 'Roboto-Medium',
+  },
+  success: { color: 'green', marginTop: 8
+    fontFamily: 'Roboto-Medium',
+  },
   translated: {
     marginTop: 16,
     backgroundColor: '#f0f0f0',

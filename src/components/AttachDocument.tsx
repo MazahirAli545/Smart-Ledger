@@ -19,7 +19,7 @@ import {
   isErrorWithCode,
   errorCodes,
 } from '@react-native-documents/picker';
-import { useAlert } from '../context/AlertContext';
+import { useAlert } from '../contexts/AlertContext';
 
 interface AttachedDocument {
   name: string;
@@ -314,7 +314,7 @@ const AttachDocument: React.FC<AttachDocumentProps> = ({
         >
           <MaterialCommunityIcons
             name="cloud-upload"
-            size={28}
+            size={36}
             color="#4f8cff"
           />
           <Text style={styles.attachDocumentText}>Click to upload</Text>
@@ -442,16 +442,20 @@ const AttachDocument: React.FC<AttachDocumentProps> = ({
 
 const styles = StyleSheet.create({
   inputContainer: {
-    marginBottom: 16,
+    marginBottom: 18,
   },
   inputLabel: {
-    fontSize: 14,
+    fontSize: 16,
     color: '#333',
     marginBottom: 8,
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   required: {
     color: '#dc3545',
+
+    fontFamily: 'Roboto-Medium',
   },
   attachedDocumentContainer: {
     flexDirection: 'row',
@@ -476,13 +480,18 @@ const styles = StyleSheet.create({
   documentName: {
     fontSize: 14,
     color: '#333',
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   documentSize: {
     fontSize: 12,
     color: '#666',
     marginTop: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   removeDocumentButton: {
     padding: 8,
   },
@@ -508,15 +517,21 @@ const styles = StyleSheet.create({
     backgroundColor: '#eaeaea',
   },
   attachDocumentText: {
-    fontSize: 14,
+    fontSize: 16,
     color: '#4f8cff',
     marginTop: 8,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   attachDocumentSubtext: {
-    fontSize: 12,
+    fontSize: 14,
     color: '#999',
     marginTop: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   modalOverlay: {
     flex: 1,
     justifyContent: 'center',
@@ -539,9 +554,11 @@ const styles = StyleSheet.create({
   },
   modalTitle: {
     fontSize: 20,
-    fontWeight: '600',
     color: '#333',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   modalCloseButton: {
     padding: 5,
   },
@@ -568,15 +585,20 @@ const styles = StyleSheet.create({
   },
   optionTitle: {
     fontSize: 14,
-    fontWeight: '500',
     color: '#333',
     textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   optionSubtitle: {
     fontSize: 12,
     color: '#999',
     textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   modalCancelButton: {
     backgroundColor: '#f0f0f0',
     paddingVertical: 12,
@@ -586,8 +608,10 @@ const styles = StyleSheet.create({
   modalCancelButtonText: {
     color: '#333',
     fontSize: 16,
-    fontWeight: '600',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   optionIconContainerGallery: {
     backgroundColor: '#e0f7e0',
   },
@@ -606,10 +630,12 @@ const styles = StyleSheet.create({
   },
   previewSectionTitle: {
     fontSize: 16,
-    fontWeight: '600',
     color: '#333',
     marginBottom: 10,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   previewDocumentInfo: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -621,12 +647,16 @@ const styles = StyleSheet.create({
   previewDocumentName: {
     fontSize: 14,
     color: '#333',
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   previewDocumentSize: {
     fontSize: 12,
     color: '#666',
     marginTop: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
 });
 

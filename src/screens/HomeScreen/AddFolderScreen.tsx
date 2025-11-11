@@ -19,7 +19,7 @@ import type { StackNavigationProp } from '@react-navigation/stack';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import axios from 'axios';
-import { BASE_URL } from '../../api';
+import { unifiedApi } from '../../api/unifiedApiService';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getUserIdFromToken } from '../../utils/storage';
 import { useSubscription } from '../../context/SubscriptionContext';
@@ -123,12 +123,18 @@ const AddFolderScreen: React.FC = () => {
   const fetchExistingFolders = async (isRefresh = false) => {
     try {
       const accessToken = await AsyncStorage.getItem('accessToken');
-      const response = await axios.get(`${BASE_URL}/menus`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
+      // Use unified API with caching
+      const response = (await unifiedApi.get('/menus')) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
 
       // Filter for user's custom folders (excluding default system folders)
-      const userFolders = response.data.filter(
+      const responseData = response?.data ?? response ?? [];
+      const userFolders = (
+        Array.isArray(responseData) ? responseData : []
+      ).filter(
         (item: any) =>
           item.parentId === null &&
           item.isCustom === true &&
@@ -165,11 +171,13 @@ const AddFolderScreen: React.FC = () => {
         return;
       }
 
-      const response = await axios.get(`${BASE_URL}/user/${userId}`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-
-      const userData = response.data.data;
+      // Use unified API with caching
+      const response = (await unifiedApi.getUserProfile()) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
+      const userData = response?.data ?? response ?? {};
       const planType = userData?.planType?.toLowerCase() || 'free';
 
       // Update global cache
@@ -301,22 +309,14 @@ const AddFolderScreen: React.FC = () => {
       };
 
       console.log('📤 Making API call to create folder:', {
-        url: `${BASE_URL}/menus`,
+        url: '/menus',
         body: body,
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
       });
 
-      const response = await axios.post(`${BASE_URL}/menus`, body, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-      });
+      // Use unified API for create
+      const response = await unifiedApi.post('/menus', body);
 
-      console.log('✅ Folder created successfully:', response.data);
+      console.log('✅ Folder created successfully:', response);
       setSaving(false);
 
       // Show real Firebase notification
@@ -618,10 +618,12 @@ const styles = StyleSheet.create({
   headerTitle: {
     flex: 1,
     fontSize: 20,
-    fontWeight: 'bold',
     color: '#222',
     textAlign: 'center',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   topSpacing: {
     height: 20,
   },
@@ -647,8 +649,10 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: '#666',
     marginBottom: 8,
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   input: {
     width: '100%',
     height: 48,
@@ -660,7 +664,10 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#222',
     marginBottom: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   inputActive: {
     borderColor: '#4f8cff',
     backgroundColor: '#f0f6ff',
@@ -673,8 +680,10 @@ const styles = StyleSheet.create({
     fontSize: 13,
     marginTop: 2,
     marginBottom: 2,
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   typeRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -699,15 +708,21 @@ const styles = StyleSheet.create({
   },
   typeButtonText: {
     color: '#222',
-    fontWeight: 'bold',
     fontSize: 15,
     marginTop: 2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   typeButtonTextSelected: {
     color: '#fff',
+
+    fontFamily: 'Roboto-Medium',
   },
   typeButtonTextDisabled: {
     color: '#ccc',
+
+    fontFamily: 'Roboto-Medium',
   },
   typeButtonDisabled: {
     backgroundColor: '#e0e0e0',
@@ -759,16 +774,20 @@ const styles = StyleSheet.create({
   upgradeTitle: {
     fontSize: 17,
     color: '#d84315',
-    fontWeight: '800',
     marginBottom: 3,
     letterSpacing: 0.2,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   upgradeSubtitle: {
     fontSize: 14,
     color: '#e65100',
-    fontWeight: '600',
     lineHeight: 18,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   upgradeButton: {
     backgroundColor: '#ff6b35',
     borderRadius: 20,
@@ -785,8 +804,10 @@ const styles = StyleSheet.create({
   upgradeButtonText: {
     color: '#fff',
     fontSize: 14,
-    fontWeight: '700',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   upgradeButtonEnhanced: {
     backgroundColor: '#ff6b35',
     borderRadius: 26,
@@ -805,9 +826,11 @@ const styles = StyleSheet.create({
   upgradeButtonTextEnhanced: {
     color: '#fff',
     fontSize: 16,
-    fontWeight: '800',
     letterSpacing: 0.3,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   lockIcon: {
     position: 'absolute',
     bottom: -5,
@@ -830,8 +853,10 @@ const styles = StyleSheet.create({
     marginLeft: 8,
     fontSize: 13,
     color: '#f59e0b',
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   limitWarning: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -849,7 +874,8 @@ const styles = StyleSheet.create({
     marginLeft: 8,
     fontSize: 13,
     color: '#f59e0b',
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
 
   saveButton: {
@@ -863,9 +889,11 @@ const styles = StyleSheet.create({
   },
   saveButtonText: {
     color: '#fff',
-    fontWeight: 'bold',
     fontSize: 16,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   modalOverlay: {
     flex: 1,
     justifyContent: 'center',
@@ -885,16 +913,21 @@ const styles = StyleSheet.create({
   },
   modalTitle: {
     fontSize: 22,
-    fontWeight: 'bold',
     color: '#222',
     marginBottom: 10,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   modalDescription: {
     fontSize: 15,
     color: '#666',
     textAlign: 'center',
     marginBottom: 20,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   featureList: {
     width: '100%',
     marginBottom: 25,
@@ -909,8 +942,10 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#333',
     marginLeft: 10,
-    fontWeight: '500',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   modalButtons: {
     flexDirection: 'row',
     justifyContent: 'space-around',
@@ -925,8 +960,10 @@ const styles = StyleSheet.create({
   modalCancelButtonText: {
     color: '#222',
     fontSize: 16,
-    fontWeight: 'bold',
+
+    fontFamily: 'Roboto-Medium',
   },
+
   modalUpgradeButton: {
     backgroundColor: '#4f8cff',
     borderRadius: 8,
@@ -936,7 +973,8 @@ const styles = StyleSheet.create({
   modalUpgradeButtonText: {
     color: '#fff',
     fontSize: 16,
-    fontWeight: 'bold',
+
+    fontFamily: 'Roboto-Medium',
   },
 });
 

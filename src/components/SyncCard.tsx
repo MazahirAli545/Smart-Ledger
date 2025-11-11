@@ -62,15 +62,19 @@ const styles = StyleSheet.create({
   },
   statusText: {
     color: '#28a745',
-    fontWeight: 'bold',
     fontSize: 16,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   amountText: {
     fontSize: 22,
-    fontWeight: 'bold',
     color: '#222',
     marginBottom: 4,
+
+    fontFamily: 'Roboto-Medium',
   },
+
   syncButton: {
     marginTop: 10,
     backgroundColor: '#4f8cff',
@@ -83,9 +87,10 @@ const styles = StyleSheet.create({
   },
   syncButtonText: {
     color: '#fff',
-    fontWeight: 'bold',
     fontSize: 18,
     letterSpacing: 1,
+
+    fontFamily: 'Roboto-Medium',
   },
 });
 
