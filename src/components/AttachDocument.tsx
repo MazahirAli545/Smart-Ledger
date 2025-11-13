@@ -19,7 +19,7 @@ import {
   isErrorWithCode,
   errorCodes,
 } from '@react-native-documents/picker';
-import { useAlert } from '../contexts/AlertContext';
+import { useAlert } from '../context/AlertContext';
 
 interface AttachedDocument {
   name: string;

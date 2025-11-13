@@ -40,10 +40,6 @@ import {
   fetchYearlySummary,
   createNewReport,
   fetchAllReports,
-  generateReportById,
-  deleteReportById,
-  fetchCustomerLedgerById,
-  fetchSupplierLedgerById,
   Report,
   ReportFilters,
   ReportResponse,
@@ -397,11 +393,11 @@ export class ApiService {
   }
 
   async generateReportById(id: number): Promise<Report> {
-    return generateReportById(id);
+    return generateReport(id);
   }
 
   async deleteReportById(id: number): Promise<void> {
-    return deleteReportById(id);
+    return deleteReport(id);
   }
 
   async getCustomerLedgerById(
@@ -409,7 +405,7 @@ export class ApiService {
     startDate?: string,
     endDate?: string,
   ): Promise<CustomerLedger> {
-    return fetchCustomerLedgerById(customerId, startDate, endDate);
+    return fetchCustomerLedger(customerId, startDate, endDate);
   }
 
   async getSupplierLedgerById(
@@ -417,7 +413,7 @@ export class ApiService {
     startDate?: string,
     endDate?: string,
   ): Promise<CustomerLedger> {
-    return fetchSupplierLedgerById(supplierId, startDate, endDate);
+    return fetchSupplierLedger(supplierId, startDate, endDate);
   }
 
   // ========================================

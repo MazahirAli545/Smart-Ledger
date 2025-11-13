@@ -1,4 +1,5 @@
 import messaging from '@react-native-firebase/messaging';
+import app from '@react-native-firebase/app';
 import notifee, {
   AndroidImportance,
   AndroidStyle,
@@ -28,6 +29,34 @@ export interface NotificationSettings {
 class ProperSystemNotificationService {
   private static instance: ProperSystemNotificationService;
   private fcmToken: string | null = null;
+
+  /**
+   * Check if Firebase is initialized
+   */
+  private isFirebaseInitialized(): boolean {
+    try {
+      // React Native Firebase auto-initializes from google-services.json
+      // Try to access the default app - if it throws, Firebase isn't initialized
+      const apps = app.apps;
+      const defaultApp = apps.find((a: any) => a.name === '[DEFAULT]');
+      return defaultApp !== null && defaultApp !== undefined;
+    } catch (error) {
+      // If accessing apps throws, Firebase isn't initialized
+      return false;
+    }
+  }
+
+  /**
+   * Safely get messaging instance
+   */
+  private getMessaging() {
+    if (!this.isFirebaseInitialized()) {
+      throw new Error(
+        'Firebase is not initialized. Please ensure google-services.json is properly configured.',
+      );
+    }
+    return messaging();
+  }
   private notificationSettings: NotificationSettings = {
     enabled: true,
     invoiceNotifications: true,
@@ -91,13 +120,22 @@ class ProperSystemNotificationService {
 
       // Do not short-circuit on NOT_DETERMINED; we'll request permission below
       try {
-        const currentStatus = await messaging().hasPermission();
+        if (!this.isFirebaseInitialized()) {
+          console.warn(
+            '⚠️ Firebase not initialized, skipping permission check',
+          );
+          return false;
+        }
+        const currentStatus = await this.getMessaging().hasPermission();
         if (currentStatus === messaging.AuthorizationStatus.DENIED) {
           console.log('⚠️ Notifications currently denied by user');
           await AsyncStorage.setItem('notificationsNeverAsk', 'true');
           return false;
         }
-      } catch {}
+      } catch (error) {
+        console.warn('⚠️ Error checking notification permission:', error);
+        return false;
+      }
 
       // Request permission for iOS (skip if previously granted)
       if (Platform.OS === 'ios') {
@@ -105,7 +143,7 @@ class ProperSystemNotificationService {
         const authStatus =
           grantedFlag === 'true'
             ? messaging.AuthorizationStatus.AUTHORIZED
-            : await messaging().requestPermission();
+            : await this.getMessaging().requestPermission();
         const enabled =
           authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
           authStatus === messaging.AuthorizationStatus.PROVISIONAL;
@@ -157,8 +195,8 @@ class ProperSystemNotificationService {
         }
         // Also request Firebase messaging permission to ensure tokens are issued
         const grantedFlag = await AsyncStorage.getItem('notificationsGranted');
-        if (grantedFlag !== 'true') {
-          await messaging().requestPermission();
+        if (grantedFlag !== 'true' && this.isFirebaseInitialized()) {
+          await this.getMessaging().requestPermission();
         }
       }
 
@@ -241,14 +279,20 @@ class ProperSystemNotificationService {
 
       console.log('🔑 Getting FCM token...');
 
+      // Check if Firebase is initialized
+      if (!this.isFirebaseInitialized()) {
+        console.warn('⚠️ Firebase not initialized, cannot get FCM token');
+        return null;
+      }
+
       // Check if we have permission first
-      const authStatus = await messaging().hasPermission();
+      const authStatus = await this.getMessaging().hasPermission();
       if (authStatus === messaging.AuthorizationStatus.DENIED) {
         console.log('❌ Notification permission denied');
         return null;
       }
 
-      const token = await messaging().getToken();
+      const token = await this.getMessaging().getToken();
       if (token) {
         this.fcmToken = token;
         await AsyncStorage.setItem('fcmToken', token);
@@ -331,8 +375,18 @@ class ProperSystemNotificationService {
   private setupMessageHandlers(): void {
     console.log('🔧 Setting up proper system message handlers...');
 
+    // Check if Firebase is initialized before setting up handlers
+    if (!this.isFirebaseInitialized()) {
+      console.warn(
+        '⚠️ Firebase not initialized, cannot set up message handlers',
+      );
+      return;
+    }
+
+    const msg = this.getMessaging();
+
     // Handle foreground messages - show as system notifications
-    messaging().onMessage(async remoteMessage => {
+    msg.onMessage(async remoteMessage => {
       console.log('📱 Foreground message received:', remoteMessage);
 
       if (this.notificationSettings.enabled) {
@@ -342,7 +396,7 @@ class ProperSystemNotificationService {
     });
 
     // Handle FCM token refresh
-    messaging().onTokenRefresh(async token => {
+    msg.onTokenRefresh(async (token: string) => {
       try {
         console.log('🔄 FCM token refreshed');
         this.fcmToken = token;
@@ -354,19 +408,19 @@ class ProperSystemNotificationService {
     });
 
     // Handle background messages
-    messaging().setBackgroundMessageHandler(async remoteMessage => {
+    msg.setBackgroundMessageHandler(async remoteMessage => {
       console.log('📱 Background message received:', remoteMessage);
       this.handleBackgroundNotification(remoteMessage);
     });
 
     // Handle notification open
-    messaging().onNotificationOpenedApp(remoteMessage => {
+    msg.onNotificationOpenedApp(remoteMessage => {
       console.log('📱 Notification opened app:', remoteMessage);
       this.handleNotificationOpen(remoteMessage);
     });
 
     // Handle initial notification (app opened from notification)
-    messaging()
+    msg
       .getInitialNotification()
       .then(remoteMessage => {
         if (remoteMessage) {
@@ -543,7 +597,11 @@ class ProperSystemNotificationService {
    */
   public async refreshFCMToken(): Promise<string | null> {
     try {
-      const token = await messaging().getToken();
+      if (!this.isFirebaseInitialized()) {
+        console.warn('⚠️ Firebase not initialized, cannot refresh FCM token');
+        return null;
+      }
+      const token = await this.getMessaging().getToken();
       if (token) {
         this.fcmToken = token;
         await AsyncStorage.setItem('fcmToken', token);

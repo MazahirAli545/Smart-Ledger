@@ -1,9 +1,4 @@
 import axios from 'axios';
-<<<<<<< Updated upstream
-import { useState } from 'react';
-
-export const BASE_URL = 'https://utility-apis.vercel.app';
-=======
 import { Platform } from 'react-native';
 import {
   getBaseUrl,
@@ -38,7 +33,6 @@ export const checkApiConnectivity = async () => {
 export const getApiHeaders = () => ({
   'Content-Type': 'application/json',
 });
->>>>>>> Stashed changes
 
 export interface RegisterPayload {
   businessName: string;
@@ -49,7 +43,6 @@ export interface RegisterPayload {
 }
 
 export async function registerUser(payload: RegisterPayload) {
-<<<<<<< Updated upstream
   try {
     const response = await axios.post(`${BASE_URL}/user/register`, payload);
     console.log('Register API response:', response);
@@ -63,22 +56,9 @@ export async function registerUser(payload: RegisterPayload) {
   }
 }
 
-export async function sendOtpApi(payload: RegisterPayload) {
-  try {
-    const response = await axios.post(`${BASE_URL}/user/register-init`, payload);
-    return response.data;
-  } catch (error: any) {
-    throw error.response?.data || error.message || 'Failed to send OTP';
-  }
-=======
-  throw new Error(
-    'Registration is handled via /auth/send-otp and /auth/verify-otp',
-  );
-}
-
+// Deprecated - Use sendOtp from auth endpoints instead
 export async function sendOtpApi() {
   throw new Error('Use /auth/send-otp');
->>>>>>> Stashed changes
 }
 
 // export async function verifyOtpApi({ mobileNumber, otp }: { mobileNumber: string; otp: string }) {
@@ -90,19 +70,10 @@ export async function sendOtpApi() {
 //     throw error.response?.data || error.message || 'Failed to verify OTP';
 //   }
 // }
-<<<<<<< Updated upstream
-export async function verifyOtpApi({ mobileNumber, otp }: { mobileNumber: string; otp: string }) {
-  try {
-    const response = await axios.post(`${BASE_URL}/user/verify-otp`, { mobileNumber, otp });
-    // Return the entire response data and let the component handle it
-    return response.data;
-  } catch (error: any) {
-    throw error.response?.data || error.message || 'Failed to verify OTP';
-  }
-=======
+
+// Deprecated - Use verifyOtp from auth endpoints instead
 export async function verifyOtpApi() {
   throw new Error('Use /auth/verify-otp');
->>>>>>> Stashed changes
 }
 
 // const handleResendOtp = () => {
@@ -111,23 +82,14 @@ export async function verifyOtpApi() {
 //   setBackendOtp(null);
 // };
 
-// OTP from backend: <the_otp_value> 
+// OTP from backend: <the_otp_value>
 
-// const [backendOtp, setBackendOtp] = useState<string | null>(null); 
+// const [backendOtp, setBackendOtp] = useState<string | null>(null);
 
 // const response = await sendOtpApi(payload);
-// setBackendOtp(response?.data?.otp || null); 
+// setBackendOtp(response?.data?.otp || null);
 
-<<<<<<< Updated upstream
-export async function onboardingUser(payload: any) {
-  try {
-    const response = await axios.post(`${BASE_URL}/user/onboarding`, payload);
-    return response.data;
-  } catch (error: any) {
-    throw error.response?.data || error.message || 'Failed to complete onboarding';
-  }
-} 
-=======
+// Deprecated - Onboarding endpoint is not available
 export async function onboardingUser() {
   throw new Error('Onboarding endpoint is not available');
 }
@@ -382,4 +344,3 @@ export {
 
 // Export updated customer function
 export { fetchCustomersOnly } from './customers';
->>>>>>> Stashed changes

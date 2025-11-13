@@ -384,7 +384,12 @@ const SignInOtpScreen = () => {
             try {
               const proper = ProperSystemNotificationService.getInstance();
               await proper.initializeNotifications();
-              const fcmToken = await messaging().getToken();
+              // Get FCM token - initializeNotifications() should have fetched it,
+              // but refresh if needed to ensure we have it
+              let fcmToken = proper.getCurrentFCMToken();
+              if (!fcmToken) {
+                fcmToken = await proper.refreshFCMToken();
+              }
               if (fcmToken) {
                 console.log(
                   '🔔 Registering FCM token for new user:',
@@ -497,7 +502,12 @@ const SignInOtpScreen = () => {
             try {
               const proper = ProperSystemNotificationService.getInstance();
               await proper.initializeNotifications();
-              const fcmToken = await messaging().getToken();
+              // Get FCM token - initializeNotifications() should have fetched it,
+              // but refresh if needed to ensure we have it
+              let fcmToken = proper.getCurrentFCMToken();
+              if (!fcmToken) {
+                fcmToken = await proper.refreshFCMToken();
+              }
               if (fcmToken) {
                 console.log(
                   '🔔 Registering FCM token for existing user:',

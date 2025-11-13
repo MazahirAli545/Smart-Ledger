@@ -14,12 +14,27 @@ const config = {
         keep_fnames: true,
       },
     },
+    getTransformOptions: async () => ({
+      transform: {
+        experimentalImportSupport: false,
+        inlineRequires: true,
+      },
+    }),
   },
   resolver: {
     // Reduce bundle size by excluding unnecessary files
-    blacklistRE:
-      /(.*\/__tests__\/.*|.*\/.*\.test\..*|.*\/.*\.spec\..*|.*\/.*\.stories\..*|.*\/.*\.example\..*|.*\/.*\.d\.ts)$/,
+    // But don't exclude .ts files from node_modules (needed for reanimated)
+    blockList: [
+      /.*\/__tests__\/.*/,
+      /.*\/.*\.test\..*/,
+      /.*\/.*\.spec\..*/,
+      /.*\/.*\.stories\..*/,
+      /.*\/.*\.example\..*/,
+    ],
+    // Ensure react-native-reanimated is properly resolved
+    sourceExts: ['jsx', 'js', 'ts', 'tsx', 'json'],
   },
+  watchFolders: [__dirname],
 };
 
 module.exports = mergeConfig(getDefaultConfig(__dirname), config);

@@ -9,23 +9,18 @@ import {
   SafeAreaView,
   Alert,
   Dimensions,
-<<<<<<< Updated upstream
-=======
   Modal,
   RefreshControl,
   Platform,
   StatusBar,
->>>>>>> Stashed changes
 } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
+import { DrawerActions } from '@react-navigation/native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { unifiedApi } from '../../api/unifiedApiService';
 import { BASE_URL } from '../../api';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-<<<<<<< Updated upstream
-import { PieChart, BarChart } from 'react-native-chart-kit';
-=======
 import { AppStackParamList } from '../../types/navigation';
 import { useAuth } from '../../context/AuthContext';
 import { useAlert } from '../../context/AlertContext';
@@ -144,15 +139,8 @@ const isCacheValid = () => {
 };
 
 // import EntryForm from '../../components/EntryForm';
->>>>>>> Stashed changes
 
 const LOGO = require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png');
-
-type RootStackParamList = {
-  Onboarding: undefined;
-  Dashboard: undefined;
-  // Add other screens as needed
-};
 
 interface UserData {
   id: number;
@@ -174,12 +162,6 @@ interface Transaction {
   status: 'Paid' | 'Pending' | 'Received';
 }
 
-<<<<<<< Updated upstream
-const Dashboard: React.FC = () => {
-  const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
-  const [userData, setUserData] = useState<UserData | null>(null);
-  const [loading, setLoading] = useState(true);
-=======
 const DEFAULT_TYPES = ['sell', 'receipt', 'payment', 'purchase'];
 
 // Map API icon field to MaterialCommunityIcons name
@@ -273,12 +255,15 @@ const Dashboard: React.FC = () => {
   const [userData, setUserData] = useState<UserData | null>(
     globalDashboardCache.userData,
   );
+  const [folders, setFolders] = useState<any[]>(globalDashboardCache.folders);
+  const [fullUserData, setFullUserData] = useState<any>(
+    globalDashboardCache.fullUserData,
+  );
+  const [profileModalVisible, setProfileModalVisible] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(false);
   const [loading, setLoading] = useState(!globalDashboardCacheChecked);
->>>>>>> Stashed changes
   const [error, setError] = useState<string | null>(null);
   const screenWidth = Dimensions.get('window').width;
-<<<<<<< Updated upstream
-=======
   const scrollRef = React.useRef<ScrollView>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [deleteModalVisible, setDeleteModalVisible] = useState(false);
@@ -384,7 +369,6 @@ const Dashboard: React.FC = () => {
       }
     }, []), // Remove dependencies to prevent loops
   );
->>>>>>> Stashed changes
 
   // Mock data for transactions
   const transactions: Transaction[] = [
@@ -422,29 +406,6 @@ const Dashboard: React.FC = () => {
     },
   ];
 
-<<<<<<< Updated upstream
-  // Mock data for cash flow chart
-  const cashFlowData = {
-    labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'],
-    datasets: [
-      {
-        data: [45000, 52000, 48000, 60000, 55000, 68000],
-        color: (opacity = 1) => `rgba(15, 157, 88, ${opacity})`,
-        strokeWidth: 2,
-      },
-      {
-        data: [32000, 38000, 35000, 42000, 39000, 45000],
-        color: (opacity = 1) => `rgba(244, 67, 54, ${opacity})`,
-        strokeWidth: 2,
-      },
-    ],
-    legend: ['Income', 'Expenses'],
-  };
-
-  useEffect(() => {
-    fetchUserData();
-  }, []);
-=======
   // Check for cached data on component mount
   const checkCachedData = async () => {
     // If we have valid cache, use it immediately but still refresh in background
@@ -454,9 +415,22 @@ const Dashboard: React.FC = () => {
       setFullUserData(globalDashboardCache.fullUserData);
       setLoading(false);
       globalDashboardCacheChecked = true;
->>>>>>> Stashed changes
 
-  const fetchUserData = async () => {
+      // Only fetch fresh data in background if cache is stale
+      if (!isCacheValid()) {
+        setTimeout(() => {
+          fetchDataInBackground();
+        }, 100);
+      }
+      return;
+    }
+
+    // If no valid cache, fetch all data
+    await fetchAllData();
+  };
+
+  // Fetch all data at once to reduce API calls
+  const fetchAllData = async () => {
     try {
       const accessToken = await AsyncStorage.getItem('accessToken');
       const mobileNumber =
@@ -466,29 +440,12 @@ const Dashboard: React.FC = () => {
         throw new Error('Authentication token not found');
       }
 
-      // This is a placeholder for the actual API call
-      // In a real app, you would make an API call to get user data
-      // For now, we'll use mock data
+      console.log(
+        '🔑 Dashboard: Using token:',
+        accessToken.substring(0, 20) + '...',
+      );
+      console.log('🌐 Dashboard: Making API calls to:', BASE_URL);
 
-<<<<<<< Updated upstream
-      // Simulating API call with timeout
-      setTimeout(() => {
-        // Mock user data - replace with actual API call in production
-        const mockUserData: UserData = {
-          id: 1,
-          businessName: 'Smart Business Solutions',
-          ownerName: 'John Doe',
-          mobileNumber: mobileNumber,
-          businessType: 'Private Limited',
-          businessSize: 'Small',
-          industry: 'Technology',
-          profileComplete: true,
-        };
-
-        setUserData(mockUserData);
-        setLoading(false);
-      }, 1000);
-=======
       // Add timeout wrapper to prevent API calls from hanging
       const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(
@@ -798,66 +755,64 @@ const Dashboard: React.FC = () => {
       } else {
         throw new Error(`Delete failed with status: ${response.status}`);
       }
->>>>>>> Stashed changes
     } catch (err: any) {
-      console.error('Error fetching user data:', err);
-      setError(err.message || 'Failed to load user data');
-      setLoading(false);
+      console.error('Error deleting folder:', err);
+      let errorMessage = 'Failed to delete folder.';
+
+      if (err.response?.status === 401) {
+        errorMessage = 'Authentication failed. Please login again.';
+      } else if (err.response?.status === 403) {
+        errorMessage = 'You do not have permission to delete this folder.';
+      } else if (err.response?.status === 404) {
+        errorMessage = 'Folder not found. It may have been already deleted.';
+      } else if (err.message) {
+        errorMessage = `Delete failed: ${err.message}`;
+      }
+
+      showAlert({
+        title: 'Error',
+        message: errorMessage,
+        type: 'error',
+        confirmText: 'OK',
+      });
     }
   };
 
-  const handleLogout = async () => {
-    Alert.alert('Logout', 'Are you sure you want to logout?', [
-      {
-        text: 'Cancel',
-        style: 'cancel',
-      },
-      {
-        text: 'Logout',
-        onPress: async () => {
-          try {
-            // Clear all stored tokens and data
-            await AsyncStorage.multiRemove([
-              'accessToken',
-              'refreshToken',
-              'userMobileNumber',
-            ]);
-
-            // Navigate back to onboarding screen
-            navigation.reset({
-              index: 0,
-              routes: [{ name: 'Onboarding' }],
-            });
-          } catch (err) {
-            console.error('Error during logout:', err);
-            Alert.alert('Error', 'Failed to logout. Please try again.');
-          }
-        },
-      },
-    ]);
+  const showDeleteModal = (folder: any) => {
+    setFolderToDelete(folder);
+    setDeleteModalVisible(true);
   };
 
-  const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
-    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
-      2,
-      '0',
-    )}-${String(date.getDate()).padStart(2, '0')}`;
+  const hideDeleteModal = () => {
+    setDeleteModalVisible(false);
+    setFolderToDelete(null);
   };
 
-  const formatCurrency = (amount: number) => {
-    return `₹${amount.toLocaleString('en-IN')}`;
+  const confirmDeleteFolder = async () => {
+    if (!folderToDelete || !folderToDelete.id) {
+      showAlert({
+        title: 'Error',
+        message: 'Invalid folder selected for deletion.',
+        type: 'error',
+        confirmText: 'OK',
+      });
+      hideDeleteModal();
+      return;
+    }
+
+    try {
+      await handleDeleteFolder(folderToDelete.id);
+      hideDeleteModal();
+    } catch (error) {
+      console.error('Error in confirmDeleteFolder:', error);
+      // Error is already handled in handleDeleteFolder
+    }
   };
+
+  if (!isAuthenticated) return null;
 
   if (loading) {
     return (
-<<<<<<< Updated upstream
-      <SafeAreaView style={styles.loadingContainer}>
-        <StatusBar barStyle="dark-content" backgroundColor="#f6fafc" />
-        <Image source={LOGO} style={styles.logo} />
-        <Text style={styles.loadingText}>Loading...</Text>
-      </SafeAreaView>
-=======
       <View style={styles.safeArea}>
         <View style={styles.errorContainer}>
           <MaterialCommunityIcons
@@ -879,65 +834,72 @@ const Dashboard: React.FC = () => {
           </TouchableOpacity>
         </View>
       </View>
->>>>>>> Stashed changes
     );
   }
 
+  // Plan hierarchy for comparison (only free and premium)
+  const PLAN_HIERARCHY = {
+    free: 0,
+    premium: 1,
+  };
+
+  // Utility to check if a plan level is accessible to the user
+  const isPlanAccessible = (userPlan: string, featurePlan: string): boolean => {
+    const userLevel =
+      PLAN_HIERARCHY[userPlan as keyof typeof PLAN_HIERARCHY] ?? 0;
+    const featureLevel =
+      PLAN_HIERARCHY[featurePlan as keyof typeof PLAN_HIERARCHY] ?? 0;
+    return userLevel >= featureLevel;
+  };
+
+  // Static quick actions with plan types (only free and premium)
+  const staticActions = [
+    {
+      title: 'Sell',
+      icon: 'cart-plus',
+      screen: 'Invoice',
+      planType: 'free',
+    },
+    { title: 'Receipt', icon: 'receipt', screen: 'Receipt', planType: 'free' },
+    {
+      title: 'Payment',
+      icon: 'currency-inr',
+      screen: 'Payment',
+      planType: 'free', // Based on API response - Payment is free
+    },
+    {
+      title: 'Purchase',
+      icon: 'cart-outline',
+      screen: 'Purchase',
+      planType: 'free', // Based on API response - Purchase is free
+    },
+  ];
+
+  // Get user's plan type
+  const userPlan = fullUserData?.planType || 'free';
+
+  // Show all static actions with plan badges (for visibility)
+  const allStaticActions = staticActions;
+
+  // Dynamic quick actions - show all folders
+  const dynamicActions = [...folders]
+    .filter(
+      f =>
+        f.parentId === null && // ✅ Changed from 28 to null to match AddFolderScreen
+        f.isCustom === true && // ✅ Only show custom user folders
+        f.isVisible &&
+        !['sell', 'receipt', 'payment', 'purchase', 'add folder'].includes(
+          f.title?.toLowerCase(),
+        ),
+    )
+    .sort((a, b) => Number(a.id) - Number(b.id));
+  const visibleDynamic = dynamicActions.slice(0, 2);
+  const overflowDynamic = dynamicActions.slice(2);
+  const quickActions = [...allStaticActions, ...visibleDynamic];
+
+  // Removed console.log to prevent render loops
+
   return (
-<<<<<<< Updated upstream
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar barStyle="dark-content" backgroundColor="#f6fafc" />
-      <ScrollView contentContainerStyle={styles.scrollContainer}>
-        {/* Header */}
-        <View style={styles.header}>
-          <View style={styles.headerLeft}>
-            <TouchableOpacity style={styles.menuButton}>
-              <MaterialCommunityIcons name="menu" size={24} color="#222" />
-            </TouchableOpacity>
-            <Text style={styles.headerTitle}>Smart Ledger</Text>
-          </View>
-          <View style={styles.headerRight}>
-            <TouchableOpacity style={styles.iconButton}>
-              <MaterialCommunityIcons name="magnify" size={24} color="#222" />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.iconButton}>
-              <MaterialCommunityIcons
-                name="bell-outline"
-                size={24}
-                color="#222"
-              />
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* Profile Card */}
-        <LinearGradient
-          colors={['#4f8cff', '#1ecb81']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 0 }}
-          style={styles.profileCard}
-        >
-          <View style={styles.profileInfo}>
-            <Image source={{ uri: PROFILE_ICON }} style={styles.profileIcon} />
-            <View style={styles.profileDetails}>
-              <Text style={styles.profileName}>
-                {userData?.ownerName || 'User'}
-              </Text>
-              <Text style={styles.profilePhone}>
-                {userData?.mobileNumber || ''}
-              </Text>
-              <Text style={styles.profileBusiness}>
-                {userData?.businessType || 'Business'}
-              </Text>
-            </View>
-          </View>
-          <TouchableOpacity style={styles.viewProfileButton}>
-            <Text style={styles.viewProfileText}>View Profile</Text>
-          </TouchableOpacity>
-        </LinearGradient>
-
-        {/* Today's Sales and Pending */}
-=======
     <View style={styles.safeArea}>
       <StableStatusBar
         backgroundColor="#4f8cff"
@@ -1211,7 +1173,6 @@ const Dashboard: React.FC = () => {
         </Modal>
 
         {/* Stats Section */}
->>>>>>> Stashed changes
         <View style={styles.statsContainer}>
           <View style={styles.statCard}>
             <Text style={styles.statLabel}>Today's Sales</Text>
@@ -1242,88 +1203,6 @@ const Dashboard: React.FC = () => {
 
         {/* Quick Actions */}
         <View style={styles.quickActionsCard}>
-<<<<<<< Updated upstream
-          <Text style={styles.sectionTitle}>Quick Actions</Text>
-          <View style={styles.quickActionsGrid}>
-            <TouchableOpacity style={styles.actionButton}>
-              <MaterialCommunityIcons
-                name="file-document-outline"
-                size={24}
-                color="#222"
-              />
-              <Text style={styles.actionText}>Invoice</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.actionButton}>
-              <MaterialCommunityIcons name="receipt" size={24} color="#222" />
-              <Text style={styles.actionText}>Receipt</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.actionButton}>
-              <MaterialCommunityIcons
-                name="currency-inr"
-                size={24}
-                color="#222"
-              />
-              <Text style={styles.actionText}>Payment</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.actionButton}>
-              <MaterialCommunityIcons
-                name="cart-outline"
-                size={24}
-                color="#222"
-              />
-              <Text style={styles.actionText}>Purchase</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* GST Summary */}
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>GST Summary</Text>
-          <Text style={styles.sectionSubtitle}>Current month breakdown</Text>
-
-          <View style={styles.chartContainer}>
-            <PieChart
-              data={gstData}
-              width={screenWidth - 64}
-              height={180}
-              chartConfig={{
-                backgroundColor: '#ffffff',
-                backgroundGradientFrom: '#ffffff',
-                backgroundGradientTo: '#ffffff',
-                color: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
-              }}
-              accessor="amount"
-              backgroundColor="transparent"
-              paddingLeft="0"
-              absolute={false}
-              hasLegend={false}
-              center={[screenWidth / 4, 0]}
-            />
-          </View>
-
-          <View style={styles.gstLegend}>
-            <View style={styles.legendItem}>
-              <View
-                style={[styles.legendColor, { backgroundColor: '#4285F4' }]}
-              />
-              <Text style={styles.legendLabel}>CGST:</Text>
-              <Text style={styles.legendValue}>₹12,000</Text>
-            </View>
-            <View style={styles.legendItem}>
-              <View
-                style={[styles.legendColor, { backgroundColor: '#0F9D58' }]}
-              />
-              <Text style={styles.legendLabel}>SGST:</Text>
-              <Text style={styles.legendValue}>₹12,000</Text>
-            </View>
-            <View style={styles.legendItem}>
-              <View
-                style={[styles.legendColor, { backgroundColor: '#F4B400' }]}
-              />
-              <Text style={styles.legendLabel}>IGST:</Text>
-              <Text style={styles.legendValue}>₹8,000</Text>
-            </View>
-=======
           <View
             style={{
               flexDirection: 'row',
@@ -1500,7 +1379,6 @@ const Dashboard: React.FC = () => {
               );
             })}
             {/* Removed empty placeholders to avoid extra bottom space */}
->>>>>>> Stashed changes
           </View>
         </View>
 
@@ -1508,14 +1386,6 @@ const Dashboard: React.FC = () => {
         <View style={styles.card}>
           <Text style={styles.sectionTitle}>Recent Transactions</Text>
 
-<<<<<<< Updated upstream
-          {transactions.map(transaction => (
-            <View key={transaction.id} style={styles.transactionItem}>
-              <View style={styles.transactionLeft}>
-                <View style={styles.transactionTypeContainer}>
-                  <Text style={styles.transactionTypeText}>
-                    {transaction.type}
-=======
           <View style={{ height: 350 }}>
             <ScrollView
               showsVerticalScrollIndicator={false}
@@ -1611,41 +1481,15 @@ const Dashboard: React.FC = () => {
                   <Text style={styles.emptyTransactionsSubtitle}>
                     Your recent transactions will appear here once you start
                     creating invoices, receipts, payments, or purchases.
->>>>>>> Stashed changes
                   </Text>
                 </View>
-                <View style={styles.transactionDetails}>
-                  <Text style={styles.transactionParty}>
-                    {transaction.party}
-                  </Text>
-                  <Text style={styles.transactionDate}>
-                    {formatDate(transaction.date)}
-                  </Text>
-                </View>
-              </View>
-              <View style={styles.transactionRight}>
-                <Text style={styles.transactionAmount}>
-                  {formatCurrency(transaction.amount)}
-                </Text>
-                <View
-                  style={[
-                    styles.statusBadge,
-                    transaction.status === 'Paid'
-                      ? styles.paidBadge
-                      : transaction.status === 'Received'
-                      ? styles.receivedBadge
-                      : styles.pendingBadge,
-                  ]}
-                >
-                  <Text style={styles.statusText}>{transaction.status}</Text>
-                </View>
-              </View>
-            </View>
-          ))}
+              )}
+            </ScrollView>
+          </View>
         </View>
 
         {/* Customer & Suppliers Tabs */}
-        <View style={styles.tabsContainer}>
+        {/* <View style={styles.tabsContainer}>
           <TouchableOpacity style={styles.tab}>
             <MaterialCommunityIcons
               name="account-group-outline"
@@ -1662,16 +1506,6 @@ const Dashboard: React.FC = () => {
             />
             <Text style={styles.tabText}>Suppliers</Text>
           </TouchableOpacity>
-<<<<<<< Updated upstream
-        </View>
-
-        {/* Logout Button */}
-        <TouchableOpacity style={styles.logoutButton} onPress={handleLogout}>
-          <Text style={styles.logoutText}>Logout</Text>
-        </TouchableOpacity>
-      </ScrollView>
-    </SafeAreaView>
-=======
         </View> */}
       </ScrollView>
       {/* Custom Delete Modal */}
@@ -1795,7 +1629,6 @@ const Dashboard: React.FC = () => {
         </View>
       </Modal>
     </View>
->>>>>>> Stashed changes
   );
 };
 
@@ -1808,22 +1641,7 @@ const styles = StyleSheet.create({
     flexGrow: 1,
     paddingBottom: 24,
   },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#f6fafc',
-  },
-  logo: {
-    width: 80,
-    height: 80,
-    marginBottom: 16,
-  },
-  loadingText: {
-    fontSize: 16,
-    color: '#4f8cff',
-    fontWeight: '600',
-  },
+
   header: {
     backgroundColor: '#4f8cff',
     flexDirection: 'row',
@@ -1900,10 +1718,6 @@ const styles = StyleSheet.create({
     opacity: 1,
     fontFamily: 'Roboto-Medium',
   },
-<<<<<<< Updated upstream
-  viewProfileButton: {
-    backgroundColor: 'rgba(255, 255, 255, 0.2)',
-=======
   welcomeMessage: {
     fontSize: 12,
     color: '#666',
@@ -1913,7 +1727,6 @@ const styles = StyleSheet.create({
   },
   profileButton: {
     backgroundColor: '#4f8cff',
->>>>>>> Stashed changes
     paddingVertical: 8,
     paddingHorizontal: 16,
     borderRadius: 8,
@@ -2133,19 +1946,7 @@ const styles = StyleSheet.create({
     marginLeft: 8,
     fontFamily: 'Roboto-Medium',
   },
-  logoutButton: {
-    backgroundColor: '#f0f0f0',
-    borderRadius: 8,
-    padding: 12,
-    alignItems: 'center',
-    marginHorizontal: 16,
-    marginBottom: 16,
-  },
-  logoutText: {
-    fontSize: 14,
-    color: '#222',
-    fontWeight: '500',
-  },
+
   card: {
     backgroundColor: '#fff',
     borderRadius: 12,
@@ -2158,8 +1959,6 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 2,
   },
-<<<<<<< Updated upstream
-=======
   userFoldersSection: {
     marginTop: 24,
     marginBottom: 8,
@@ -2251,7 +2050,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontFamily: 'Roboto-Medium',
   },
->>>>>>> Stashed changes
 });
 
 export default Dashboard;

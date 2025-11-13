@@ -1,0 +1,43 @@
+[33mcommit 2d91a994f287e814dbece4a416977d4217b3efd6[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m, [m[1;32mnew2[m[33m)[m
+Author: MazahirAli545 <134043824+MazahirAli545@users.noreply.github.com>
+Date:   Tue Nov 11 18:50:25 2025 +0530
+
+    Applied stashed changes from branch mazahir
+
+[1mdiff --git a/.env b/.env[m
+[1mnew file mode 100644[m
+[1mindex 0000000..093b7d8[m
+[1m--- /dev/null[m
+[1m+++ b/.env[m
+[36m@@ -0,0 +1,73 @@[m
+[32m+[m[32m# ===========================================[m
+[32m+[m[32m# UtilsApp Environment Configuration[m
+[32m+[m[32m# ===========================================[m
+[32m+[m[32m# This file contains all sensitive configuration and API keys[m
+[32m+[m[32m# DO NOT commit this file to version control[m
+[32m+[m
+[32m+[m[32m# ===========================================[m
+[32m+[m[32m# API Configuration[m
+[32m+[m[32m# ===========================================[m
+[32m+[m[32m# Base URL for API calls[m
+[32m+[m[32mBASE_URL_DEV=http://192.168.57.107:5000[m
+[32m+[m[32mBASE_URL_PROD=https://utility-apis-49wa.onrender.com[m
+[32m+[m
+[32m+[m[32m# ===========================================[m
+[32m+[m[32m# Google Cloud Services[m
+[32m+[m[32m# ===========================================[m
+[32m+[m[32m# Google Cloud Project Configuration[m
+[32m+[m[32mGOOGLE_PROJECT_ID=stable-chain-465906-a0[m
+[32m+[m[32mGOOGLE_PRIVATE_KEY_ID=69ae1853d5700a59b55d4c319f68e6a0a4fe8eae[m
+[32m+[m[32mGOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCaL6m9XIUlRC1g\nYXtjbcFQCtXQtd6zUqHLDAXnMpjTm8tpmlXil985wJyNJFkKHVZMRSgxG0+c3kF9\ns8qd0oKauPu1WGSQqK66NB+d1+avYhF4dPgJg4/BWz+fG1PC/vjeVpc9CPZ4g6oP\nQDrrKfCvvB5+gUBUpoz+rF7RfvljOVhD7i+BAgq8qV11E9xA3xKEyADKejcupNIU\nhmwBinF3vphkUwoVHfX/yUJvg6GhQwuJnH1QrpzFPCMSIBupgKj6jXb4CjOcGIh4\ni7Kq9MLbAQ6Vla+HNVVPDPsb7NhMYJQTOba1Xjx+z4uUe/035oN0SsAiN3ESKk+Y\ncKdC06tvAgMBAAECggEAP8Ezo6xNFeLCDJdiaPOqOomwbdO2GVoysn3vNvFSBjXm\nf20k1ERONlgxo58C/k6xL2ptOxj663dvhyW/w1CXVpjk49CADNzjGvWQmTj8F0sq\nxC9BnNV8rMwpW4X2NawuhekyMjexipWOzS2W70RxVIkp5s9VJWuU432s211wi5k2\n+WONrQrC3NnG1jyLViKiizHaI6OGEG4DJm9Min3QixvT5boyxgDJJhJexchsrp/8\nCBIaDoo7LdfrGruXEoejoiQbiaacSQaMIIXH89sRye6U0pgLHtH6e57IIhj7y7Gs\nY3gO+ZIP3Kp47SSVuWJkv81/Op0qn76QriTRlABQGQKBgQDUt+y5Owc2qJ9+ONV+\nnSGeyX55slbKUDsdEgxZUHXUmYup82B9EecyAIgg6isN5MRFYRkIpPj6yrD+6WKr\nGJe3K5ykZYWU15LofUKeucZKXDM6Y2gR9QibnYNxGM5aFD+5M9wWOf4vkZQcu3Et\nAEcOBFC+M64TLoIAtPlMSzAEQwKBgQC5jukM/fs1C1nS10gXMpEv7HuOFvrHP0e2\nO8leuzkbCAHWC1FCmQ3xwkn+WU2OxE0sA3sJk0SOgg68e7vAJScL6+g9B/W1faJq\n3urelvucu8Bl1hnf0q+vIFPMYJ0I1fihKRDWuEJ/JqpyWzIt+jx2yVT69+nfms+h\noHITwjy/ZQKBgFi8fSDsMd8oSphyBwWxcNP3hC4qKjBtdatz2vjrKqxMfUmhQFAM\nRuDB/geVB+7czs+OaM4FW+Pq6Bj+rO1o7ek4ZTjjLO1hXGRl1IO4RbLBcZFa5JAR\nIs0f0TQ9v98t8UNGEfqnqJSZayrtOpImOn3raO9fSa+wyASZeiHMf7RXAoGAEunW\nJ1Tb/hQiG7OFzZeB5Pidv2XoOdbhYFnHtLgwoei3BzIwHjGrkjDTifFgTmUD2LCi\nId+45S2sgtm50WP4DucEzPO6v70GiQ4fsoCBNQCOI9Mm4AGBlsAcyoAugXAN359n\n7/roDD3MsctJ2hXfg9wRpWMPm5MUBs1r00fBGWECgYEAjJo0OLmcFt5BbO4h9b5x\niF/2wTRkW74gQFF4XuUW0XY7Rs/KDyBxQPC1M0GbiIeF9TmTPTdKCpK6tkUBJwgW\nhBB55oixINCgV2EaJh2z7uSYO47yKCyMRPO8LjMKni4Q5ZVVySRGisiGKEphKb1g\nmCVQmm5XwW5fIduwkelywTs=\n-----END PRIVATE KEY-----\n"[m
+[32m+[m[32mGOOGLE_CLIENT_EMAIL=speech-to-text-api@stable-chain-465906-a0.iam.gserviceaccount.com[m
+[32m+[m[32mGOOGLE_CLIENT_ID=114184288292445745972[m
+[32m+[m[32mGOOGLE_AUTH_URI=https://accounts.google.com/o/oauth2/auth[m
+[32m+[m[32mGOOGLE_TOKEN_URI=https://oauth2.googleapis.com/token[m
+[32m+[m[32mGOOGLE_AUTH_PROVIDER_X509_CERT_URL=https://www.googleapis.com/oauth2/v1/certs[m
+[32m+[m[32mGOOGLE_CLIENT_X509_CERT_URL=https://www.googleapis.com/robot/v1/metadata/x509/speech-to-text-api%40stable-chain-465906-a0.iam.gserviceaccount.com[m
+[32m+[m[32mGOOGLE_UNIVERSE_DOMAIN=googleapis.com[m
+[32m+[m
+[32m+[m[32m# ===========================================[m
+[32m+[m[32m# Firebase Configuration[m
+[32m+[m[32m# ============================

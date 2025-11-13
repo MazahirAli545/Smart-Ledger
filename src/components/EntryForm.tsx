@@ -161,8 +161,14 @@ export default function EntryForm({ onEntryAdded }: EntryFormProps) {
       const token = await AsyncStorage.getItem('accessToken');
       if (!token) throw new Error('Not authenticated');
       // Use unified API - Note: unifiedApi.post handles FormData automatically
-      const data = await unifiedApi.post('/api/whisper/transcribe', formData);
-      if (!data || data.error) throw new Error(data?.message || data?.error || 'Speech recognition failed');
+      const data = (await unifiedApi.post(
+        '/api/whisper/transcribe',
+        formData,
+      )) as any;
+      if (!data || data.error)
+        throw new Error(
+          data?.message || data?.error || 'Speech recognition failed',
+        );
       if (data.amount) setAmount(data.amount);
       if (data.type) setType(data.type);
       if (data.category) setCategory(data.category);
@@ -235,9 +241,11 @@ export default function EntryForm({ onEntryAdded }: EntryFormProps) {
       };
 
       // Use unified API
-      const data = await unifiedApi.post('/transactions', payload);
+      const data = (await unifiedApi.post('/transactions', payload)) as any;
       if (!data || data.error)
-        throw new Error(data?.message || data?.error || 'Failed to create transaction');
+        throw new Error(
+          data?.message || data?.error || 'Failed to create transaction',
+        );
       setSuccess('Entry added!');
       setAmount('');
       setDescription('');
@@ -285,7 +293,9 @@ export default function EntryForm({ onEntryAdded }: EntryFormProps) {
           onPress={isRecording ? stopRecording : startRecording}
           style={styles.voiceBtn}
         >
-          <Text  style={{ fontFamily: 'Roboto-Medium',  }}>{isRecording ? '⏹️ Stop' : '🎤 Voice'}</Text>
+          <Text style={{ fontFamily: 'Roboto-Medium' }}>
+            {isRecording ? '⏹️ Stop' : '🎤 Voice'}
+          </Text>
         </TouchableOpacity>
         <Picker
           selectedValue={provider}
@@ -296,14 +306,16 @@ export default function EntryForm({ onEntryAdded }: EntryFormProps) {
           <Picker.Item label="Whisper" value="whisper" />
         </Picker>
         <TouchableOpacity onPress={handleFileUpload} style={styles.voiceBtn}>
-          <Text  style={{ fontFamily: 'Roboto-Medium',  }}>Upload Audio</Text>
+          <Text style={{ fontFamily: 'Roboto-Medium' }}>Upload Audio</Text>
         </TouchableOpacity>
       </View>
       <TouchableOpacity
         onPress={() => setShowDatePicker(true)}
         style={styles.input}
       >
-        <Text  style={{ fontFamily: 'Roboto-Medium',  }}>{date.toISOString().slice(0, 10)}</Text>
+        <Text style={{ fontFamily: 'Roboto-Medium' }}>
+          {date.toISOString().slice(0, 10)}
+        </Text>
       </TouchableOpacity>
       {showDatePicker && (
         <DateTimePicker
@@ -322,11 +334,10 @@ export default function EntryForm({ onEntryAdded }: EntryFormProps) {
       {success ? <Text style={styles.success}>{success}</Text> : null}
       {text ? (
         <View style={styles.translated}>
-          <Text style={{ fontFamily: 'Roboto-Medium',
-  }}>
+          <Text style={{ fontFamily: 'Roboto-Medium' }}>
             📝 Translated Text (English):
           </Text>
-          <Text  style={{ fontFamily: 'Roboto-Medium',  }}>{text}</Text>
+          <Text style={{ fontFamily: 'Roboto-Medium' }}>{text}</Text>
         </View>
       ) : null}
     </View>
@@ -343,10 +354,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     elevation: 2,
   },
-  title: { fontSize: 22, marginBottom: '12', 
-    fontFamily: 'Roboto-Medium',
- 
-  },
+  title: { fontSize: 22, marginBottom: 12, fontFamily: 'Roboto-Medium' },
 
   input: {
     borderWidth: 1,
@@ -365,12 +373,8 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     marginLeft: 6,
   },
-  error: { color: 'red', marginTop: 8
-    fontFamily: 'Roboto-Medium',
-  },
-  success: { color: 'green', marginTop: 8
-    fontFamily: 'Roboto-Medium',
-  },
+  error: { color: 'red', marginTop: 8, fontFamily: 'Roboto-Medium' },
+  success: { color: 'green', marginTop: 8, fontFamily: 'Roboto-Medium' },
   translated: {
     marginTop: 16,
     backgroundColor: '#f0f0f0',

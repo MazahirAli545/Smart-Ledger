@@ -39,6 +39,7 @@ import {
   HEADER_CONTENT_HEIGHT,
   getSolidHeaderStyle,
 } from '../../utils/headerLayout';
+import { useSubscription } from '../../context/SubscriptionContext';
 
 const { width } = Dimensions.get('window');
 
@@ -47,6 +48,7 @@ const CustomerDetailScreen: React.FC = () => {
   const route = useRoute<RouteProp<AppStackParamList, 'CustomerDetail'>>();
   const { customer, partyType, refresh } = route.params || {};
   const isFocused = useIsFocused();
+  const { currentSubscription, getPlanAccess } = useSubscription();
 
   // StatusBar like ProfileScreen
   const { statusBarSpacer } = useStatusBarWithGradient('CustomerDetail', [
@@ -527,11 +529,33 @@ const CustomerDetailScreen: React.FC = () => {
   };
 
   const handleGenerateReport = () => {
-    showCustomAlert(
-      'Generate Report',
-      'Generate report for this customer',
-      'info',
-    );
+    // Check if user has professional (premium) or enterprise plan
+    const hasProfessionalAccess = getPlanAccess('professional');
+    const hasEnterpriseAccess = getPlanAccess('enterprise');
+    const hasReportAccess = hasProfessionalAccess || hasEnterpriseAccess;
+
+    if (!hasReportAccess) {
+      showCustomAlert(
+        'Premium Feature',
+        'Advanced reports are available only for Professional and Enterprise plans. Please upgrade to access this feature.',
+        'info',
+        () => {
+          // Navigate to subscription plan screen
+          navigation.navigate('SubscriptionPlan');
+        },
+        undefined,
+        'Upgrade',
+        'Cancel',
+      );
+      return;
+    }
+
+    // Navigate to ReportsScreen with customer/supplier data
+    navigation.navigate('Report', {
+      customerId: customer?.id,
+      partyType: partyType,
+      customerName: customer?.name,
+    });
   };
 
   const handleSendReminder = async () => {

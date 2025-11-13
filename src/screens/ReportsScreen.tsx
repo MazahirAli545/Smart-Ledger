@@ -11,10 +11,10 @@ import {
   Dimensions,
 } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { AppStackParamList } from '../types/navigation';
-import { BarChart, PieChart } from 'react-native-chart-kit';
+import { PieChart } from 'react-native-chart-kit';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { unifiedApi } from '../api/unifiedApiService';
 import { BASE_URL } from '../api';
@@ -58,14 +58,16 @@ interface ReportData {
     percentage: number;
   }>;
   customerBalance: {
-    positiveBalance: { count: number; amount: number };
-    negativeBalance: { count: number; amount: number };
+    positiveBalance: { count: number; amount: number; transactions?: number };
+    negativeBalance: { count: number; amount: number; transactions?: number };
     totalTransactions: { count: number; income: number; expense: number };
   };
 }
 
 const ReportsScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<AppStackParamList>>();
+  const route = useRoute<RouteProp<AppStackParamList, 'Report'>>();
+  const { customerId, partyType, customerName } = route.params || {};
 
   // Simple StatusBar configuration - let StableStatusBar handle it
   const preciseStatusBarHeight = getStatusBarHeight(true);
@@ -132,11 +134,20 @@ const ReportsScreen: React.FC = () => {
 
       // 🎯 FIXED: Invalidate cache for reports to ensure fresh data with new date range
       // Also add timestamp to URL to prevent caching
-      unifiedApi.invalidateCachePattern('.*/reports/advanced.*');
+      unifiedApi.invalidateCachePattern('.*/reports/.*');
 
       // 🎯 FIXED: Add timestamp to query string to ensure fresh data and prevent caching
       const timestamp = Date.now();
-      const url = `/reports/advanced?startDate=${startDateStr}&endDate=${endDateStr}&_t=${timestamp}`;
+
+      // Use customer-specific endpoint if customerId is provided
+      let url: string;
+      if (customerId) {
+        const partyTypeParam =
+          partyType === 'supplier' ? 'Supplier' : 'Customer';
+        url = `/reports/customer/${customerId}/advanced?startDate=${startDateStr}&endDate=${endDateStr}&partyType=${partyTypeParam}&_t=${timestamp}`;
+      } else {
+        url = `/reports/advanced?startDate=${startDateStr}&endDate=${endDateStr}&_t=${timestamp}`;
+      }
 
       console.log('📤 Making API request to:', url);
 
@@ -197,6 +208,52 @@ const ReportsScreen: React.FC = () => {
         typeof reportDataToSet === 'object' &&
         !reportDataToSet.error
       ) {
+        // 🎯 FIXED: Ensure customerBalance structure is properly initialized
+        if (!reportDataToSet.customerBalance) {
+          reportDataToSet.customerBalance = {
+            positiveBalance: { count: 0, amount: 0, transactions: 0 },
+            negativeBalance: { count: 0, amount: 0, transactions: 0 },
+            totalTransactions: { count: 0, income: 0, expense: 0 },
+          };
+        } else {
+          // Ensure all nested properties exist with defaults
+          if (!reportDataToSet.customerBalance.positiveBalance) {
+            reportDataToSet.customerBalance.positiveBalance = {
+              count: 0,
+              amount: 0,
+              transactions: 0,
+            };
+          } else if (
+            reportDataToSet.customerBalance.positiveBalance.transactions ===
+              undefined ||
+            reportDataToSet.customerBalance.positiveBalance.transactions ===
+              null
+          ) {
+            reportDataToSet.customerBalance.positiveBalance.transactions = 0;
+          }
+          if (!reportDataToSet.customerBalance.negativeBalance) {
+            reportDataToSet.customerBalance.negativeBalance = {
+              count: 0,
+              amount: 0,
+              transactions: 0,
+            };
+          } else if (
+            reportDataToSet.customerBalance.negativeBalance.transactions ===
+              undefined ||
+            reportDataToSet.customerBalance.negativeBalance.transactions ===
+              null
+          ) {
+            reportDataToSet.customerBalance.negativeBalance.transactions = 0;
+          }
+          if (!reportDataToSet.customerBalance.totalTransactions) {
+            reportDataToSet.customerBalance.totalTransactions = {
+              count: 0,
+              income: 0,
+              expense: 0,
+            };
+          }
+        }
+
         // 🎯 FIXED: Always update the report data, even if it's empty
         setReportData(reportDataToSet);
         setError(null); // Clear any previous errors
@@ -207,8 +264,19 @@ const ReportsScreen: React.FC = () => {
           totalIncome: reportDataToSet?.totalIncome,
           totalExpense: reportDataToSet?.totalExpense,
           netBalance: reportDataToSet?.netBalance,
+          positiveBalanceCount:
+            reportDataToSet?.customerBalance?.positiveBalance?.count,
+          positiveBalanceTransactions:
+            reportDataToSet?.customerBalance?.positiveBalance?.transactions,
+          negativeBalanceCount:
+            reportDataToSet?.customerBalance?.negativeBalance?.count,
+          negativeBalanceAmount:
+            reportDataToSet?.customerBalance?.negativeBalance?.amount,
+          negativeBalanceTransactions:
+            reportDataToSet?.customerBalance?.negativeBalance?.transactions,
           transactionCount:
             reportDataToSet?.customerBalance?.totalTransactions?.count,
+          customerBalanceData: reportDataToSet?.customerBalance,
           hasData: !!reportDataToSet,
         });
       } else {
@@ -411,9 +479,15 @@ const ReportsScreen: React.FC = () => {
             <MaterialCommunityIcons name="arrow-left" size={25} color="#fff" />
           </TouchableOpacity>
           <View style={styles.headerContent}>
-            <Text style={styles.headerTitle}>Advanced Reports</Text>
+            <Text style={styles.headerTitle}>
+              {customerName ? `${customerName} Report` : 'Advanced Reports'}
+            </Text>
             <Text style={styles.headerSubtitle}>
-              Comprehensive analytics and insights
+              {customerName
+                ? `${
+                    partyType === 'supplier' ? 'Supplier' : 'Customer'
+                  } specific analytics`
+                : 'Comprehensive analytics and insights'}
             </Text>
           </View>
           <View style={styles.headerRightPlaceholder} />
@@ -696,121 +770,238 @@ const ReportsScreen: React.FC = () => {
                   </View>
                 </View>
 
-                {/* Monthly Trend Chart */}
+                {/* Income, Subscription & Expense Breakdown */}
                 <View style={styles.chartCard}>
                   <Text style={styles.chartTitle}>
-                    Monthly Income vs Expense Trend
+                    Customer Financial Overview
                   </Text>
-                  {reportData.monthlyTrend.length > 0 ? (
-                    <View style={styles.chartContainer}>
-                      <BarChart
-                        data={{
-                          labels: reportData.monthlyTrend.map(item =>
-                            item.month.substring(5),
-                          ),
-                          datasets: [
-                            {
-                              data: reportData.monthlyTrend.map(
-                                item => item.income,
-                              ),
-                              color: (opacity = 1) =>
-                                `rgba(76, 175, 80, ${opacity})`,
-                            },
-                            {
-                              data: reportData.monthlyTrend.map(
-                                item => item.expense,
-                              ),
-                              color: (opacity = 1) =>
-                                `rgba(244, 67, 54, ${opacity})`,
-                            },
-                          ],
-                        }}
-                        width={width - 40}
-                        height={280}
-                        fromZero
-                        showValuesOnTopOfBars
-                        withInnerLines
-                        yAxisLabel="₹"
-                        chartConfig={{
-                          backgroundColor: '#ffffff',
-                          backgroundGradientFrom: '#ffffff',
-                          backgroundGradientTo: '#ffffff',
-                          decimalPlaces: 0,
-                          color: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
-                          labelColor: (opacity = 1) =>
-                            `rgba(0, 0, 0, ${opacity})`,
-                          propsForBackgroundLines: { strokeDasharray: '3 8' },
-                        }}
-                        style={styles.chart}
-                      />
-                    </View>
-                  ) : (
-                    <View style={styles.noDataContainer}>
-                      <Text style={styles.noDataText}>
-                        No trend data available
-                      </Text>
-                    </View>
-                  )}
-                  <View style={styles.legendContainerCentered}>
-                    <LegendRow
-                      items={[
-                        { color: '#4CAF50', label: 'Income' },
-                        { color: '#F44336', label: 'Expense' },
-                      ]}
-                    />
-                  </View>
-                </View>
 
-                {/* Expense by Category */}
-                <View style={styles.chartCard}>
-                  <Text style={styles.chartTitle}>Expense by Category</Text>
-                  {reportData.expenseByCategory.filter(c => c.amount > 0)
-                    .length > 0 ? (
-                    <PieChart
-                      data={reportData.expenseByCategory
-                        .filter(c => c.amount > 0)
-                        .map((item, index) => ({
-                          name: item.category,
-                          population: item.amount,
-                          color: `hsl(${index * 60}, 70%, 50%)`,
-                          legendFontColor: '#7F7F7F',
-                          legendFontSize: 12,
-                          amount: item.amount,
-                        }))}
-                      width={width - 40}
-                      height={200}
-                      chartConfig={{
-                        color: (opacity = 1) => `rgba(0, 0, 0, ${opacity})`,
-                      }}
-                      accessor="population"
-                      backgroundColor="transparent"
-                      paddingLeft="15"
-                      style={styles.chart}
-                    />
-                  ) : (
-                    <View style={styles.noDataContainer}>
-                      <MaterialCommunityIcons
-                        name="chart-pie"
-                        size={48}
-                        color="#ccc"
-                      />
-                      <Text style={styles.noDataText}>
-                        No category data available
-                      </Text>
-                    </View>
-                  )}
-                  {reportData.expenseByCategory.filter(c => c.amount > 0)
-                    .length > 0 && (
-                    <LegendRow
-                      items={reportData.expenseByCategory
-                        .filter(c => c.amount > 0)
-                        .slice(0, 4)
-                        .map((c, i) => ({
-                          color: `hsl(${i * 60}, 70%, 50%)`,
-                          label: c.category,
-                        }))}
-                    />
-                  )}
+                  {/* Calculate subscription amount from expenseByCategory */}
+                  {(() => {
+                    const subscriptionCategory =
+                      reportData.expenseByCategory.find(
+                        c => c.category?.toLowerCase() === 'subscription',
+                      );
+                    const subscriptionAmount =
+                      subscriptionCategory?.amount || 0;
+                    const otherExpenses =
+                      reportData.totalExpense - subscriptionAmount;
+                    const totalAmount =
+                      reportData.totalIncome +
+                      subscriptionAmount +
+                      otherExpenses;
+
+                    return (
+                      <>
+                        {/* Income Section */}
+                        <View style={styles.breakdownSection}>
+                          <View style={styles.breakdownHeader}>
+                            <View
+                              style={[
+                                styles.breakdownIconContainer,
+                                { backgroundColor: 'rgba(76, 175, 80, 0.1)' },
+                              ]}
+                            >
+                              <MaterialCommunityIcons
+                                name="trending-up"
+                                size={24}
+                                color="#4CAF50"
+                              />
+                            </View>
+                            <View style={styles.breakdownContent}>
+                              <Text style={styles.breakdownLabel}>Income</Text>
+                              <Text
+                                style={[
+                                  styles.breakdownAmount,
+                                  { color: '#4CAF50' },
+                                ]}
+                              >
+                                {formatCurrency(reportData.totalIncome)}
+                              </Text>
+                            </View>
+                            <View style={styles.breakdownPercentage}>
+                              <Text style={styles.breakdownPercentageText}>
+                                {totalAmount > 0
+                                  ? (
+                                      (reportData.totalIncome / totalAmount) *
+                                      100
+                                    ).toFixed(1)
+                                  : 0}
+                                %
+                              </Text>
+                            </View>
+                          </View>
+                        </View>
+
+                        {/* Subscription Section */}
+                        {subscriptionAmount > 0 && (
+                          <View style={styles.breakdownSection}>
+                            <View style={styles.breakdownHeader}>
+                              <View
+                                style={[
+                                  styles.breakdownIconContainer,
+                                  {
+                                    backgroundColor: 'rgba(255, 152, 0, 0.1)',
+                                  },
+                                ]}
+                              >
+                                <MaterialCommunityIcons
+                                  name="crown"
+                                  size={24}
+                                  color="#FF9800"
+                                />
+                              </View>
+                              <View style={styles.breakdownContent}>
+                                <Text style={styles.breakdownLabel}>
+                                  Subscription
+                                </Text>
+                                <Text
+                                  style={[
+                                    styles.breakdownAmount,
+                                    { color: '#FF9800' },
+                                  ]}
+                                >
+                                  {formatCurrency(subscriptionAmount)}
+                                </Text>
+                              </View>
+                              <View style={styles.breakdownPercentage}>
+                                <Text style={styles.breakdownPercentageText}>
+                                  {totalAmount > 0
+                                    ? (
+                                        (subscriptionAmount / totalAmount) *
+                                        100
+                                      ).toFixed(1)
+                                    : 0}
+                                  %
+                                </Text>
+                              </View>
+                            </View>
+                          </View>
+                        )}
+
+                        {/* Expense Section (excluding subscription) */}
+                        {otherExpenses > 0 && (
+                          <View style={styles.breakdownSection}>
+                            <View style={styles.breakdownHeader}>
+                              <View
+                                style={[
+                                  styles.breakdownIconContainer,
+                                  {
+                                    backgroundColor: 'rgba(244, 67, 54, 0.1)',
+                                  },
+                                ]}
+                              >
+                                <MaterialCommunityIcons
+                                  name="trending-down"
+                                  size={24}
+                                  color="#F44336"
+                                />
+                              </View>
+                              <View style={styles.breakdownContent}>
+                                <Text style={styles.breakdownLabel}>
+                                  Expense
+                                </Text>
+                                <Text
+                                  style={[
+                                    styles.breakdownAmount,
+                                    { color: '#F44336' },
+                                  ]}
+                                >
+                                  {formatCurrency(otherExpenses)}
+                                </Text>
+                              </View>
+                              <View style={styles.breakdownPercentage}>
+                                <Text style={styles.breakdownPercentageText}>
+                                  {totalAmount > 0
+                                    ? (
+                                        (otherExpenses / totalAmount) *
+                                        100
+                                      ).toFixed(1)
+                                    : 0}
+                                  %
+                                </Text>
+                              </View>
+                            </View>
+                          </View>
+                        )}
+
+                        {/* Pie Chart showing the breakdown */}
+                        {totalAmount > 0 && (
+                          <View style={styles.pieChartContainer}>
+                            <PieChart
+                              data={
+                                [
+                                  ...(reportData.totalIncome > 0
+                                    ? [
+                                        {
+                                          name: 'Income',
+                                          population: reportData.totalIncome,
+                                          color: '#4CAF50',
+                                          legendFontColor: '#7F7F7F',
+                                          legendFontSize: 12,
+                                        },
+                                      ]
+                                    : []),
+                                  ...(subscriptionAmount > 0
+                                    ? [
+                                        {
+                                          name: 'Subscription',
+                                          population: subscriptionAmount,
+                                          color: '#FF9800',
+                                          legendFontColor: '#7F7F7F',
+                                          legendFontSize: 12,
+                                        },
+                                      ]
+                                    : []),
+                                  ...(otherExpenses > 0
+                                    ? [
+                                        {
+                                          name: 'Expense',
+                                          population: otherExpenses,
+                                          color: '#F44336',
+                                          legendFontColor: '#7F7F7F',
+                                          legendFontSize: 12,
+                                        },
+                                      ]
+                                    : []),
+                                ] as any
+                              }
+                              width={width - 40}
+                              height={220}
+                              chartConfig={{
+                                color: (opacity = 1) =>
+                                  `rgba(0, 0, 0, ${opacity})`,
+                              }}
+                              accessor="population"
+                              backgroundColor="transparent"
+                              paddingLeft="15"
+                              style={styles.chart}
+                            />
+                            <View style={styles.legendContainerCentered}>
+                              <LegendRow
+                                items={[
+                                  ...(reportData.totalIncome > 0
+                                    ? [{ color: '#4CAF50', label: 'Income' }]
+                                    : []),
+                                  ...(subscriptionAmount > 0
+                                    ? [
+                                        {
+                                          color: '#FF9800',
+                                          label: 'Subscription',
+                                        },
+                                      ]
+                                    : []),
+                                  ...(otherExpenses > 0
+                                    ? [{ color: '#F44336', label: 'Expense' }]
+                                    : []),
+                                ]}
+                              />
+                            </View>
+                          </View>
+                        )}
+                      </>
+                    );
+                  })()}
                 </View>
 
                 {/* Customer Balance Summary */}
@@ -838,12 +1029,18 @@ const ReportsScreen: React.FC = () => {
                           <Text
                             style={[styles.metricValue, { color: '#4CAF50' }]}
                           >
-                            {reportData.customerBalance.positiveBalance.count}
+                            {reportData.customerBalance?.positiveBalance
+                              ?.count ?? 0}
                           </Text>
                           <Text style={styles.metricSub}>
                             {formatCurrency(
-                              reportData.customerBalance.positiveBalance.amount,
+                              reportData.customerBalance?.positiveBalance
+                                ?.amount ?? 0,
                             )}
+                            {' · '}
+                            {reportData.customerBalance?.positiveBalance
+                              ?.transactions ?? 0}{' '}
+                            transactions
                           </Text>
                         </View>
                       </View>
@@ -867,12 +1064,18 @@ const ReportsScreen: React.FC = () => {
                           <Text
                             style={[styles.metricValue, { color: '#F44336' }]}
                           >
-                            {reportData.customerBalance.negativeBalance.count}
+                            {reportData.customerBalance?.negativeBalance
+                              ?.count ?? 0}
                           </Text>
                           <Text style={styles.metricSub}>
                             {formatCurrency(
-                              reportData.customerBalance.negativeBalance.amount,
+                              reportData.customerBalance?.negativeBalance
+                                ?.amount ?? 0,
                             )}
+                            {' · '}
+                            {reportData.customerBalance?.negativeBalance
+                              ?.transactions ?? 0}{' '}
+                            transactions
                           </Text>
                         </View>
                       </View>
@@ -898,18 +1101,15 @@ const ReportsScreen: React.FC = () => {
                           <Text
                             style={[styles.metricValue, { color: '#2196F3' }]}
                           >
-                            {reportData.customerBalance.totalTransactions.count}
+                            {reportData.customerBalance?.totalTransactions
+                              ?.count ?? 0}
                           </Text>
                           <Text style={styles.metricSub}>
-                            {
-                              reportData.customerBalance.totalTransactions
-                                .income
-                            }{' '}
+                            {reportData.customerBalance?.totalTransactions
+                              ?.income ?? 0}{' '}
                             income ·{' '}
-                            {
-                              reportData.customerBalance.totalTransactions
-                                .expense
-                            }{' '}
+                            {reportData.customerBalance?.totalTransactions
+                              ?.expense ?? 0}{' '}
                             expense
                           </Text>
                         </View>
@@ -1443,6 +1643,56 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#666',
     fontFamily: 'Roboto-Medium',
+  },
+
+  // Breakdown Section Styles
+  breakdownSection: {
+    marginBottom: 16,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e5e7eb',
+  },
+  breakdownHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  breakdownIconContainer: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  breakdownContent: {
+    flex: 1,
+  },
+  breakdownLabel: {
+    fontSize: 15,
+    color: '#64748b',
+    fontFamily: 'Roboto-Medium',
+    marginBottom: 4,
+  },
+  breakdownAmount: {
+    fontSize: 20,
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '700',
+  },
+  breakdownPercentage: {
+    alignItems: 'flex-end',
+  },
+  breakdownPercentageText: {
+    fontSize: 16,
+    color: '#64748b',
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '600',
+  },
+  pieChartContainer: {
+    marginTop: 24,
+    paddingTop: 24,
+    borderTopWidth: 1,
+    borderTopColor: '#e5e7eb',
   },
 });
 
