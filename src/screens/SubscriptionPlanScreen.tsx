@@ -24,6 +24,7 @@ import { useSubscription } from '../context/SubscriptionContext';
 import { getUserIdFromToken } from '../utils/storage';
 import { jwtDecode } from 'jwt-decode';
 import PaymentApiService, { CapturePaymentDto } from '../api/payments';
+// @ts-ignore - react-native-razorpay doesn't have type definitions
 import RazorpayCheckout from 'react-native-razorpay';
 import PaymentDetailsDisplay from '../components/PaymentDetailsDisplay';
 import { showPlanUpdatedNotification } from '../utils/notificationHelper';
@@ -3173,6 +3174,7 @@ const SubscriptionPlanScreen: React.FC = () => {
         );
         console.log('  - Full options:', JSON.stringify(options, null, 2));
 
+        let wasCancelled = false; // Track cancellation locally for finally block
         try {
           // Mark sheet as open to block any re-entry while UI thread hands off
           razorpayOpenRef.current = true;
@@ -3186,34 +3188,78 @@ const SubscriptionPlanScreen: React.FC = () => {
           // Step 3: Handle payment success
           await handlePaymentSuccess(paymentData, plan);
         } catch (razorpayError: any) {
-          // Handle specific Razorpay errors first (avoid logging as error on cancels)
-          if (
-            razorpayError.code === 'PAYMENT_CANCELLED' ||
-            razorpayError.code === 'USER_CANCELLED'
-          ) {
-            console.log('🔄 User cancelled payment');
-            setPaymentError(null);
-            setSuppressPaymentError(true);
-            return;
-          }
+          // 🎯 IMPROVED: Comprehensive cancellation detection
+          const isCancellation = (() => {
+            // Check error code
+            if (
+              razorpayError?.code === 'PAYMENT_CANCELLED' ||
+              razorpayError?.code === 'USER_CANCELLED' ||
+              razorpayError?.code === 'CANCELLED' ||
+              razorpayError?.code === 'DISMISSED'
+            ) {
+              return true;
+            }
 
-          // Broad cancellation detection (SDK variants)
-          const desc = (
-            (razorpayError &&
-              (razorpayError.description || razorpayError.message)) ||
-            String(razorpayError || '')
-          )
-            .toString()
-            .toLowerCase();
-          if (
-            desc.includes('cancel') ||
-            desc.includes('dismiss') ||
-            desc.includes('back') ||
-            desc.includes('closed')
-          ) {
-            console.log('🔄 Detected cancellation via description');
+            // Check error type/name
+            const errorType = String(razorpayError?.type || '').toLowerCase();
+            const errorName = String(razorpayError?.name || '').toLowerCase();
+            if (
+              errorType.includes('cancel') ||
+              errorType.includes('dismiss') ||
+              errorName.includes('cancel') ||
+              errorName.includes('dismiss')
+            ) {
+              return true;
+            }
+
+            // Check description/message
+            const desc = (
+              (razorpayError &&
+                (razorpayError.description ||
+                  razorpayError.message ||
+                  razorpayError.error ||
+                  razorpayError.reason)) ||
+              String(razorpayError || '')
+            )
+              .toString()
+              .toLowerCase()
+              .trim();
+
+            const cancellationKeywords = [
+              'cancel',
+              'cancelled',
+              'cancellation',
+              'dismiss',
+              'dismissed',
+              'back',
+              'closed',
+              'user cancelled',
+              'payment cancelled',
+              'user closed',
+              'user dismissed',
+              'abort',
+              'aborted',
+            ];
+
+            if (cancellationKeywords.some(keyword => desc.includes(keyword))) {
+              return true;
+            }
+
+            // Check if error is null/undefined (sometimes cancellation returns null)
+            if (!razorpayError || razorpayError === null) {
+              return true;
+            }
+
+            return false;
+          })();
+
+          if (isCancellation) {
+            wasCancelled = true; // Mark as cancelled for finally block
+            console.log('🔄 User cancelled payment - no error popup shown');
             setPaymentError(null);
             setSuppressPaymentError(true);
+            razorpayOpenRef.current = false;
+            setPaymentProcessing(false);
             return;
           }
 
@@ -3224,42 +3270,88 @@ const SubscriptionPlanScreen: React.FC = () => {
           // Ensure flag resets even if user closes/cancels
           razorpayOpenRef.current = false;
           // If we marked a user-driven cancellation anywhere above, hard-clear any lingering error banner
-          if (suppressPaymentError) {
+          // Use local variable since state updates are async
+          if (wasCancelled || suppressPaymentError) {
             setPaymentError(null);
           }
         }
       } catch (error: any) {
-        // Handle cancellation first to avoid showing failure UI/logs
-        if (
-          error.code === 'PAYMENT_CANCELLED' ||
-          error.code === 'USER_CANCELLED'
-        ) {
-          console.log('🔄 User cancelled payment');
+        // 🎯 IMPROVED: Comprehensive cancellation detection in outer catch
+        const isCancellation = (() => {
+          // Check error code
+          if (
+            error?.code === 'PAYMENT_CANCELLED' ||
+            error?.code === 'USER_CANCELLED' ||
+            error?.code === 'CANCELLED' ||
+            error?.code === 'DISMISSED'
+          ) {
+            return true;
+          }
+
+          // Check error type/name
+          const errorType = String(error?.type || '').toLowerCase();
+          const errorName = String(error?.name || '').toLowerCase();
+          if (
+            errorType.includes('cancel') ||
+            errorType.includes('dismiss') ||
+            errorName.includes('cancel') ||
+            errorName.includes('dismiss')
+          ) {
+            return true;
+          }
+
+          // Check description/message
+          const errDesc = (
+            (error &&
+              (error.description ||
+                error.message ||
+                error.error ||
+                error.reason)) ||
+            String(error || '')
+          )
+            .toString()
+            .toLowerCase()
+            .trim();
+
+          const cancellationKeywords = [
+            'cancel',
+            'cancelled',
+            'cancellation',
+            'dismiss',
+            'dismissed',
+            'back',
+            'closed',
+            'user cancelled',
+            'payment cancelled',
+            'user closed',
+            'user dismissed',
+            'abort',
+            'aborted',
+          ];
+
+          if (cancellationKeywords.some(keyword => errDesc.includes(keyword))) {
+            return true;
+          }
+
+          // Check if error is null/undefined (sometimes cancellation returns null)
+          if (!error || error === null) {
+            return true;
+          }
+
+          return false;
+        })();
+
+        if (isCancellation) {
+          console.log(
+            '🔄 User cancelled payment (outer catch) - no error popup shown',
+          );
           setPaymentError(null);
           setSuppressPaymentError(true);
+          setPaymentProcessing(false);
           return;
         }
 
-        // Broad cancellation detection on outer catch as well
-        const errDesc = (
-          (error && (error.description || error.message)) ||
-          String(error || '')
-        )
-          .toString()
-          .toLowerCase()
-          .trim();
-        if (
-          errDesc.includes('cancel') ||
-          errDesc.includes('dismiss') ||
-          errDesc.includes('back') ||
-          errDesc.includes('closed')
-        ) {
-          console.log('🔄 Detected cancellation via outer description');
-          setPaymentError(null);
-          setSuppressPaymentError(true);
-          return;
-        }
-
+        // Only show error if it's not a cancellation
         console.error('❌ Payment process failed:', error);
 
         let errorMessage = 'Payment failed. Please try again.';
@@ -3271,18 +3363,73 @@ const SubscriptionPlanScreen: React.FC = () => {
             'Network error. Please check your internet connection.';
         }
 
-        setPaymentError(errorMessage);
-        showAlert({
-          title: 'Payment Error',
-          message: errorMessage,
-          type: 'error',
-          confirmText: 'OK',
-          onConfirm: () => {
-            console.log('User acknowledged payment error');
-          },
-        });
+        // Only set error and show alert if not suppressed
+        if (!suppressPaymentError) {
+          setPaymentError(errorMessage);
+          showAlert({
+            title: 'Payment Error',
+            message: errorMessage,
+            type: 'error',
+            confirmText: 'OK',
+            onConfirm: () => {
+              console.log('User acknowledged payment error');
+            },
+          });
+        }
       }
     } catch (error) {
+      // 🎯 IMPROVED: Check for cancellation before showing any errors
+      const isCancellation = (() => {
+        if (suppressPaymentError) return true; // Already marked as cancellation
+
+        const errorAny = error as any;
+        // Check error code
+        if (
+          errorAny?.code === 'PAYMENT_CANCELLED' ||
+          errorAny?.code === 'USER_CANCELLED' ||
+          errorAny?.code === 'CANCELLED' ||
+          errorAny?.code === 'DISMISSED'
+        ) {
+          return true;
+        }
+
+        // Check error description/message
+        const errDesc = (
+          (errorAny &&
+            (errorAny.description ||
+              errorAny.message ||
+              errorAny.error ||
+              errorAny.reason)) ||
+          String(errorAny || '')
+        )
+          .toString()
+          .toLowerCase()
+          .trim();
+
+        const cancellationKeywords = [
+          'cancel',
+          'cancelled',
+          'cancellation',
+          'dismiss',
+          'dismissed',
+          'back',
+          'closed',
+          'user cancelled',
+          'payment cancelled',
+        ];
+
+        return cancellationKeywords.some(keyword => errDesc.includes(keyword));
+      })();
+
+      if (isCancellation) {
+        console.log(
+          '🔄 User cancelled payment (outer catch) - no error popup shown',
+        );
+        setPaymentError(null);
+        setSuppressPaymentError(true);
+        return;
+      }
+
       console.error('Plan upgrade error:', error);
 
       // Import error handler
@@ -3291,25 +3438,28 @@ const SubscriptionPlanScreen: React.FC = () => {
 
       // Handle 403 Forbidden errors with user-friendly message
       if (errorInfo.isForbidden) {
-        if (!suppressPaymentError) setPaymentError(errorInfo.message);
-        showAlert({
-          title: 'Access Denied',
-          message: errorInfo.message,
-          type: 'error',
-          confirmText: 'OK',
-        });
+        if (!suppressPaymentError) {
+          setPaymentError(errorInfo.message);
+          showAlert({
+            title: 'Access Denied',
+            message: errorInfo.message,
+            type: 'error',
+            confirmText: 'OK',
+          });
+        }
       } else {
-        if (!suppressPaymentError)
+        if (!suppressPaymentError) {
           setPaymentError(
             errorInfo.message || 'Failed to upgrade plan. Please try again.',
           );
-        showAlert({
-          title: 'Error',
-          message:
-            errorInfo.message || 'Failed to upgrade plan. Please try again.',
-          type: 'error',
-          confirmText: 'OK',
-        });
+          showAlert({
+            title: 'Error',
+            message:
+              errorInfo.message || 'Failed to upgrade plan. Please try again.',
+            type: 'error',
+            confirmText: 'OK',
+          });
+        }
       }
 
       // 🎯 FIXED: Restart transaction limit monitoring if payment fails
