@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -2207,6 +2207,46 @@ const InvoiceScreen: React.FC = () => {
     }
   };
 
+  // Helper functions for validation
+  const isValidPhoneValue = (val?: string) => {
+    if (!val) return false;
+    const digits = String(val).replace(/\D/g, '');
+    return digits.length >= 10 && digits.length <= 13;
+  };
+
+  const isValidAddressValue = (val?: string) => {
+    if (!val) return false;
+    return String(val).trim().length >= 5;
+  };
+
+  // Helper: directly PATCH customer fields if user edited name/address during edit
+  const persistCustomerDirectPatch = useCallback(
+    async (customerId?: number, name?: string, address?: string) => {
+      try {
+        if (!customerId) return;
+        const token = await AsyncStorage.getItem('accessToken');
+        if (!token) return;
+        const payload: any = {};
+        if (name && String(name).trim()) {
+          const trimmed = String(name).trim();
+          payload.partyName = trimmed;
+          payload.name = trimmed; // some backends use `name` instead of `partyName`
+        }
+        if (isValidAddressValue(address)) {
+          payload.address = address;
+          payload.addressLine1 = address;
+          payload.addresses = [
+            { type: 'billing', flatBuildingNumber: address },
+          ];
+        }
+        if (Object.keys(payload).length === 0) return;
+        // Use unified API for update
+        await unifiedApi.updateCustomer(customerId, payload);
+      } catch {}
+    },
+    [],
+  );
+
   // API submit handler
   const handleSubmit = async (
     status: 'complete' | 'draft',
@@ -2375,8 +2415,28 @@ const InvoiceScreen: React.FC = () => {
       let resolvedCustomerId: number | null = null;
       try {
         const refreshed = customers && customers.length > 0 ? customers : [];
+        // When editing, prefer customer ID from editingItem first
+        if (editingItem) {
+          const editingCustomerId =
+            editingItem.partyId ||
+            editingItem.customer_id ||
+            (editingItem as any).customerId;
+          if (editingCustomerId) {
+            resolvedCustomerId = Number(editingCustomerId);
+            // Find existingCustomer by ID when editing
+            if (!existingCustomer && resolvedCustomerId) {
+              existingCustomer = refreshed.find(
+                c => Number(c.id) === resolvedCustomerId,
+              ) as any;
+            }
+          }
+        }
         // Prefer selectedCustomer.id if available
-        if (selectedCustomer && (selectedCustomer as any).id) {
+        if (
+          !resolvedCustomerId &&
+          selectedCustomer &&
+          (selectedCustomer as any).id
+        ) {
           resolvedCustomerId = Number((selectedCustomer as any).id);
         }
         // If we just created/found an existingCustomer above, use it directly
@@ -2611,6 +2671,96 @@ const InvoiceScreen: React.FC = () => {
         if (status === 'draft') setLoadingDraft(false);
         return;
       }
+
+      // If user changed name/address from the selected customer, push an update
+      try {
+        // Ensure we have existingCustomer - try to find by resolvedCustomerId if not found by name
+        if (!existingCustomer && resolvedCustomerId) {
+          const refreshed = customers && customers.length > 0 ? customers : [];
+          existingCustomer = refreshed.find(
+            c => Number(c.id) === resolvedCustomerId,
+          ) as any;
+        }
+
+        if (existingCustomer && resolvedCustomerId) {
+          const customerInputName = (customer || customerName || '')
+            .toString()
+            .trim();
+          // When editing, compare against original values from editingItem
+          // When creating, compare against existing customer values
+          const originalName = editingItem
+            ? editingItem.partyName || editingItem.customerName || ''
+            : (existingCustomer as any).partyName ||
+              (existingCustomer as any).name ||
+              '';
+
+          const originalAddress = editingItem
+            ? editingItem.partyAddress || editingItem.customerAddress || ''
+            : (existingCustomer as any).address || '';
+
+          const needsNameUpdate =
+            customerInputName.trim() !== originalName.trim();
+          const needsAddressUpdate =
+            isValidAddressValue(customerAddress) &&
+            customerAddress.trim() !== (originalAddress || '').trim();
+
+          console.log('🔍 InvoiceScreen: Checking customer update:', {
+            existingCustomer: !!existingCustomer,
+            customerId: (existingCustomer as any)?.id,
+            resolvedCustomerId,
+            customerInputName,
+            originalName,
+            customerAddress,
+            originalAddress,
+            needsNameUpdate,
+            needsAddressUpdate,
+            editingItem: !!editingItem,
+            customerState: customer,
+            customerNameState: customerName,
+          });
+
+          if (needsNameUpdate || needsAddressUpdate) {
+            console.log('🔍 InvoiceScreen: Updating customer details:', {
+              customerId: (existingCustomer as any).id,
+              originalName,
+              originalAddress,
+              currentName: customerInputName,
+              currentAddress: customerAddress,
+              needsNameUpdate,
+              needsAddressUpdate,
+              editingItem: !!editingItem,
+            });
+            await persistCustomerDirectPatch(
+              (existingCustomer as any).id,
+              customerInputName,
+              needsAddressUpdate ? customerAddress : undefined,
+            );
+            // Refresh customers list to get updated data
+            await fetchAll('');
+            // Update existingCustomer reference after refresh
+            const refreshedAfter =
+              customers && customers.length > 0 ? customers : [];
+            existingCustomer = refreshedAfter.find(
+              c => Number(c.id) === resolvedCustomerId,
+            ) as any;
+            console.log('✅ InvoiceScreen: Customer updated successfully');
+          } else {
+            console.log('ℹ️ InvoiceScreen: No customer update needed');
+          }
+        } else {
+          console.log(
+            '⚠️ InvoiceScreen: No existingCustomer found, skipping customer update',
+            {
+              existingCustomer: !!existingCustomer,
+              resolvedCustomerId,
+            },
+          );
+        }
+      } catch (error) {
+        console.error('❌ InvoiceScreen: Error updating customer:', error);
+        // Don't block the transaction save if customer update fails
+      }
+
       // Prune null/undefined fields
       const cleanBody: any = Object.fromEntries(
         Object.entries(baseBody).filter(

@@ -1,4 +1,10 @@
-import React, { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useCallback,
+} from 'react';
 import {
   View,
   Text,
@@ -202,21 +208,42 @@ interface Customer {
   partyType?: string; // 'customer' or 'supplier'
 }
 
-// Utility: De-duplicate customers by stable identity
-// Key uses id when available, otherwise falls back to name + partyType
+// Utility: STRICT De-duplicate customers by ID only
+// This is critical to prevent React duplicate key errors
 const dedupeCustomers = (list: Customer[]): Customer[] => {
   try {
-    const seen = new Set<string>();
+    if (!Array.isArray(list)) return [];
+    const seenIds = new Set<string | number>();
     const result: Customer[] = [];
+    let duplicateCount = 0;
+
     for (const item of list) {
-      if (!item) continue;
-      const key = `${item.id || ''}|${(item as any).partyType || ''}|${
-        item.name || ''
-      }`;
-      if (seen.has(key)) continue;
-      seen.add(key);
+      if (!item || typeof item !== 'object') continue;
+
+      const id = item.id;
+      // If item has an ID, check for duplicates strictly by ID
+      if (id !== undefined && id !== null) {
+        const idStr = String(id);
+        if (seenIds.has(idStr)) {
+          duplicateCount++;
+          console.warn('⚠️ dedupeCustomers: Removed duplicate ID:', {
+            id: id,
+            name: item.name,
+          });
+          continue; // Skip duplicate - only keep first occurrence
+        }
+        seenIds.add(idStr);
+      }
+      // If no ID, allow it (will get unique key via index in rendering)
       result.push(item);
     }
+
+    if (duplicateCount > 0) {
+      console.log(
+        `🔍 dedupeCustomers: Removed ${duplicateCount} duplicate(s) from ${list.length} items`,
+      );
+    }
+
     return result;
   } catch (e) {
     console.warn('Deduplication error:', e);
@@ -238,6 +265,23 @@ interface FilterOptions {
 const CustomerScreen: React.FC = () => {
   // Screen tracking hook
   useScreenTracking();
+
+  // Unique key generator - uses stable index + customer ID for stable but unique keys
+  // Index is ALWAYS unique in array.map(), so this guarantees uniqueness
+  const getUniqueKey = useCallback(
+    (index: number, customerId: string | number | undefined | null) => {
+      // CRITICAL: Index is ALWAYS unique in array.map() (0, 1, 2, 3...)
+      // Use index as PRIMARY differentiator to guarantee absolute uniqueness
+      const id =
+        customerId !== undefined && customerId !== null
+          ? String(customerId)
+          : `no-id-${index}`;
+      // Index first ensures uniqueness even if customer IDs are duplicated
+      // Format: index-customerId (index guarantees uniqueness)
+      return `idx-${index}-cust-${id}`;
+    },
+    [],
+  );
 
   // Configure StatusBar like ProfileScreen: translucent with spacer for colored header
   const { statusBarSpacer } = useStatusBarWithGradient('Customer', [
@@ -1210,19 +1254,14 @@ const CustomerScreen: React.FC = () => {
     const unsubscribe = navigation.addListener('focus', () => {
       console.log('🎯 CustomerScreen: Focus event triggered');
 
-      // Always trigger a lightweight background refresh to keep data fresh
-      setTimeout(() => {
-        handleManualRefresh();
-      }, 50);
-
       // Check if user just returned from Add Customer screen (within last 30 seconds)
       const timeSinceNavigation =
         Date.now() - globalCustomerCache.lastNavigationTime;
       const justReturnedFromAddScreen =
         timeSinceNavigation < 30000 && timeSinceNavigation > 1000; // 1-30 seconds ago
 
-      // Check if data is stale (more than 5 seconds) and not already refreshing
-      const isDataStale = Date.now() - globalCustomerCache.lastUpdated > 5000; // 5 seconds
+      // Check if data is stale (more than 2 seconds) - more aggressive refresh
+      const isDataStale = Date.now() - globalCustomerCache.lastUpdated > 2000; // 2 seconds
       const hasNoData =
         !globalCustomerCache.customers ||
         globalCustomerCache.customers.length === 0;
@@ -1239,43 +1278,26 @@ const CustomerScreen: React.FC = () => {
         shouldRefresh,
         isRefreshing: globalCustomerCache.isRefreshing,
         isInitializing: globalCustomerCache.isInitializing,
+        lastUpdated: globalCustomerCache.lastUpdated,
+        timeSinceLastUpdate: Date.now() - globalCustomerCache.lastUpdated,
       });
 
-      if (
-        shouldRefresh &&
-        !globalCustomerCache.isRefreshing &&
-        !globalCustomerCache.isInitializing
-      ) {
-        console.log('🔄 Data needs refresh, refreshing in background...');
-
-        // Use the manual refresh function for consistency
+      // Always refresh on focus to ensure data is up-to-date
+      // This is especially important when returning from AddPartyScreen or PurchaseScreen
+      if (!globalCustomerCache.isRefreshing && !globalCustomerCache.isInitializing) {
+        console.log('🔄 Triggering refresh on focus to ensure fresh data...');
         setTimeout(() => {
           handleManualRefresh();
-        }, 100); // Small delay to prevent immediate refresh
-      } else {
-        console.log('✅ Data is fresh, skipping focus refresh');
-      }
-
-      // Always refresh user data when screen comes into focus (e.g., after profile update)
-      const refreshUserDataOnFocus = async () => {
-        try {
-          const accessToken = await AsyncStorage.getItem('accessToken');
-          if (accessToken) {
-            console.log('🔄 CustomerScreen: Refreshing user data on focus...');
-            await fetchUserData(accessToken);
+        }, 100); // Small delay to prevent conflicts
+      } else if (shouldRefresh) {
+        // If refresh is in progress but data is stale, queue another refresh
+        console.log('⏸️ Refresh in progress, will refresh again when complete...');
+        setTimeout(() => {
+          if (!globalCustomerCache.isRefreshing) {
+            handleManualRefresh();
           }
-        } catch (error) {
-          console.warn(
-            '⚠️ CustomerScreen: Failed to refresh user data on focus:',
-            error,
-          );
-        }
-      };
-
-      // Refresh user data with a small delay to avoid conflicts
-      setTimeout(() => {
-        refreshUserDataOnFocus();
-      }, 200);
+        }, 1500);
+      }
     });
 
     return unsubscribe;
@@ -1308,54 +1330,31 @@ const CustomerScreen: React.FC = () => {
     const handleProfileUpdate = async () => {
       try {
         console.log(
-          '📢 CustomerScreen: Profile update event received, refreshing user data...',
+          '📢 CustomerScreen: Profile update event received, forcing full refresh...',
         );
 
-        // First, check cached data for immediate updates
-        const cachedUserData = await AsyncStorage.getItem('cachedUserData');
-        if (cachedUserData) {
-          const userData = JSON.parse(cachedUserData);
-          if (userData && (userData.businessName || userData.ownerName)) {
-            console.log(
-              '🔄 CustomerScreen: Updating from cached data after profile update:',
-              {
-                businessName: userData.businessName,
-                ownerName: userData.ownerName,
-              },
-            );
-            updateBusinessNameIfPresent(userData.businessName || '');
-            setUserData(userData);
+        // Clear cache immediately to force fresh data fetch
+        clearCustomerCache();
+        clearVoucherCache();
+        
+        // Mark cache as stale to trigger refresh
+        globalCustomerCache.lastUpdated = 0;
+        globalCustomerCache.isRefreshing = false;
 
-            // Update global cache as well
-            globalCustomerCache.userData = userData;
-            globalCustomerCache.lastUpdated = Date.now();
-          }
-        }
-
-        // Then fetch fresh data in background
-        const accessToken = await AsyncStorage.getItem('accessToken');
-        if (accessToken) {
-          setTimeout(async () => {
-            try {
-              console.log(
-                '🔄 CustomerScreen: Refreshing all data after profile update...',
-              );
-              await fetchUserData(accessToken);
-              await fetchCustomersData(accessToken);
-              console.log('✅ CustomerScreen: Data refresh completed');
-            } catch (error) {
-              console.warn(
-                '⚠️ CustomerScreen: Background refresh failed:',
-                error,
-              );
-            }
-          }, 1000); // Small delay to allow cache to be written
-        }
+        // Trigger immediate refresh using handleManualRefresh which properly updates state
+        console.log('🔄 CustomerScreen: Triggering manual refresh after profile update...');
+        setTimeout(() => {
+          handleManualRefresh();
+        }, 100); // Small delay to ensure cache is cleared
       } catch (error) {
         console.warn(
-          '⚠️ CustomerScreen: Failed to refresh user data on profile update:',
+          '⚠️ CustomerScreen: Failed to refresh on profile update:',
           error,
         );
+        // Fallback: try manual refresh anyway
+        setTimeout(() => {
+          handleManualRefresh();
+        }, 500);
       }
     };
 
@@ -1650,29 +1649,49 @@ const CustomerScreen: React.FC = () => {
 
       // Check if we need to refresh (e.g., after adding a customer)
       const shouldRefresh = route.params?.shouldRefresh;
-      const isDataStale = Date.now() - globalCustomerCache.lastUpdated > 30000; // 30 seconds
+      const isDataStale = Date.now() - globalCustomerCache.lastUpdated > 2000; // 2 seconds - more aggressive
       const isCacheForcedStale = globalCustomerCache.lastUpdated === 0; // Force refresh if cache cleared
 
-      if (shouldRefresh || isCacheForcedStale) {
-        console.log(
-          '🔄 useFocusEffect: Forcing refresh (shouldRefresh or cache cleared)...',
-          {
-            shouldRefresh,
-            isCacheForcedStale,
-            lastUpdated: globalCustomerCache.lastUpdated,
-          },
-        );
-        // Clear cache to ensure fresh data including new vouchers
-        clearCustomerCache();
-        clearVoucherCache();
-        setTimeout(() => {
-          handleManualRefresh();
-        }, 100);
-      } else if (isDataStale) {
-        console.log('🔄 useFocusEffect: Data is stale, background refresh...');
-        setTimeout(() => {
-          handleManualRefresh();
-        }, 200);
+      console.log('🔍 useFocusEffect refresh check:', {
+        shouldRefresh,
+        isDataStale,
+        isCacheForcedStale,
+        lastUpdated: globalCustomerCache.lastUpdated,
+        timeSinceLastUpdate: Date.now() - globalCustomerCache.lastUpdated,
+        isRefreshing: globalCustomerCache.isRefreshing,
+      });
+
+      // Always refresh if cache is forced stale, shouldRefresh is true, or data is stale
+      if (shouldRefresh || isCacheForcedStale || isDataStale) {
+        if (shouldRefresh || isCacheForcedStale) {
+          console.log(
+            '🔄 useFocusEffect: Forcing refresh (shouldRefresh or cache cleared)...',
+            {
+              shouldRefresh,
+              isCacheForcedStale,
+              lastUpdated: globalCustomerCache.lastUpdated,
+            },
+          );
+          // Clear cache to ensure fresh data including new vouchers
+          clearCustomerCache();
+          clearVoucherCache();
+        }
+        
+        // Trigger refresh if not already refreshing
+        if (!globalCustomerCache.isRefreshing && !globalCustomerCache.isInitializing) {
+          setTimeout(() => {
+            handleManualRefresh();
+          }, 100);
+        }
+      } else {
+        // Even if data seems fresh, do a lightweight refresh to catch any updates
+        // This ensures data is always up-to-date when screen comes into focus
+        if (!globalCustomerCache.isRefreshing && !globalCustomerCache.isInitializing) {
+          console.log('🔄 useFocusEffect: Triggering background refresh to ensure fresh data...');
+          setTimeout(() => {
+            handleManualRefresh();
+          }, 300);
+        }
       }
     }, [route.params?.shouldRefresh, notificationService]),
   );
@@ -3513,8 +3532,14 @@ const CustomerScreen: React.FC = () => {
             it.party_type || it.partyType || '',
           ).toLowerCase();
           const normalizedPT = ptRaw === 'supplier' ? 'supplier' : 'customer';
+          // Ensure unique ID - use actual ID if available, otherwise create truly unique fallback
+          const uniqueId = it.id
+            ? String(it.id)
+            : `p_${idx}_${Date.now()}_${Math.random()
+                .toString(36)
+                .substr(2, 9)}`;
           return {
-            id: String(it.id ?? `p_${idx}`),
+            id: uniqueId,
             name,
             location: 'India',
             lastInteraction: it.createdAt
@@ -3852,7 +3877,10 @@ const CustomerScreen: React.FC = () => {
     }
   };
 
-  const filteredCustomers = getFilteredCustomers();
+  // Get filtered customers and ensure they're deduplicated BEFORE rendering
+  const rawFilteredCustomers = getFilteredCustomers();
+  // Apply strict deduplication to prevent any duplicate IDs
+  const filteredCustomers = dedupeCustomers(rawFilteredCustomers);
 
   // Debug logging
   console.log('🔍 Current state:', {
@@ -5056,11 +5084,12 @@ const CustomerScreen: React.FC = () => {
         }
       };
 
+      // Use the unique key generator to ensure absolutely unique keys
+      // This uses a counter that increments for each key, guaranteeing uniqueness
+      const uniqueKey = getUniqueKey(index, customer.id);
+
       return (
-        <TouchableOpacity
-          key={`customer_${customer.id}_${index}`}
-          onPress={handleCustomerPress}
-        >
+        <TouchableOpacity key={uniqueKey} onPress={handleCustomerPress}>
           <Animated.View
             style={[
               styles.customerItem,
@@ -5127,10 +5156,94 @@ const CustomerScreen: React.FC = () => {
         );
       }
 
-      const validCustomers = filteredCustomers
-        .filter(customer => customer && typeof customer === 'object')
-        .map((customer, index) => renderCustomerItem(customer, index))
+      // STRICT Deduplication: Remove ALL duplicates by ID
+      // This is critical to prevent React duplicate key errors
+      const seenIds = new Set<string | number>();
+      const uniqueCustomers: typeof filteredCustomers = [];
+      let duplicateCount = 0;
+
+      filteredCustomers.forEach((customer, originalIndex) => {
+        if (!customer || typeof customer !== 'object') return;
+
+        const id = customer.id;
+
+        // If customer has an ID, check for duplicates strictly by ID only
+        if (id !== undefined && id !== null) {
+          const idStr = String(id);
+          if (seenIds.has(idStr)) {
+            duplicateCount++;
+            console.warn('⚠️ Duplicate customer ID REMOVED:', {
+              id: id,
+              name: customer.name,
+              originalIndex: originalIndex,
+              totalDuplicates: duplicateCount,
+            });
+            return; // Skip duplicate - only keep first occurrence
+          }
+          seenIds.add(idStr);
+        }
+        // If no ID, allow it (will get unique key via index)
+
+        uniqueCustomers.push(customer);
+      });
+
+      if (duplicateCount > 0) {
+        console.log(
+          `🔍 Removed ${duplicateCount} duplicate customer(s) to prevent key collisions`,
+        );
+      }
+
+      // Final safeguard: ensure each customer gets a truly unique index
+      // Map with index to guarantee uniqueness even if deduplication missed something
+      // Index is ALWAYS unique in array.map(), so this guarantees unique keys
+      const generatedKeys = new Set<string>();
+      const validCustomers = uniqueCustomers
+        .map((customer, index) => {
+          // Double-check: ensure customer is valid before rendering
+          if (!customer || typeof customer !== 'object') return null;
+
+          // Generate key - index guarantees uniqueness, but verify anyway
+          const uniqueKey = getUniqueKey(index, customer.id);
+
+          // This should NEVER happen since index is always unique in map()
+          // But we check anyway to catch any bugs
+          if (generatedKeys.has(uniqueKey)) {
+            console.error(
+              '❌ CRITICAL: Duplicate key detected! This should be impossible!',
+              {
+                key: uniqueKey,
+                index: index,
+                customerId: customer.id,
+                customerName: customer.name,
+                allKeys: Array.from(generatedKeys),
+              },
+            );
+            // Skip this item to prevent React error
+            return null;
+          }
+          generatedKeys.add(uniqueKey);
+
+          // Render with guaranteed unique index (index is always 0, 1, 2, 3... unique)
+          return renderCustomerItem(customer, index);
+        })
         .filter(Boolean); // Remove any null/undefined items
+
+      // Log deduplication results for debugging
+      if (uniqueCustomers.length !== filteredCustomers.length) {
+        console.log('🔍 Deduplication removed duplicates:', {
+          original: filteredCustomers.length,
+          afterDedup: uniqueCustomers.length,
+          removed: filteredCustomers.length - uniqueCustomers.length,
+        });
+      }
+
+      // Final validation
+      if (generatedKeys.size !== validCustomers.length) {
+        console.error('❌ Key count mismatch!', {
+          uniqueKeys: generatedKeys.size,
+          validCustomers: validCustomers.length,
+        });
+      }
 
       if (validCustomers.length === 0) {
         return (

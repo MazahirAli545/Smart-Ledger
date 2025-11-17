@@ -50,6 +50,7 @@ import AudioRecorderPlayer from 'react-native-audio-recorder-player';
 import { launchImageLibrary } from 'react-native-image-picker';
 import { upsertItemNames } from '../../api/items';
 import ItemNameSuggestions from '../../components/ItemNameSuggestions';
+import { profileUpdateManager } from '../../utils/profileUpdateManager';
 
 // Add missing interfaces
 interface PaymentSearchFilterState {
@@ -1480,6 +1481,60 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
     return /^([6-9])\d{9}$/.test(digits);
   };
 
+  // Helper functions for supplier update validation
+  const isValidPhoneValue = (val?: string): boolean => {
+    if (!val) return false;
+    const digits = String(val).replace(/\D/g, '');
+    return digits.length >= 10 && digits.length <= 13;
+  };
+
+  const isValidAddressValue = (val?: string): boolean => {
+    return !!(val && String(val).trim().length > 0);
+  };
+
+  // Function to directly patch supplier record (similar to PaymentScreen)
+  const persistSupplierDirectPatch = useCallback(
+    async (
+      customerId?: number,
+      name?: string,
+      phone?: string,
+      address?: string,
+    ) => {
+      try {
+        if (!customerId) return;
+        const token = await AsyncStorage.getItem('accessToken');
+        if (!token) return;
+        const payload: any = {};
+        if (name && String(name).trim()) {
+          const trimmed = String(name).trim();
+          payload.name = trimmed;
+          payload.partyName = trimmed; // ensure both fields update on backend
+        }
+        if (isValidPhoneValue(phone))
+          payload.phone = String(phone).replace(/\D/g, '');
+        if (isValidAddressValue(address)) {
+          payload.address = address;
+          payload.addressLine1 = address;
+          payload.addresses = [
+            { type: 'billing', flatBuildingNumber: address },
+          ];
+        }
+        if (Object.keys(payload).length === 0) return;
+        await unifiedApi.patch(`/customers/${customerId}`, payload);
+        console.log('✅ PurchaseScreen: Supplier updated successfully:', {
+          customerId,
+          name,
+          phone,
+          address,
+        });
+      } catch (error) {
+        console.error('❌ PurchaseScreen: Error updating supplier:', error);
+        // Don't throw - supplier update failure shouldn't block transaction save
+      }
+    },
+    [],
+  );
+
   const {
     suppliers,
     add: addSupplierCtx,
@@ -2675,6 +2730,133 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
               formPartyAddress: supplierAddress,
             });
           }
+
+          // If user changed supplier name/address/phone from the selected supplier, push an update
+          try {
+            // Find existing supplier to compare values
+            let existingSupplier = suppliers.find(
+              (s: any) => Number(s.id) === supplierIdToUse,
+            ) as any;
+
+            // If not found in suppliers list, try to fetch from API
+            if (!existingSupplier && supplierIdToUse) {
+              try {
+                const supplierResponse = (await unifiedApi.getCustomerById(
+                  supplierIdToUse,
+                )) as {
+                  data: any;
+                  status: number;
+                  headers: Headers;
+                };
+                const supplierData =
+                  supplierResponse?.data ?? supplierResponse ?? {};
+                existingSupplier = supplierData;
+              } catch (fetchError) {
+                console.warn(
+                  '⚠️ PurchaseScreen: Could not fetch supplier details:',
+                  fetchError,
+                );
+              }
+            }
+
+            if (existingSupplier && supplierIdToUse) {
+              const supplierInputName = (supplier || supplierNameToUse || '')
+                .toString()
+                .trim();
+              // When editing, compare against original values from editingItem
+              // When creating, compare against existing supplier values
+              const originalName = editingItem
+                ? editingItem.partyName || editingItem.supplierName || ''
+                : (existingSupplier as any).partyName ||
+                  (existingSupplier as any).name ||
+                  '';
+
+              const originalPhone = editingItem
+                ? editingItem.partyPhone || editingItem.supplierPhone || ''
+                : (existingSupplier as any).phoneNumber ||
+                  (existingSupplier as any).phone ||
+                  (existingSupplier as any).phone_number ||
+                  '';
+
+              const originalAddress = editingItem
+                ? editingItem.partyAddress || editingItem.supplierAddress || ''
+                : (existingSupplier as any).address ||
+                  (existingSupplier as any).addressLine1 ||
+                  (existingSupplier as any).address_line1 ||
+                  '';
+
+              const needsNameUpdate =
+                supplierInputName.trim() !== originalName.trim();
+              const needsPhoneUpdate =
+                isValidPhoneValue(supplierPhone) &&
+                supplierPhone.trim().replace(/\D/g, '') !==
+                  (originalPhone || '').trim().replace(/\D/g, '');
+              const needsAddressUpdate =
+                isValidAddressValue(supplierAddress) &&
+                supplierAddress.trim() !== (originalAddress || '').trim();
+
+              console.log('🔍 PurchaseScreen: Checking supplier update:', {
+                existingSupplier: !!existingSupplier,
+                supplierId: (existingSupplier as any)?.id,
+                supplierIdToUse,
+                supplierInputName,
+                originalName,
+                supplierPhone,
+                originalPhone,
+                supplierAddress,
+                originalAddress,
+                needsNameUpdate,
+                needsPhoneUpdate,
+                needsAddressUpdate,
+                editingItem: !!editingItem,
+                supplierState: supplier,
+                supplierNameToUseState: supplierNameToUse,
+              });
+
+              if (needsNameUpdate || needsPhoneUpdate || needsAddressUpdate) {
+                console.log('🔍 PurchaseScreen: Updating supplier details:', {
+                  supplierId: (existingSupplier as any).id,
+                  originalName,
+                  originalPhone,
+                  originalAddress,
+                  currentName: supplierInputName,
+                  currentPhone: supplierPhone,
+                  currentAddress: supplierAddress,
+                  needsNameUpdate,
+                  needsPhoneUpdate,
+                  needsAddressUpdate,
+                  editingItem: !!editingItem,
+                });
+                await persistSupplierDirectPatch(
+                  (existingSupplier as any).id,
+                  supplierInputName,
+                  needsPhoneUpdate ? supplierPhone : undefined,
+                  needsAddressUpdate ? supplierAddress : undefined,
+                );
+                // Refresh suppliers list to get updated data
+                await fetchSuppliersCtx('');
+                // Emit profile update event to refresh CustomerScreen
+                console.log(
+                  '📢 PurchaseScreen: Emitting profile update event after supplier update',
+                );
+                profileUpdateManager.emitProfileUpdate();
+                console.log('✅ PurchaseScreen: Supplier updated successfully');
+              } else {
+                console.log('ℹ️ PurchaseScreen: No supplier update needed');
+              }
+            } else {
+              console.log(
+                '⚠️ PurchaseScreen: No existingSupplier found, skipping supplier update',
+                {
+                  existingSupplier: !!existingSupplier,
+                  supplierIdToUse,
+                },
+              );
+            }
+          } catch (error) {
+            console.error('❌ PurchaseScreen: Error updating supplier:', error);
+            // Don't block the transaction save if supplier update fails
+          }
         } else {
           // POST create: build transaction body like Sell
           const transBody: any = {
@@ -2804,6 +2986,12 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
       setEditingItem(null);
       setShowCreateForm(false);
       resetForm();
+
+      // Emit profile update event to refresh CustomerScreen
+      console.log(
+        '📢 PurchaseScreen: Emitting profile update event after transaction save',
+      );
+      profileUpdateManager.emitProfileUpdate();
 
       // Mark CustomerScreen's cache as stale so it will refetch when focused
       // This ensures other screens pick up the updated data

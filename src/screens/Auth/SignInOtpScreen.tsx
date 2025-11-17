@@ -15,7 +15,7 @@ import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import ProperSystemNotificationService from '../../services/properSystemNotificationService';
+import NotificationService from '../../services/notificationService';
 import { unifiedApi } from '../../api/unifiedApiService';
 import { verifyOtp, getCurrentUser } from '../../api';
 import { useAuth } from '../../context/AuthContext';
@@ -382,54 +382,33 @@ const SignInOtpScreen = () => {
 
             // Initialize notifications and register FCM token for new user
             try {
-              const proper = ProperSystemNotificationService.getInstance();
-              await proper.initializeNotifications();
-              // Get FCM token - initializeNotifications() should have fetched it,
-              // but refresh if needed to ensure we have it
-              let fcmToken = proper.getCurrentFCMToken();
+              const notificationService = NotificationService.getInstance();
+              const initialized =
+                await notificationService.initializeNotifications();
+              let fcmToken: string | null = null;
+              if (initialized) {
+                fcmToken = await notificationService.refreshFCMToken();
+              }
               if (!fcmToken) {
-                fcmToken = await proper.refreshFCMToken();
+                console.warn(
+                  '⚠️ No cached FCM token for new user, attempting direct fetch via messaging()',
+                );
+                try {
+                  fcmToken = await messaging().getToken();
+                } catch (directError) {
+                  console.warn(
+                    '⚠️ Direct FCM token fetch failed:',
+                    directError,
+                  );
+                }
               }
               if (fcmToken) {
                 console.log(
                   '🔔 Registering FCM token for new user:',
                   fcmToken.substring(0, 20) + '...',
                 );
-                console.log(
-                  '🔔 API URL:',
-                  // Use unified API
-                  '/notifications/register-token',
-                );
-                console.log('🔔 Authorization token length:', token.length);
-                console.log('🔔 Request body:', {
-                  token: fcmToken.substring(0, 20) + '...',
-                  deviceType: Platform.OS,
-                });
-
-                // Use unified API
-                const fcmResponse = (await unifiedApi.post(
-                  '/notifications/register-token',
-                  {
-                    token: fcmToken,
-                    deviceType: Platform.OS,
-                  },
-                )) as { data: any; status: number; headers: Headers };
-                // unifiedApi returns { data, status, headers } structure
-                if (fcmResponse.status >= 200 && fcmResponse.status < 300) {
-                  const fcmResult = fcmResponse.data || fcmResponse;
-                  console.log('🔔 FCM Response:', fcmResult);
-                  console.log(
-                    '✅ FCM token registered for new user:',
-                    fcmResult,
-                  );
-                } else {
-                  const errorText = fcmResponse.data;
-                  console.warn(
-                    '⚠️ FCM token registration failed for new user:',
-                    fcmResponse.status,
-                  );
-                  console.warn('⚠️ Error response:', errorText);
-                }
+                await notificationService.sendTokenToBackend(fcmToken);
+                console.log('✅ FCM token registered for new user');
               } else {
                 console.warn(
                   '⚠️ No FCM token available for new user (likely emulator)',
@@ -500,76 +479,33 @@ const SignInOtpScreen = () => {
 
             // Initialize notifications and register FCM token for existing user
             try {
-              const proper = ProperSystemNotificationService.getInstance();
-              await proper.initializeNotifications();
-              // Get FCM token - initializeNotifications() should have fetched it,
-              // but refresh if needed to ensure we have it
-              let fcmToken = proper.getCurrentFCMToken();
+              const notificationService = NotificationService.getInstance();
+              const initialized =
+                await notificationService.initializeNotifications();
+              let fcmToken: string | null = null;
+              if (initialized) {
+                fcmToken = await notificationService.refreshFCMToken();
+              }
               if (!fcmToken) {
-                fcmToken = await proper.refreshFCMToken();
+                console.warn(
+                  '⚠️ No cached FCM token for existing user, attempting direct fetch via messaging()',
+                );
+                try {
+                  fcmToken = await messaging().getToken();
+                } catch (messagingError) {
+                  console.warn(
+                    '⚠️ Direct FCM token fetch via messaging() failed:',
+                    messagingError,
+                  );
+                }
               }
               if (fcmToken) {
                 console.log(
                   '🔔 Registering FCM token for existing user:',
                   fcmToken.substring(0, 20) + '...',
                 );
-                console.log(
-                  '🔔 API URL:',
-                  // Use unified API
-                  '/notifications/register-token',
-                );
-                console.log('🔔 Authorization token length:', token.length);
-                console.log('🔔 Request body:', {
-                  token: fcmToken.substring(0, 20) + '...',
-                  deviceType: Platform.OS,
-                });
-
-                const fcmResponse = (await unifiedApi.post(
-                  '/notifications/register-token',
-                  {
-                    token: fcmToken,
-                    deviceType: Platform.OS,
-                  },
-                )) as { data: any; status: number; headers: Headers };
-
-                // unifiedApi returns { data, status, headers } structure
-                console.log('🔔 FCM Response status:', fcmResponse.status);
-                // Safely log headers - headers might be undefined or not have entries() method
-                if (fcmResponse.headers) {
-                  try {
-                    // Check if headers has entries method (browser) or is a plain object (React Native)
-                    if (typeof fcmResponse.headers.entries === 'function') {
-                      console.log(
-                        '🔔 FCM Response headers:',
-                        Object.fromEntries(fcmResponse.headers.entries()),
-                      );
-                    } else if (typeof fcmResponse.headers === 'object') {
-                      // React Native might return headers as a plain object
-                      console.log(
-                        '🔔 FCM Response headers:',
-                        fcmResponse.headers,
-                      );
-                    }
-                  } catch (e) {
-                    console.log('🔔 FCM Response headers: (unable to log)', e);
-                  }
-                }
-
-                // unifiedApi returns { data, status, headers } structure
-                if (fcmResponse.status >= 200 && fcmResponse.status < 300) {
-                  const fcmResult = fcmResponse.data || fcmResponse;
-                  console.log(
-                    '✅ FCM token registered for existing user:',
-                    fcmResult,
-                  );
-                } else {
-                  const errorText = fcmResponse.data;
-                  console.warn(
-                    '⚠️ FCM token registration failed for existing user:',
-                    fcmResponse.status,
-                  );
-                  console.warn('⚠️ Error response:', errorText);
-                }
+                await notificationService.sendTokenToBackend(fcmToken);
+                console.log('✅ FCM token registered for existing user');
               } else {
                 console.warn(
                   '⚠️ No FCM token available for existing user (likely emulator)',
@@ -665,46 +601,36 @@ const SignInOtpScreen = () => {
                 console.log(
                   '🔔 LEGACY FLOW (EXISTING USER) - Initializing notifications and registering FCM token...',
                 );
-                const proper = ProperSystemNotificationService.getInstance();
-                const initialized = await proper.initializeNotifications();
+                const notificationService = NotificationService.getInstance();
+                const initialized =
+                  await notificationService.initializeNotifications();
 
+                let fcmToken: string | null = null;
                 if (initialized) {
-                  // Get FCM token and ensure it's registered
-                  const fcmToken = await proper.getFCMToken();
-                  if (fcmToken) {
-                    console.log(
-                      '✅ LEGACY FLOW (EXISTING USER) - FCM token obtained, registering with backend...',
-                    );
-                    // Ensure token is registered - refreshFCMToken will re-register it
-                    await proper.refreshFCMToken();
-                  } else {
-                    console.warn(
-                      '⚠️ LEGACY FLOW (EXISTING USER) - No FCM token available',
-                    );
-                  }
-                } else {
-                  // If initialization failed, try direct registration
-                  console.log(
-                    '⚠️ LEGACY FLOW (EXISTING USER) - Initialization failed, trying direct FCM token registration...',
+                  fcmToken = await notificationService.refreshFCMToken();
+                }
+                if (!fcmToken) {
+                  console.warn(
+                    '⚠️ LEGACY FLOW (EXISTING USER) - No FCM token available from service, trying messaging() directly...',
                   );
                   try {
-                    const fcmToken = await messaging().getToken();
-                    if (fcmToken && resultData.accessToken) {
-                      // Use unified API
-                      await unifiedApi.post('/notifications/register-token', {
-                        token: fcmToken,
-                        deviceType: Platform.OS,
-                      });
-                      console.log(
-                        '✅ LEGACY FLOW (EXISTING USER) - FCM token registered directly',
-                      );
-                    }
+                    fcmToken = await messaging().getToken();
                   } catch (directError) {
                     console.error(
                       '❌ LEGACY FLOW (EXISTING USER) - Direct FCM token registration failed:',
                       directError,
                     );
                   }
+                }
+                if (fcmToken) {
+                  await notificationService.sendTokenToBackend(fcmToken);
+                  console.log(
+                    '✅ LEGACY FLOW (EXISTING USER) - FCM token registered successfully',
+                  );
+                } else {
+                  console.warn(
+                    '⚠️ LEGACY FLOW (EXISTING USER) - No FCM token available',
+                  );
                 }
               } catch (fcmError) {
                 console.error(
@@ -793,44 +719,34 @@ const SignInOtpScreen = () => {
               console.log(
                 '🔔 LEGACY FLOW - Initializing notifications and registering FCM token...',
               );
-              const proper = ProperSystemNotificationService.getInstance();
-              const initialized = await proper.initializeNotifications();
+              const notificationService = NotificationService.getInstance();
+              const initialized =
+                await notificationService.initializeNotifications();
 
+              let fcmToken: string | null = null;
               if (initialized) {
-                // Get FCM token and ensure it's registered
-                const fcmToken = await proper.getFCMToken();
-                if (fcmToken) {
-                  console.log(
-                    '✅ LEGACY FLOW - FCM token obtained, registering with backend...',
-                  );
-                  // Ensure token is registered - refreshFCMToken will re-register it
-                  await proper.refreshFCMToken();
-                } else {
-                  console.warn('⚠️ LEGACY FLOW - No FCM token available');
-                }
-              } else {
-                // If initialization failed, try direct registration
-                console.log(
-                  '⚠️ LEGACY FLOW - Initialization failed, trying direct FCM token registration...',
+                fcmToken = await notificationService.refreshFCMToken();
+              }
+              if (!fcmToken) {
+                console.warn(
+                  '⚠️ LEGACY FLOW - No FCM token from service, trying messaging() directly...',
                 );
                 try {
-                  const fcmToken = await messaging().getToken();
-                  if (fcmToken && resultData.accessToken) {
-                    // Use unified API
-                    await unifiedApi.post('/notifications/register-token', {
-                      token: fcmToken,
-                      deviceType: Platform.OS,
-                    });
-                    console.log(
-                      '✅ LEGACY FLOW - FCM token registered directly',
-                    );
-                  }
+                  fcmToken = await messaging().getToken();
                 } catch (directError) {
                   console.error(
                     '❌ LEGACY FLOW - Direct FCM token registration failed:',
                     directError,
                   );
                 }
+              }
+              if (fcmToken) {
+                await notificationService.sendTokenToBackend(fcmToken);
+                console.log(
+                  '✅ LEGACY FLOW - FCM token registered successfully',
+                );
+              } else {
+                console.warn('⚠️ LEGACY FLOW - No FCM token available');
               }
             } catch (notifError) {
               console.error(

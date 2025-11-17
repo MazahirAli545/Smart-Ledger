@@ -9,7 +9,6 @@ import { clearDashboardCache } from '../screens/HomeScreen/Dashboard';
 import { clearContactsCache } from '../screens/HomeScreen/AddCustomerFromContactsScreen';
 import { sessionManager } from '../utils/sessionManager';
 import { clearNavigationState } from '../utils/navigationStateManager';
-import ProperSystemNotificationService from '../services/properSystemNotificationService';
 import NotificationService from '../services/notificationService';
 
 // Define the shape of the authentication context
@@ -58,8 +57,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
           // Initialize notifications on app start when session is present
           try {
-            const proper = ProperSystemNotificationService.getInstance();
-            await proper.initializeNotifications();
+            const notificationService = NotificationService.getInstance();
+            await notificationService.initializeNotifications();
           } catch (e) {
             console.log(
               '⚠️ Failed to initialize notifications on app start',
@@ -124,64 +123,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         try {
           console.log('🔔 Starting FCM token registration after login...');
 
-          // First, initialize notifications
-          const proper = ProperSystemNotificationService.getInstance();
-          const initialized = await proper.initializeNotifications();
+          const notificationService = NotificationService.getInstance();
+          const initialized =
+            await notificationService.initializeNotifications();
 
+          let fcmToken: string | null = null;
           if (initialized) {
-            // Get FCM token and register it
-            const fcmToken = await proper.getFCMToken();
-            if (fcmToken) {
-              console.log(
-                '✅ FCM token obtained after login, registering with backend...',
-              );
-              // The getFCMToken() already calls sendTokenToBackend internally,
-              // but we'll also ensure it's registered explicitly
-              await proper.refreshFCMToken();
-            } else {
-              console.warn(
-                '⚠️ No FCM token available after login initialization',
-              );
-            }
-          } else {
-            // If initialization failed, try to get token anyway and register
-            console.log(
-              '⚠️ Notification initialization failed, trying direct token registration...',
+            fcmToken = await notificationService.refreshFCMToken();
+          }
+          if (!fcmToken) {
+            console.warn(
+              '⚠️ Notification initialization failed or no token available, attempting direct fetch via messaging()',
             );
             try {
-              const fcmToken = await proper.getFCMToken();
-              if (fcmToken) {
-                // Manually send token to backend
-                const accessToken = await AsyncStorage.getItem('accessToken');
-                if (accessToken) {
-                  const { Platform } = require('react-native');
-                  const { unifiedApi } = require('../api/unifiedApiService');
-                  await unifiedApi.post('/notifications/register-token', {
-                    token: fcmToken,
-                    deviceType: Platform.OS,
-                  });
-                  console.log('✅ FCM token registered directly after login');
-                }
-              }
+              const messaging =
+                require('@react-native-firebase/messaging').default;
+              fcmToken = await messaging().getToken();
             } catch (directError) {
-              console.error(
-                '❌ Failed to register FCM token directly:',
-                directError,
-              );
+              console.error('❌ Direct FCM token fetch failed:', directError);
             }
           }
 
-          // Also ensure legacy service (if used elsewhere) updates and sends token
-          try {
-            const legacy = NotificationService.getInstance();
-            const tokenNow = await legacy.getFCMToken();
-            if (tokenNow) {
-              await legacy.sendTokenToBackend(tokenNow);
-            }
-          } catch (legacyError) {
+          if (fcmToken) {
+            await notificationService.sendTokenToBackend(fcmToken);
+            console.log('✅ FCM token registered after login');
+          } else {
             console.warn(
-              '⚠️ Legacy notification service token registration failed:',
-              legacyError,
+              '⚠️ No FCM token available after login initialization',
             );
           }
         } catch (e) {

@@ -169,7 +169,63 @@ class UnifiedApiService {
   }
 
   /**
-   * Make API request with caching, deduplication, and error handling
+   * Create timeout promise for fetch requests
+   */
+  private createTimeoutPromise(timeoutMs: number): Promise<never> {
+    return new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error(`Request timeout after ${timeoutMs}ms`));
+      }, timeoutMs);
+    });
+  }
+
+  /**
+   * Retry request with exponential backoff
+   */
+  private async retryRequest<T>(
+    fetcher: () => Promise<T>,
+    maxRetries: number = 3,
+    baseDelay: number = 1000,
+  ): Promise<T> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fetcher();
+      } catch (error: any) {
+        lastError = error;
+
+        // Don't retry on client errors (4xx) except 408 (timeout)
+        if (
+          error.status &&
+          error.status >= 400 &&
+          error.status < 500 &&
+          error.status !== 408
+        ) {
+          throw error;
+        }
+
+        // Don't retry on last attempt
+        if (attempt === maxRetries) {
+          break;
+        }
+
+        // Calculate exponential backoff delay
+        const delay = baseDelay * Math.pow(2, attempt);
+        console.log(
+          `🔄 Retrying request (attempt ${
+            attempt + 1
+          }/${maxRetries}) after ${delay}ms...`,
+        );
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    throw lastError || new Error('Request failed after retries');
+  }
+
+  /**
+   * Make API request with caching, deduplication, timeout, retry, and error handling
    */
   async request<T>(
     endpoint: string,
@@ -212,11 +268,25 @@ class UnifiedApiService {
       }
     }
 
-    // Build request options
+    // Determine timeout based on method and endpoint
+    // GET requests: 15s (longer for data fetching)
+    // POST/PUT/PATCH: 20s (longer for complex operations)
+    // DELETE: 10s (usually quick)
+    const getTimeout = () => {
+      if (method === 'GET') return 15000; // 15 seconds
+      if (method === 'DELETE') return 10000; // 10 seconds
+      return 20000; // 20 seconds for POST/PUT/PATCH
+    };
+
+    const timeoutMs = getTimeout();
+
+    // Build request options with keep-alive headers
     const requestOptions: RequestInit = {
       method,
       headers: {
         'Content-Type': 'application/json',
+        Connection: 'keep-alive', // Enable HTTP keep-alive
+        'Keep-Alive': 'timeout=60, max=1000', // Keep connection alive
         ...(authToken && { Authorization: `Bearer ${authToken}` }),
         ...headers,
       },
@@ -224,54 +294,112 @@ class UnifiedApiService {
       ...(body && { body: JSON.stringify(body) }),
     };
 
-    // Make request with deduplication
+    // Make request with deduplication, timeout, and retry
+    // 🎯 SAFETY: Only retry GET requests to prevent duplicate POST/PUT/DELETE operations
     const response = await this.deduplicator.deduplicate(cacheKey, async () => {
-      const res = await fetch(url, requestOptions);
+      const makeRequest = async () => {
+        // Race between fetch and timeout
+        const fetchPromise = fetch(url, requestOptions);
+        const timeoutPromise = this.createTimeoutPromise(timeoutMs);
 
-      if (!res.ok) {
-        let errorMessage = `Request failed with status ${res.status}`;
-        try {
-          const errorData = await res.json();
-          errorMessage = errorData.message || errorData.error || errorMessage;
-        } catch {
-          // If JSON parsing fails, use status text
-          errorMessage = res.statusText || errorMessage;
+        const res = await Promise.race([fetchPromise, timeoutPromise]);
+
+        if (!res.ok) {
+          let errorMessage = `Request failed with status ${res.status}`;
+          try {
+            const errorData = await res.json();
+            errorMessage = errorData.message || errorData.error || errorMessage;
+          } catch {
+            // If JSON parsing fails, use status text
+            errorMessage = res.statusText || errorMessage;
+          }
+
+          // Handle specific status codes with custom error class
+          if (res.status === 401) {
+            throw new ApiError(
+              'Authentication failed - Please login again',
+              401,
+            );
+          } else if (res.status === 403) {
+            // For 403, include more helpful message from backend if available
+            const backendMessage = errorMessage.includes('Request failed')
+              ? 'Access forbidden - Please check your permissions'
+              : errorMessage;
+            throw new ApiError(backendMessage, 403);
+          } else if (res.status === 408 || res.status === 504) {
+            // Timeout errors - retry these
+            throw new ApiError(
+              'Request timeout - Please try again',
+              res.status,
+            );
+          } else if (res.status >= 500) {
+            // Server errors - retry these
+            throw new ApiError(
+              'Server error - Please try again later',
+              res.status,
+            );
+          }
+
+          throw new ApiError(errorMessage, res.status);
         }
 
-        // Handle specific status codes with custom error class
-        if (res.status === 401) {
-          throw new ApiError('Authentication failed - Please login again', 401);
-        } else if (res.status === 403) {
-          // For 403, include more helpful message from backend if available
-          const backendMessage = errorMessage.includes('Request failed')
-            ? 'Access forbidden - Please check your permissions'
-            : errorMessage;
-          throw new ApiError(backendMessage, 403);
-        } else if (res.status >= 500) {
-          throw new ApiError(
-            'Server error - Please try again later',
-            res.status,
-          );
+        const data = await res.json();
+
+        // Cache GET requests with longer TTL for stable data
+        if (method === 'GET' && cache) {
+          // Use provided TTL or default based on endpoint type
+          const effectiveTTL = cacheTTL || this.getDefaultCacheTTL(endpoint);
+          this.cache.set(cacheKey, data, effectiveTTL);
         }
 
-        throw new ApiError(errorMessage, res.status);
-      }
-
-      const data = await res.json();
-
-      // Cache GET requests
-      if (method === 'GET' && cache) {
-        this.cache.set(cacheKey, data, cacheTTL);
-      }
-
-      return {
-        data,
-        status: res.status,
-        headers: res.headers,
+        return {
+          data,
+          status: res.status,
+          headers: res.headers,
+        };
       };
+
+      // Only retry GET requests to prevent duplicate operations
+      if (method === 'GET') {
+        return this.retryRequest(makeRequest);
+      } else {
+        // POST/PUT/PATCH/DELETE: Single attempt only (no retry to prevent duplicates)
+        return makeRequest();
+      }
     });
 
     return response;
+  }
+
+  /**
+   * Get default cache TTL based on endpoint type
+   */
+  private getDefaultCacheTTL(endpoint: string): number {
+    // User profile, subscription data - cache longer (5 minutes)
+    if (
+      endpoint.includes('/users/profile') ||
+      endpoint.includes('/subscriptions/current')
+    ) {
+      return 5 * 60 * 1000; // 5 minutes
+    }
+
+    // Customer/Supplier lists - cache longer (2 minutes)
+    if (endpoint.includes('/customers') || endpoint.includes('/suppliers')) {
+      return 2 * 60 * 1000; // 2 minutes
+    }
+
+    // Transactions - cache shorter (1 minute)
+    if (endpoint.includes('/transactions')) {
+      return 60 * 1000; // 1 minute
+    }
+
+    // Menus/folders - cache longer (3 minutes)
+    if (endpoint.includes('/menus')) {
+      return 3 * 60 * 1000; // 3 minutes
+    }
+
+    // Default: 30 seconds
+    return 30 * 1000;
   }
 
   /**

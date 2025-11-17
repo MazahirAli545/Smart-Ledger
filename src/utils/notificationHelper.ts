@@ -1,6 +1,7 @@
 import notifee, {
   AndroidImportance,
   AndroidVisibility,
+  AuthorizationStatus,
 } from '@notifee/react-native';
 
 /**
@@ -22,8 +23,16 @@ export async function showLocalNotification(
   options: LocalNotificationOptions,
 ): Promise<void> {
   try {
-    // Request permission if needed
-    await notifee.requestPermission();
+    const settings = await notifee.getNotificationSettings();
+    const authorized =
+      settings.authorizationStatus === AuthorizationStatus.AUTHORIZED ||
+      settings.authorizationStatus === AuthorizationStatus.PROVISIONAL;
+    if (!authorized) {
+      console.log(
+        '⚠️ Notification permission not granted yet – skipping local notification',
+      );
+      return;
+    }
 
     // Use provided channel ID or create a default one
     const channelId =
@@ -82,8 +91,16 @@ export async function showPlanUpdatedNotification(
   planPrice: number,
 ): Promise<void> {
   try {
-    // Request permission if needed
-    await notifee.requestPermission();
+    const settings = await notifee.getNotificationSettings();
+    const authorized =
+      settings.authorizationStatus === AuthorizationStatus.AUTHORIZED ||
+      settings.authorizationStatus === AuthorizationStatus.PROVISIONAL;
+    if (!authorized) {
+      console.log(
+        '⚠️ Notification permission not granted yet – skipping plan update notification',
+      );
+      return;
+    }
 
     // Create or get notification channel for Android
     const channelId = await notifee.createChannel({
@@ -124,5 +141,82 @@ export async function showPlanUpdatedNotification(
   } catch (error) {
     console.error('❌ Error showing plan update notification:', error);
     // Don't throw - allow the flow to continue even if notification fails
+  }
+}
+
+/**
+ * Show a notification after successful sign-in/sign-up
+ * @param displayName - Optional user display name
+ * @param isNewUser - Whether the user just registered (true) or signed in (false)
+ */
+export async function showSignInSuccessNotification(
+  displayName?: string,
+  isNewUser: boolean = false,
+): Promise<void> {
+  try {
+    const settings = await notifee.getNotificationSettings();
+    const authorized =
+      settings.authorizationStatus === AuthorizationStatus.AUTHORIZED ||
+      settings.authorizationStatus === AuthorizationStatus.PROVISIONAL;
+    if (!authorized) {
+      console.log(
+        '⚠️ Notification permission not granted yet – skipping sign-in notification',
+      );
+      return;
+    }
+
+    const channelId = await notifee.createChannel({
+      id: 'signin_notifications',
+      name: 'Sign In Notifications',
+      importance: AndroidImportance.HIGH,
+      visibility: AndroidVisibility.PUBLIC,
+      sound: 'default',
+      vibration: true,
+    });
+
+    const safeName =
+      displayName && displayName.trim().length > 0
+        ? displayName.trim()
+        : 'there';
+
+    const title = isNewUser ? '🎉 Welcome to Proper!' : '👋 Welcome back!';
+    const body = isNewUser
+      ? `Great to have you on board, ${safeName}! Your account is ready.`
+      : `Hi ${safeName}, we missed you! Let’s get back to business.`;
+
+    await notifee.displayNotification({
+      title,
+      body,
+      data: {
+        type: isNewUser ? 'signup_success' : 'signin_success',
+      },
+      android: {
+        channelId,
+        importance: AndroidImportance.HIGH,
+        visibility: AndroidVisibility.PUBLIC,
+        sound: 'default',
+        vibrationPattern: [300, 500],
+        pressAction: {
+          id: 'default',
+        },
+      },
+      ios: {
+        foregroundPresentationOptions: {
+          badge: true,
+          sound: true,
+          banner: true,
+          list: true,
+        },
+        sound: 'default',
+      },
+    });
+
+    console.log(
+      '✅ Sign-in notification sent:',
+      isNewUser ? 'new user' : 'existing user',
+    );
+  } catch (error) {
+    console.error('❌ Error showing sign-in notification:', error);
+    // Don't block the flow if notification fails
   }
 }

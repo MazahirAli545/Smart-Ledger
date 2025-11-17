@@ -1504,6 +1504,270 @@ const AddPartyScreen: React.FC = () => {
         console.warn('Optional /customers/add-info failed:', e);
       }
 
+      // Update all related vouchers/transactions with the new customer data
+      try {
+        console.log(
+          '🔄 AddPartyScreen: Updating related vouchers/transactions for customer:',
+          customerData.id,
+        );
+        const updatedCustomerData = {
+          partyName: partyName.trim(),
+          partyPhone: phoneNumber.trim().replace(/\D/g, ''),
+          partyAddress: address.trim(),
+        };
+
+        // Fetch all transactions for this customer
+        const transactionsResponse =
+          (await unifiedApi.getTransactionsByCustomer(customerData.id, {})) as {
+            data: any;
+            status: number;
+            headers: Headers;
+          };
+
+        const transactions =
+          transactionsResponse?.data?.data || transactionsResponse?.data || [];
+
+        if (Array.isArray(transactions) && transactions.length > 0) {
+          console.log(
+            `📝 AddPartyScreen: Found ${transactions.length} transactions to update`,
+          );
+
+          // Update each transaction in the background (don't block UI)
+          const updatePromises = transactions.map(async (transaction: any) => {
+            try {
+              // Use raw data if available (original transaction data), otherwise use enriched data
+              const rawTransaction = transaction._raw || transaction;
+
+              // Only update if the transaction actually references this customer
+              const transactionCustomerId =
+                rawTransaction.customer_id ||
+                rawTransaction.partyId ||
+                rawTransaction.customerId ||
+                transaction.customer_id ||
+                transaction.partyId ||
+                transaction.customerId;
+              if (
+                transactionCustomerId &&
+                Number(transactionCustomerId) === Number(customerData.id)
+              ) {
+                const updatePayload: any = {};
+                let needsUpdate = false;
+
+                // Update partyName if it's different
+                const currentPartyName =
+                  rawTransaction.partyName || transaction.partyName || '';
+                if (
+                  currentPartyName !== updatedCustomerData.partyName &&
+                  updatedCustomerData.partyName
+                ) {
+                  updatePayload.partyName = updatedCustomerData.partyName;
+                  needsUpdate = true;
+                }
+
+                // Update partyPhone if it's different and we have a valid phone
+                const currentPartyPhone =
+                  rawTransaction.partyPhone || transaction.partyPhone || '';
+                if (
+                  updatedCustomerData.partyPhone &&
+                  currentPartyPhone !== updatedCustomerData.partyPhone
+                ) {
+                  updatePayload.partyPhone = updatedCustomerData.partyPhone;
+                  needsUpdate = true;
+                }
+
+                // Update partyAddress if it's different and we have an address
+                const currentPartyAddress =
+                  rawTransaction.partyAddress || transaction.partyAddress || '';
+                if (
+                  updatedCustomerData.partyAddress &&
+                  currentPartyAddress !== updatedCustomerData.partyAddress
+                ) {
+                  updatePayload.partyAddress = updatedCustomerData.partyAddress;
+                  needsUpdate = true;
+                }
+
+                if (needsUpdate) {
+                  // Get userId for updatedBy field
+                  const userId = await getUserIdFromToken();
+
+                  // Build complete update payload with all required fields
+                  // Backend requires type and amount, so we need to include existing transaction data
+                  // Prefer rawTransaction data, fallback to transaction data
+                  const completeUpdatePayload: any = {
+                    // Required fields from existing transaction
+                    type: rawTransaction.type || transaction.type || 'credit', // Default to credit if not specified
+                    amount: Number(
+                      rawTransaction.amount ||
+                        rawTransaction.totalAmount ||
+                        transaction.amount ||
+                        transaction.totalAmount ||
+                        0,
+                    ),
+                    date:
+                      rawTransaction.date ||
+                      rawTransaction.transactionDate ||
+                      transaction.date ||
+                      transaction.transactionDate ||
+                      new Date().toISOString().split('T')[0],
+                    transactionDate:
+                      rawTransaction.transactionDate ||
+                      rawTransaction.date ||
+                      transaction.transactionDate ||
+                      transaction.date ||
+                      new Date().toISOString().split('T')[0],
+                    status:
+                      rawTransaction.status || transaction.status || 'Complete',
+                    // Updated party fields
+                    ...updatePayload,
+                    // Preserve other important fields
+                    partyId:
+                      rawTransaction.partyId ||
+                      rawTransaction.customer_id ||
+                      transaction.partyId ||
+                      transaction.customer_id ||
+                      customerData.id,
+                    customer_id:
+                      rawTransaction.customer_id ||
+                      rawTransaction.partyId ||
+                      transaction.customer_id ||
+                      transaction.partyId ||
+                      customerData.id,
+                    user_id:
+                      rawTransaction.user_id || transaction.user_id || userId,
+                    createdBy:
+                      rawTransaction.createdBy ||
+                      rawTransaction.user_id ||
+                      transaction.createdBy ||
+                      transaction.user_id ||
+                      userId,
+                    updatedBy: userId,
+                    // Preserve description, notes, method, category if they exist
+                    description:
+                      rawTransaction.description ||
+                      transaction.description ||
+                      '',
+                    notes: rawTransaction.notes || transaction.notes || '',
+                    method: rawTransaction.method || transaction.method || '',
+                    category:
+                      rawTransaction.category || transaction.category || '',
+                  };
+
+                  // Include items if transaction has items
+                  const transactionItems =
+                    rawTransaction.items ||
+                    rawTransaction.transactionItems ||
+                    transaction.items ||
+                    transaction.transactionItems;
+                  if (transactionItems && Array.isArray(transactionItems)) {
+                    completeUpdatePayload.items = transactionItems;
+                    completeUpdatePayload.transactionItems = transactionItems;
+                    completeUpdatePayload.voucherItems = transactionItems;
+                  }
+
+                  // Include financial fields if they exist
+                  if (
+                    rawTransaction.gstPct !== undefined ||
+                    transaction.gstPct !== undefined
+                  ) {
+                    completeUpdatePayload.gstPct =
+                      rawTransaction.gstPct || transaction.gstPct || 0;
+                  }
+                  if (
+                    rawTransaction.discount !== undefined ||
+                    transaction.discount !== undefined
+                  ) {
+                    completeUpdatePayload.discount =
+                      rawTransaction.discount || transaction.discount || 0;
+                  }
+                  if (
+                    rawTransaction.subTotal !== undefined ||
+                    transaction.subTotal !== undefined
+                  ) {
+                    completeUpdatePayload.subTotal =
+                      rawTransaction.subTotal || transaction.subTotal || 0;
+                  }
+                  if (
+                    rawTransaction.totalAmount !== undefined ||
+                    transaction.totalAmount !== undefined
+                  ) {
+                    completeUpdatePayload.totalAmount =
+                      rawTransaction.totalAmount ||
+                      transaction.totalAmount ||
+                      0;
+                  }
+
+                  // Include document numbers if they exist
+                  if (
+                    rawTransaction.invoiceNumber ||
+                    transaction.invoiceNumber
+                  ) {
+                    completeUpdatePayload.invoiceNumber =
+                      rawTransaction.invoiceNumber || transaction.invoiceNumber;
+                  }
+                  if (rawTransaction.billNumber || transaction.billNumber) {
+                    completeUpdatePayload.billNumber =
+                      rawTransaction.billNumber || transaction.billNumber;
+                  }
+                  if (
+                    rawTransaction.receiptNumber ||
+                    transaction.receiptNumber
+                  ) {
+                    completeUpdatePayload.receiptNumber =
+                      rawTransaction.receiptNumber || transaction.receiptNumber;
+                  }
+                  if (
+                    rawTransaction.purchaseNumber ||
+                    transaction.purchaseNumber
+                  ) {
+                    completeUpdatePayload.purchaseNumber =
+                      rawTransaction.purchaseNumber ||
+                      transaction.purchaseNumber;
+                  }
+
+                  await unifiedApi.updateTransaction(
+                    transaction.id,
+                    completeUpdatePayload,
+                  );
+                  console.log(
+                    `✅ AddPartyScreen: Updated transaction ${transaction.id}`,
+                  );
+                }
+              }
+            } catch (error) {
+              console.error(
+                `❌ AddPartyScreen: Error updating transaction ${transaction.id}:`,
+                error,
+              );
+              // Continue with other transactions even if one fails
+            }
+          });
+
+          // Wait for all updates to complete (but don't block navigation)
+          Promise.all(updatePromises)
+            .then(() => {
+              console.log(
+                '✅ AddPartyScreen: All related transactions updated successfully',
+              );
+            })
+            .catch(error => {
+              console.error(
+                '❌ AddPartyScreen: Some transaction updates failed:',
+                error,
+              );
+            });
+        } else {
+          console.log(
+            'ℹ️ AddPartyScreen: No transactions found for this customer',
+          );
+        }
+      } catch (error) {
+        console.error(
+          '❌ AddPartyScreen: Error updating related transactions:',
+          error,
+        );
+        // Don't block the success flow if transaction update fails
+      }
+
       // Emit profile update event to refresh user data in other screens
       console.log(
         '📢 AddPartyScreen: Emitting profile update event after party update',
