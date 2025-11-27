@@ -39,6 +39,7 @@ class NotificationService {
     vibrationEnabled: true,
   };
   private isInitialized = false;
+  private isInitializing = false; // Prevent multiple simultaneous initialization attempts
 
   private constructor() {
     // Don't auto-initialize, let it be called explicitly
@@ -80,23 +81,181 @@ class NotificationService {
   }
 
   /**
+   * Check if user has declined notification permission
+   * This is a public method that can be called from anywhere to check before initializing
+   */
+  public async hasUserDeclinedNotifications(): Promise<boolean> {
+    try {
+      // First check AsyncStorage flag
+      const neverAsk = await AsyncStorage.getItem('notificationsNeverAsk');
+      if (neverAsk === 'true') {
+        console.log(
+          '⚠️ User has declined notification permission (stored flag)',
+        );
+        return true;
+      }
+
+      // For Android, check both Firebase and system permission status
+      if (Platform.OS === 'android' && Platform.Version >= 33) {
+        try {
+          // Check Android system permission first
+          const hasAndroidPermission = await PermissionsAndroid.check(
+            PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
+          );
+
+          // Check if we have the granted flag
+          const grantedFlag = await AsyncStorage.getItem(
+            'notificationsGranted',
+          );
+
+          // If Android permission is NOT granted AND we don't have granted flag,
+          // it could mean:
+          // 1. Never asked (first time) - should ask
+          // 2. Previously denied - should NOT ask
+          //
+          // To distinguish, check Firebase status
+          if (!hasAndroidPermission && grantedFlag !== 'true') {
+            if (this.isFirebaseInitialized()) {
+              try {
+                const firebaseStatus =
+                  await this.getMessaging().hasPermission();
+                console.log('🔍 Android permission check:', {
+                  hasAndroidPermission,
+                  grantedFlag,
+                  firebaseStatus,
+                });
+
+                // If Firebase shows DENIED, definitely don't ask
+                if (firebaseStatus === messaging.AuthorizationStatus.DENIED) {
+                  console.log(
+                    '⚠️ System shows notification permission as DENIED (Firebase)',
+                  );
+                  await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+                  return true;
+                }
+
+                // If Firebase shows NOT_DETERMINED, we need to determine if this is:
+                // 1. First time (never asked) - should ask
+                // 2. Previously denied, then app data cleared - should NOT ask
+                //
+                // CRITICAL: If Android permission is NOT granted and we don't have the granted flag,
+                // and Firebase shows NOT_DETERMINED, it's ambiguous. However, to avoid annoying
+                // users who previously declined, we should be conservative and NOT ask again.
+                //
+                // The only safe time to ask is if we can prove it's truly the first time.
+                // Since we can't distinguish perfectly after app data is cleared, we'll
+                // err on the side of NOT asking to respect the user's previous choice.
+                if (
+                  firebaseStatus ===
+                  messaging.AuthorizationStatus.NOT_DETERMINED
+                ) {
+                  console.log(
+                    '⚠️ Android permission not granted, Firebase shows NOT_DETERMINED',
+                  );
+                  console.log(
+                    '⚠️ This could be first time OR previously denied - being conservative and NOT asking',
+                  );
+                  console.log(
+                    '⚠️ Setting neverAsk flag to prevent popup (user can enable in settings if needed)',
+                  );
+                  // Set flag to prevent asking - this respects user's previous choice
+                  // If they really want notifications, they can enable in app settings
+                  await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+                  return true;
+                }
+              } catch (error) {
+                console.warn('⚠️ Error checking Firebase permission:', error);
+                // If we can't check Firebase, be conservative
+                if (!hasAndroidPermission && grantedFlag !== 'true') {
+                  console.log(
+                    '⚠️ Cannot verify permission status - being conservative and not asking',
+                  );
+                  await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+                  return true;
+                }
+              }
+            } else {
+              // Firebase not initialized, but Android permission not granted
+              // Be conservative
+              console.log(
+                '⚠️ Firebase not initialized, Android permission not granted - being conservative',
+              );
+              await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+              return true;
+            }
+          }
+        } catch (error) {
+          console.warn('⚠️ Error checking Android system permission:', error);
+        }
+      } else if (Platform.OS === 'android') {
+        // For Android < 13, check Firebase status
+        try {
+          if (this.isFirebaseInitialized()) {
+            const status = await this.getMessaging().hasPermission();
+            if (status === messaging.AuthorizationStatus.DENIED) {
+              console.log(
+                '⚠️ System shows notification permission as DENIED (Firebase)',
+              );
+              await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+              return true;
+            }
+          }
+        } catch (error) {
+          console.warn('⚠️ Error checking system permission:', error);
+        }
+      }
+
+      return false;
+    } catch (error) {
+      console.error('❌ Error checking if user declined:', error);
+      return false;
+    }
+  }
+
+  /**
    * Initialize Firebase messaging and request permissions
    * This must be called explicitly after app startup
    */
   public async initializeNotifications(): Promise<boolean> {
+    // CRITICAL: Check if user declined FIRST, before any other checks
+    const userDeclined = await this.hasUserDeclinedNotifications();
+    if (userDeclined) {
+      console.log(
+        '⚠️ Notification permission previously denied – skipping ALL initialization',
+      );
+      return false;
+    }
+
     if (this.isInitialized) {
       console.log('✅ Notifications already initialized');
       return true;
     }
 
-    // Respect user's choice to never be asked again - check FIRST before any permission requests
-    const neverAsk = await AsyncStorage.getItem('notificationsNeverAsk');
-    if (neverAsk === 'true') {
+    // Prevent multiple simultaneous initialization attempts
+    if (this.isInitializing) {
       console.log(
-        '⚠️ Notification permission previously denied – never asking again',
+        '⏸️ Notification initialization already in progress, waiting...',
       );
-      return false;
+      // Wait a bit and check if initialized
+      await new Promise(resolve => setTimeout(resolve, 500));
+      if (this.isInitialized) {
+        return true;
+      }
+      // Re-check if user declined while waiting
+      const declinedWhileWaiting = await this.hasUserDeclinedNotifications();
+      if (declinedWhileWaiting) {
+        console.log('⚠️ User declined while waiting for initialization');
+        return false;
+      }
+      // If still not initialized after wait, allow this call to proceed
+      // (in case the other call failed)
+      console.log(
+        '⚠️ Previous initialization attempt may have failed, proceeding...',
+      );
     }
+
+    // Set initializing flag
+    this.isInitializing = true;
 
     try {
       console.log('🚀 Initializing notifications...');
@@ -106,6 +265,7 @@ class NotificationService {
         console.warn(
           '⚠️ Firebase not initialized, skipping notification initialization',
         );
+        this.isInitializing = false;
         return false;
       }
 
@@ -113,19 +273,126 @@ class NotificationService {
       const accessTokenForInit = await AsyncStorage.getItem('accessToken');
       if (!accessTokenForInit) {
         console.log('⏭️ Skipping notification permission until after sign-in');
+        this.isInitializing = false;
         return false;
       }
 
-      // Do not short-circuit on NOT_DETERMINED; we'll request permission below
+      // Check actual system permission status FIRST before checking AsyncStorage
+      // This handles the case where app was cleared and AsyncStorage was reset
+      let currentStatus: number;
+      let systemPermissionDenied = false;
+
+      // For Android, check system permission state first (before Firebase check)
+      // This helps detect if permission was previously denied even after app data clear
+      if (Platform.OS === 'android' && Platform.Version >= 33) {
+        try {
+          const androidPermissionState = await PermissionsAndroid.check(
+            PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
+          );
+          console.log(
+            '🔍 Android POST_NOTIFICATIONS system check (before Firebase):',
+            androidPermissionState,
+          );
+
+          // If Android permission is not granted, we'll check Firebase status
+          // But we'll be more conservative about requesting
+          if (!androidPermissionState) {
+            console.log(
+              '⚠️ Android POST_NOTIFICATIONS not granted at system level',
+            );
+          }
+        } catch (error) {
+          console.warn('⚠️ Error checking Android permission early:', error);
+        }
+      }
+
       try {
-        const currentStatus = await this.getMessaging().hasPermission();
+        currentStatus = await this.getMessaging().hasPermission();
+        console.log(
+          '🔍 Current Firebase notification permission status:',
+          currentStatus,
+        );
+
+        // If system shows DENIED, respect it immediately and set flag
         if (currentStatus === messaging.AuthorizationStatus.DENIED) {
-          console.log('⚠️ Notifications currently denied by user');
+          console.log(
+            '⚠️ Notifications currently denied by user (Firebase status shows DENIED)',
+          );
+          systemPermissionDenied = true;
           await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+          this.isInitializing = false;
           return false;
+        }
+
+        // If already authorized, skip permission request
+        if (
+          currentStatus === messaging.AuthorizationStatus.AUTHORIZED ||
+          currentStatus === messaging.AuthorizationStatus.PROVISIONAL
+        ) {
+          console.log(
+            '✅ Notification permission already granted, skipping request',
+          );
+          // Set the flag so we don't ask again
+          await AsyncStorage.setItem('notificationsGranted', 'true');
         }
       } catch (error) {
         console.warn('⚠️ Error checking permission:', error);
+        currentStatus = messaging.AuthorizationStatus.NOT_DETERMINED;
+      }
+
+      // For Android, check POST_NOTIFICATIONS permission status FIRST
+      // This is critical because after clearing app data, Firebase might return NOT_DETERMINED
+      // even though the system permission is still denied
+      if (Platform.OS === 'android' && Platform.Version >= 33) {
+        try {
+          const hasPostNotificationPermission = await PermissionsAndroid.check(
+            PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
+          );
+
+          console.log(
+            '🔍 Android POST_NOTIFICATIONS check result:',
+            hasPostNotificationPermission,
+          );
+
+          // If POST_NOTIFICATIONS is NOT granted, check if Firebase also shows denied
+          if (!hasPostNotificationPermission) {
+            // If Firebase shows DENIED, definitely don't ask (user previously denied)
+            if (
+              systemPermissionDenied ||
+              currentStatus === messaging.AuthorizationStatus.DENIED
+            ) {
+              console.log(
+                '⚠️ Android POST_NOTIFICATIONS permission denied (Firebase also shows DENIED)',
+              );
+              await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+              this.isInitializing = false;
+              return false;
+            }
+            // If Firebase shows NOT_DETERMINED, we'll proceed to request below
+            // but we'll handle the response properly
+          } else {
+            // Permission is granted, so we're good
+            console.log(
+              '✅ Android POST_NOTIFICATIONS permission already granted',
+            );
+          }
+        } catch (error) {
+          console.warn(
+            '⚠️ Error checking Android POST_NOTIFICATIONS permission:',
+            error,
+          );
+        }
+      }
+
+      // Note: We already checked hasUserDeclinedNotifications() at the start
+      // This is just a final safety check
+      const neverAsk = await AsyncStorage.getItem('notificationsNeverAsk');
+      if (neverAsk === 'true') {
+        console.log(
+          '⚠️ Notification permission previously denied (final safety check) – never asking again',
+        );
+        this.isInitializing = false;
+        return false;
       }
 
       // Initialize proper system notifications
@@ -133,35 +400,111 @@ class NotificationService {
         ProperSystemNotificationService.getInstance();
       await properNotificationService.initializeNotifications();
 
-      // Request permission for iOS (skip if previously granted)
+      // Only request permission if NOT_DETERMINED (not yet asked)
+      // For iOS
       if (Platform.OS === 'ios') {
         const grantedFlag = await AsyncStorage.getItem('notificationsGranted');
-        const authStatus =
-          grantedFlag === 'true'
-            ? messaging.AuthorizationStatus.AUTHORIZED
-            : await this.getMessaging().requestPermission();
-        const enabled =
-          authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
-          authStatus === messaging.AuthorizationStatus.PROVISIONAL;
 
-        console.log('📱 iOS permission status:', authStatus);
-        if (!enabled) {
-          console.log('❌ iOS notification permission denied');
-          // Set never ask flag if denied
-          await AsyncStorage.setItem('notificationsNeverAsk', 'true');
-          return false;
+        // If we already have the flag set, skip request
+        if (grantedFlag === 'true') {
+          console.log(
+            '✅ iOS: notificationsGranted flag set, skipping permission request',
+          );
+        } else if (
+          currentStatus === messaging.AuthorizationStatus.NOT_DETERMINED
+        ) {
+          // Only request if status is NOT_DETERMINED
+          console.log('📱 iOS: Requesting notification permission...');
+          const authStatus = await this.getMessaging().requestPermission();
+          const enabled =
+            authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
+            authStatus === messaging.AuthorizationStatus.PROVISIONAL;
+
+          console.log('📱 iOS permission status:', authStatus);
+          if (!enabled) {
+            console.log('❌ iOS notification permission denied');
+            // Set never ask flag if denied
+            await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+            this.isInitializing = false;
+            return false;
+          }
+          // Set granted flag on success
+          await AsyncStorage.setItem('notificationsGranted', 'true');
+        } else {
+          console.log(
+            '✅ iOS: Permission already determined, skipping request',
+          );
         }
       }
 
-      // Request permission for Android
+      // For Android
       if (Platform.OS === 'android') {
+        const grantedFlag = await AsyncStorage.getItem('notificationsGranted');
+
         // Check if we need to request POST_NOTIFICATIONS permission (Android 13+)
         if (Platform.Version >= 33) {
           const hasPermission = await PermissionsAndroid.check(
             PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
           );
 
-          if (!hasPermission) {
+          console.log(
+            '🔍 Android POST_NOTIFICATIONS check:',
+            hasPermission,
+            'Firebase status:',
+            currentStatus,
+            'Granted flag:',
+            grantedFlag,
+          );
+
+          // Only request if:
+          // 1. Permission is not granted
+          // 2. We don't have the granted flag set
+          // 3. Firebase status is NOT_DETERMINED (first time asking)
+          // 4. We haven't set the neverAsk flag earlier
+          if (
+            !hasPermission &&
+            grantedFlag !== 'true' &&
+            currentStatus === messaging.AuthorizationStatus.NOT_DETERMINED
+          ) {
+            // CRITICAL: Triple-check neverAsk flag right before requesting
+            // Also re-check hasUserDeclinedNotifications to catch any system-level denials
+            const neverAskBeforeRequest = await AsyncStorage.getItem(
+              'notificationsNeverAsk',
+            );
+            if (neverAskBeforeRequest === 'true') {
+              console.log(
+                '⚠️ Android: neverAsk flag set right before request - skipping',
+              );
+              this.isInitializing = false;
+              return false;
+            }
+
+            // Also check if user declined using our helper method
+            const userDeclinedCheck = await this.hasUserDeclinedNotifications();
+            if (userDeclinedCheck) {
+              console.log(
+                '⚠️ Android: User declined detected right before request - skipping',
+              );
+              this.isInitializing = false;
+              return false;
+            }
+
+            // One final check after a tiny delay to catch any race conditions
+            await new Promise(resolve => setTimeout(resolve, 100));
+            const finalCheck = await AsyncStorage.getItem(
+              'notificationsNeverAsk',
+            );
+            if (finalCheck === 'true') {
+              console.log(
+                '⚠️ Android: neverAsk flag set during delay - skipping request',
+              );
+              this.isInitializing = false;
+              return false;
+            }
+
+            console.log(
+              '📱 Android: Requesting POST_NOTIFICATIONS permission...',
+            );
             const granted = await PermissionsAndroid.request(
               PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS,
               {
@@ -174,35 +517,160 @@ class NotificationService {
               },
             );
 
+            console.log(
+              '📱 Android POST_NOTIFICATIONS request result:',
+              granted,
+            );
+
             if (granted === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN) {
               console.log(
                 '❌ Android notification permission denied - never ask again',
               );
               await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+              this.isInitializing = false;
               return false;
             }
-            if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
-              console.log('❌ Android notification permission denied');
-              // If user clicks Cancel (DENIED), also set flag to stop asking
+            // Handle DENIED (Cancel/Don't allow clicked) - set flag to never ask again
+            if (granted === PermissionsAndroid.RESULTS.DENIED) {
+              console.log(
+                "❌ Android notification permission denied (Cancel/Don't allow clicked)",
+              );
+              console.log('🔧 Setting notificationsNeverAsk flag to true...');
+
+              // If user clicks Cancel/Don't allow (DENIED), set flag to stop asking
+              // This prevents showing the Firebase messaging permission popup
               await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+
+              // Verify the flag was saved - try multiple times if needed
+              let verifyFlag = await AsyncStorage.getItem(
+                'notificationsNeverAsk',
+              );
+              console.log(
+                '🔍 First verification of neverAsk flag after denial:',
+                verifyFlag,
+              );
+
+              if (verifyFlag !== 'true') {
+                console.error(
+                  '❌ CRITICAL: Failed to save neverAsk flag! Retrying...',
+                );
+                await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+                // Wait a bit and verify again
+                await new Promise(resolve => setTimeout(resolve, 50));
+                verifyFlag = await AsyncStorage.getItem(
+                  'notificationsNeverAsk',
+                );
+                console.log('🔍 Second verification after retry:', verifyFlag);
+
+                if (verifyFlag !== 'true') {
+                  console.error(
+                    '❌ CRITICAL: Still failed to save flag after retry!',
+                  );
+                  // Try one more time
+                  await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+                }
+              } else {
+                console.log('✅ neverAsk flag successfully saved and verified');
+              }
+
+              this.isInitializing = false;
               return false;
             }
+            // Handle any other non-GRANTED result (e.g., if buttonNeutral returns something else)
+            // Still return false to avoid showing Firebase popup, but don't set neverAsk flag
+            // so user can be asked again later
+            if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+              console.log(
+                '⏸️ Android: Permission not granted (may be Ask Me Later) - will ask again later',
+                'Result:',
+                granted,
+              );
+              this.isInitializing = false;
+              return false;
+            }
+            // Set granted flag on success
+            console.log('✅ Android POST_NOTIFICATIONS permission granted');
+            await AsyncStorage.setItem('notificationsGranted', 'true');
+          } else {
+            console.log(
+              '✅ Android: POST_NOTIFICATIONS permission already granted or not needed',
+              {
+                hasPermission,
+                grantedFlag,
+                currentStatus,
+              },
+            );
           }
         }
 
-        // Also request the general notification permission to ensure tokens are issued
-        const grantedFlag = await AsyncStorage.getItem('notificationsGranted');
-        const authStatus =
-          grantedFlag === 'true'
-            ? messaging.AuthorizationStatus.AUTHORIZED
-            : await this.getMessaging().requestPermission();
-        console.log('📱 Android permission status:', authStatus);
-        if (
-          authStatus === messaging.AuthorizationStatus.DENIED ||
-          authStatus === messaging.AuthorizationStatus.NOT_DETERMINED
-        ) {
-          await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+        // Re-check neverAsk flag again before Firebase messaging permission request
+        // (in case it was set during POST_NOTIFICATIONS request)
+        const neverAskAfterPost = await AsyncStorage.getItem(
+          'notificationsNeverAsk',
+        );
+        if (neverAskAfterPost === 'true') {
+          console.log(
+            '⚠️ Android: Notification permission denied during POST_NOTIFICATIONS request – skipping Firebase permission request',
+          );
+          this.isInitializing = false;
           return false;
+        }
+
+        // Re-check system permission status before Firebase request
+        // (in case it changed after POST_NOTIFICATIONS request)
+        try {
+          const updatedStatus = await this.getMessaging().hasPermission();
+          if (updatedStatus === messaging.AuthorizationStatus.DENIED) {
+            console.log(
+              '⚠️ Android: Firebase permission denied after POST_NOTIFICATIONS – skipping Firebase permission request',
+            );
+            await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+            this.isInitializing = false;
+            return false;
+          }
+          // Update currentStatus for Firebase request check
+          if (updatedStatus !== currentStatus) {
+            currentStatus = updatedStatus;
+          }
+        } catch (error) {
+          console.warn(
+            '⚠️ Error re-checking permission before Firebase request:',
+            error,
+          );
+        }
+
+        // Check Firebase messaging permission - only request if NOT_DETERMINED
+        if (grantedFlag === 'true') {
+          console.log(
+            '✅ Android: notificationsGranted flag set, skipping Firebase permission request',
+          );
+        } else if (
+          currentStatus === messaging.AuthorizationStatus.NOT_DETERMINED
+        ) {
+          // Only request if status is NOT_DETERMINED
+          console.log(
+            '📱 Android: Requesting Firebase messaging permission...',
+          );
+          const authStatus = await this.getMessaging().requestPermission();
+          console.log('📱 Android Firebase permission status:', authStatus);
+
+          if (authStatus === messaging.AuthorizationStatus.DENIED) {
+            await AsyncStorage.setItem('notificationsNeverAsk', 'true');
+            this.isInitializing = false;
+            return false;
+          }
+
+          // Set granted flag if authorized
+          if (
+            authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
+            authStatus === messaging.AuthorizationStatus.PROVISIONAL
+          ) {
+            await AsyncStorage.setItem('notificationsGranted', 'true');
+          }
+        } else {
+          console.log(
+            '✅ Android: Firebase permission already determined, skipping request',
+          );
         }
       }
 
@@ -222,11 +690,17 @@ class NotificationService {
       await this.loadNotificationSettings();
 
       this.isInitialized = true;
+      this.isInitializing = false; // Clear flag on success
       console.log('✅ Notifications initialized successfully');
       return true;
     } catch (error) {
       console.error('❌ Error initializing notifications:', error);
+      this.isInitializing = false; // Clear flag on error
       return false;
+    } finally {
+      // Ensure flag is cleared even if there was an early return
+      // (though we handle it in catch and success paths above)
+      this.isInitializing = false;
     }
   }
 

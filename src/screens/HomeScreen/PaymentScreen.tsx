@@ -1775,26 +1775,6 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     status: 'complete',
     syncYNOverride?: 'Y' | 'N',
   ) => {
-    // Guard: block submit if monthly limit reached
-    try {
-      const token = await AsyncStorage.getItem('accessToken');
-      if (token) {
-        // Use unified API for transaction limits
-        const limitsData = (await unifiedApi.getTransactionLimits()) as {
-          canCreate?: boolean;
-        };
-        if (limitsData && limitsData.canCreate === false) {
-          await forceShowPopup();
-          showAlert({
-            title: 'Monthly Limit Reached',
-            message:
-              'You have reached your monthly transaction limit. Please upgrade your plan to continue.',
-            type: 'error',
-          });
-          return;
-        }
-      }
-    } catch {}
     console.log('handleSubmit called with status:', status);
     setTriedSubmit(true);
     setError(null);
@@ -1860,6 +1840,15 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       setError(`Missing required fields: ${missingFields.join(', ')}`);
       return;
     }
+
+    const userIdPromise = getUserIdFromToken();
+    const nextPaymentNumberPromise = generateNextDocumentNumber(
+      folderName.toLowerCase(),
+      true,
+    ).catch(error => {
+      console.error('Error generating payment number:', error);
+      return null;
+    });
 
     setLoadingSave(true);
     console.log('✅ All validation passed - proceeding with API call');
@@ -1985,8 +1974,8 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
               needsAddressUpdate ? supplierAddress : undefined,
             );
             if (!didRefreshSuppliers) {
-              await fetchSuppliersCtx('');
               didRefreshSuppliers = true;
+              fetchSuppliersCtx('').catch(() => {});
             }
             // Immediate UI sync after update
             try {
@@ -2005,7 +1994,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       // Opening balance creation temporarily disabled here to avoid extra
       // /transactions POSTs during Payment creation. If needed, we can
       // move this to a dedicated flow (e.g., AddParty) or enable behind a flag.
-      const userId = await getUserIdFromToken();
+      const userId = await userIdPromise;
       if (!userId) {
         setError('User not authenticated. Please login again.');
         setTimeout(() => scrollToErrorField('api'), 100);
@@ -2015,20 +2004,15 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
       // Always regenerate document number on submit based on current backend state
       // This ensures accuracy even if other transactions were created since initialization
       let finalPaymentNumber = '';
-      try {
-        // Generate and store the number now (transaction is being saved)
-        // This will check backend for highest number and increment from there
-        finalPaymentNumber = await generateNextDocumentNumber(
-          folderName.toLowerCase(),
-          true, // Store now - transaction is being saved
-        );
-        setPaymentNumber(finalPaymentNumber);
+      const generatedPaymentNumber = await nextPaymentNumberPromise;
+      if (generatedPaymentNumber) {
+        finalPaymentNumber = generatedPaymentNumber;
+        setPaymentNumber(generatedPaymentNumber);
         console.log(
           '🔍 Generated paymentNumber on submit:',
-          finalPaymentNumber,
+          generatedPaymentNumber,
         );
-      } catch (error) {
-        console.error('Error generating payment number:', error);
+      } else {
         // Fallback: use preview number if available, otherwise default to PAY-001
         finalPaymentNumber = paymentNumber || 'PAY-001';
       }
@@ -2082,8 +2066,8 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                 : undefined,
             );
             if (!didRefreshSuppliers) {
-              await fetchSuppliersCtx('');
               didRefreshSuppliers = true;
+              fetchSuppliersCtx('').catch(() => {});
             }
             try {
               const currentSuppliersAny: any[] = (suppliers as any[]) || [];
@@ -2158,8 +2142,8 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                       needsAddressUpdate ? supplierAddress : undefined,
                     );
                     if (!didRefreshSuppliers) {
-                      await fetchSuppliersCtx('');
                       didRefreshSuppliers = true;
+                      fetchSuppliersCtx('').catch(() => {});
                     }
                     try {
                       setSelectedSupplier(existingSupplier as any);
@@ -2194,8 +2178,8 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                       needsAddressUpdate ? supplierAddress : undefined,
                     );
                     if (!didRefreshSuppliers) {
-                      await fetchSuppliersCtx('');
                       didRefreshSuppliers = true;
+                      fetchSuppliersCtx('').catch(() => {});
                     }
                     try {
                       setSelectedSupplier(existingSupplier as any);

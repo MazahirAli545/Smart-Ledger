@@ -383,8 +383,14 @@ const SignInOtpScreen = () => {
             // Initialize notifications and register FCM token for new user
             try {
               const notificationService = NotificationService.getInstance();
-              const initialized =
-                await notificationService.initializeNotifications();
+              // Check if user has declined before initializing
+              const userDeclined =
+                await notificationService.hasUserDeclinedNotifications();
+              let initialized = false;
+              if (!userDeclined) {
+                initialized =
+                  await notificationService.initializeNotifications();
+              }
               let fcmToken: string | null = null;
               if (initialized) {
                 fcmToken = await notificationService.refreshFCMToken();
@@ -480,8 +486,14 @@ const SignInOtpScreen = () => {
             // Initialize notifications and register FCM token for existing user
             try {
               const notificationService = NotificationService.getInstance();
-              const initialized =
-                await notificationService.initializeNotifications();
+              // Check if user has declined before initializing
+              const userDeclined =
+                await notificationService.hasUserDeclinedNotifications();
+              let initialized = false;
+              if (!userDeclined) {
+                initialized =
+                  await notificationService.initializeNotifications();
+              }
               let fcmToken: string | null = null;
               if (initialized) {
                 fcmToken = await notificationService.refreshFCMToken();
@@ -602,8 +614,14 @@ const SignInOtpScreen = () => {
                   '🔔 LEGACY FLOW (EXISTING USER) - Initializing notifications and registering FCM token...',
                 );
                 const notificationService = NotificationService.getInstance();
-                const initialized =
-                  await notificationService.initializeNotifications();
+                // Check if user has declined before initializing
+                const userDeclined =
+                  await notificationService.hasUserDeclinedNotifications();
+                let initialized = false;
+                if (!userDeclined) {
+                  initialized =
+                    await notificationService.initializeNotifications();
+                }
 
                 let fcmToken: string | null = null;
                 if (initialized) {
@@ -720,8 +738,14 @@ const SignInOtpScreen = () => {
                 '🔔 LEGACY FLOW - Initializing notifications and registering FCM token...',
               );
               const notificationService = NotificationService.getInstance();
-              const initialized =
-                await notificationService.initializeNotifications();
+              // Check if user has declined before initializing
+              const userDeclined =
+                await notificationService.hasUserDeclinedNotifications();
+              let initialized = false;
+              if (!userDeclined) {
+                initialized =
+                  await notificationService.initializeNotifications();
+              }
 
               let fcmToken: string | null = null;
               if (initialized) {

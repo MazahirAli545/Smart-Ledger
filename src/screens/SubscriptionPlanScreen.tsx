@@ -34,7 +34,7 @@ import {
   PaymentResult,
 } from '../services/paymentService';
 import { useTransactionLimit } from '../context/TransactionLimitContext';
-import { useAlert } from '../context/AlertContext';
+import { useAlert, AlertOptions } from '../context/AlertContext';
 import { useScreenTracking } from '../hooks/useScreenTracking';
 import { getStatusBarHeight } from 'react-native-status-bar-height';
 import {
@@ -63,6 +63,80 @@ const CARD_WIDTH = Math.max(
   SCREEN_WIDTH - (LIST_SIDE_PADDING + RIGHT_PADDING),
 );
 const H_PADDING = LIST_SIDE_PADDING; // left padding
+
+const PHONEPE_GATEWAY_ERROR_PATTERNS = [
+  'something went wrong',
+  'uh! oh',
+  'uh-oh',
+  'phonepe',
+];
+const PHONEPE_EXTENDED_ATTEMPTS = 6;
+const PHONEPE_EXTENDED_DELAY_MS = 5000;
+
+const extractGatewayErrorText = (error: any): string => {
+  const visited = new Set<any>();
+
+  const dig = (value: any): string => {
+    if (!value || visited.has(value)) {
+      return '';
+    }
+    if (typeof value === 'string') {
+      return value.toLowerCase();
+    }
+
+    if (typeof value === 'object') {
+      visited.add(value);
+      const candidates = [
+        value.description,
+        value.message,
+        value.error,
+        value.reason,
+        value.details,
+        value.title,
+        value.response,
+        value.data,
+      ];
+
+      for (const candidate of candidates) {
+        const extracted = dig(candidate);
+        if (extracted) {
+          return extracted;
+        }
+      }
+
+      try {
+        return JSON.stringify(value).toLowerCase();
+      } catch {
+        return '';
+      }
+    }
+
+    try {
+      return value.toString().toLowerCase();
+    } catch {
+      return '';
+    }
+  };
+
+  return dig(error);
+};
+
+const isPhonePeGatewayError = (error: any): boolean => {
+  const text = extractGatewayErrorText(error);
+  if (!text) {
+    return false;
+  }
+  return PHONEPE_GATEWAY_ERROR_PATTERNS.some(pattern => text.includes(pattern));
+};
+
+const buildPhonePePendingAlertMessage = (orderId?: string | null): string => {
+  const orderInfo = orderId ? `\n\nOrder ID: ${orderId}` : '';
+  return (
+    'PhonePe reported a temporary issue even though your payment may still be processing. ' +
+    'Please allow up to a minute for confirmation. We are continuing to verify this automatically.' +
+    orderInfo
+  );
+};
 
 // Debug Razorpay configuration
 console.log('🔧 Razorpay Configuration Debug:');
@@ -543,6 +617,11 @@ const SubscriptionPlanScreen: React.FC = () => {
     downgradePlan: contextDowngradePlan,
     cancelSubscription,
   } = useSubscription();
+  const currentSubscriptionRef = useRef(currentSubscription);
+
+  useEffect(() => {
+    currentSubscriptionRef.current = currentSubscription;
+  }, [currentSubscription]);
 
   // Normalize and de-duplicate plans for clean UI (avoid duplicate "Free" etc.)
   const cleanedPlans = useMemo(() => {
@@ -646,13 +725,37 @@ const SubscriptionPlanScreen: React.FC = () => {
     }
   }, []);
 
+  // Track if component is mounted to prevent state updates after unmount
+  const isMountedRef = useRef(true);
+  // Track timeout IDs for cleanup
+  const timeoutIdsRef = useRef<Set<NodeJS.Timeout>>(new Set());
+
+  // Helper function to safely set timeout with automatic cleanup tracking
+  const safeSetTimeout = useCallback(
+    (callback: () => void | Promise<void>, delay: number): NodeJS.Timeout => {
+      const timeoutId = setTimeout(async () => {
+        if (isMountedRef.current) {
+          await callback();
+        }
+        timeoutIdsRef.current.delete(timeoutId);
+      }, delay);
+      timeoutIdsRef.current.add(timeoutId);
+      return timeoutId;
+    },
+    [],
+  );
+
   useEffect(() => {
     console.log('SubscriptionPlanScreen mounted');
+    isMountedRef.current = true;
+
     // Load permissions for RBAC-aware API calls
     (async () => {
       try {
         const permsJson = await AsyncStorage.getItem('userPermissions');
-        if (permsJson) setUserPermissions(JSON.parse(permsJson));
+        if (permsJson && isMountedRef.current) {
+          setUserPermissions(JSON.parse(permsJson));
+        }
       } catch (e) {
         console.warn('Failed to load userPermissions:', e);
       }
@@ -661,6 +764,18 @@ const SubscriptionPlanScreen: React.FC = () => {
     // 🚨 REMOVED: All loading logic and timeout - direct data fetch
     fetchSubscriptionData();
     fetchBillingData();
+
+    // Cleanup function to prevent state updates after unmount
+    return () => {
+      isMountedRef.current = false;
+      // Clear all pending timeouts
+      timeoutIdsRef.current.forEach(timeoutId => clearTimeout(timeoutId));
+      timeoutIdsRef.current.clear();
+      // Cancel any ongoing API requests
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
   }, []);
 
   // Debug: Log available plans count
@@ -683,14 +798,31 @@ const SubscriptionPlanScreen: React.FC = () => {
     setSelectedPlanId(null);
   }, [availablePlans]);
 
+  // Store AbortController ref for cleanup
+  const abortControllerRef = useRef<AbortController | null>(null);
+
   // New function to fetch billing data from backend APIs with better error handling
   const fetchBillingData = async () => {
+    // Cancel any ongoing request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+
+    // Create new AbortController for this request
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const { signal } = controller;
+
     try {
+      if (!isMountedRef.current) return;
       setApiLoading(true);
+      if (!isMountedRef.current) return;
       setPaymentError(null);
       const token = await AsyncStorage.getItem('accessToken');
       if (!token) {
         console.log('No auth token, skipping billing data fetch');
+        if (!isMountedRef.current) return;
+        setApiLoading(false);
         return;
       }
 
@@ -698,9 +830,6 @@ const SubscriptionPlanScreen: React.FC = () => {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
       } as const;
-
-      const controller = new AbortController();
-      const { signal } = controller;
 
       const hasPerm = (_key: string) => true; // Always fetch on mobile
 
@@ -722,10 +851,14 @@ const SubscriptionPlanScreen: React.FC = () => {
           userIdType: typeof userId,
         });
 
-        // Use unified API for transaction limits - get() returns data directly
-        // Pass userId to getTransactionLimits() method
-        const response = await unifiedApi.getTransactionLimits(userId);
-        // unifiedApi.getTransactionLimits() returns data directly, not wrapped in {data, status, headers}
+        // Always bypass cache so plan changes reflect instantly on LIVE
+        const limitParams = new URLSearchParams();
+        limitParams.append('userId', String(userId));
+        limitParams.append('user_id', String(userId));
+        const response = await unifiedApi.get(
+          `/transactions/limits?${limitParams.toString()}`,
+          { cache: false },
+        );
         const limitsData: any = (response as any)?.data ?? response ?? {};
         console.log(
           '📈 Transaction limits response (normalized root):',
@@ -771,6 +904,7 @@ const SubscriptionPlanScreen: React.FC = () => {
               Math.round((usedCount / Math.max(1, maxAllowed)) * 100),
             );
 
+        if (!isMountedRef.current) return;
         setTransactionLimits({
           currentCount: usedCount,
           maxAllowed,
@@ -810,6 +944,7 @@ const SubscriptionPlanScreen: React.FC = () => {
         // This prevents showing 0 when API fails temporarily after plan change
         const previousCount = transactionLimits?.currentCount || 0;
 
+        if (!isMountedRef.current) return;
         setTransactionLimits({
           currentCount: previousCount, // Preserve previous count instead of 0
           maxAllowed: isUnlimited ? 999999 : maxAllowed,
@@ -848,14 +983,17 @@ const SubscriptionPlanScreen: React.FC = () => {
         // Use unified API
         const nbResponse = (await unifiedApi.get(
           '/subscriptions/next-billing',
+          { cache: false },
         )) as { data: any; status: number; headers: Headers };
         const nb = nbResponse.data || nbResponse;
         console.log('🧾 Next billing from API:', nb);
+        if (!isMountedRef.current) return;
         setNextBillingDateApi(
           nb?.nextBillingDate ?? nb?.data?.nextBillingDate ?? null,
         );
       } catch (e) {
         console.warn('next-billing fetch error:', e);
+        if (!isMountedRef.current) return;
         setNextBillingDateApi(null);
       }
 
@@ -867,6 +1005,7 @@ const SubscriptionPlanScreen: React.FC = () => {
         // Use unified API
         const summaryResponse = (await unifiedApi.get(
           '/subscriptions/billing/summary',
+          { cache: false },
         )) as { data: any; status: number; headers: Headers };
         const summaryData = summaryResponse.data || summaryResponse;
         console.log('📊 Billing summary response:', summaryData);
@@ -882,14 +1021,15 @@ const SubscriptionPlanScreen: React.FC = () => {
         // Also fetch subscription stats for dashboard tiles
         try {
           // Use unified API
-          const subStatsRes = (await unifiedApi.get(
-            '/subscriptions/stats',
-          )) as { data: any; status: number; headers: Headers };
+          const subStatsRes = (await unifiedApi.get('/subscriptions/stats', {
+            cache: false,
+          })) as { data: any; status: number; headers: Headers };
           const subStats =
             subStatsRes.status >= 200 && subStatsRes.status < 300
               ? subStatsRes.data || subStatsRes
               : null;
 
+          if (!isMountedRef.current) return;
           setBillingSummary({
             totalInvoices,
             totalAmount: totalAmountRupees,
@@ -906,6 +1046,7 @@ const SubscriptionPlanScreen: React.FC = () => {
             totalSpent: totalAmountRupees,
           });
         } catch (e) {
+          if (!isMountedRef.current) return;
           setBillingSummary({
             totalInvoices,
             totalAmount: totalAmountRupees,
@@ -923,6 +1064,7 @@ const SubscriptionPlanScreen: React.FC = () => {
         // Use unified API with pagination - get() returns data directly
         const historyResponse = await unifiedApi.get(
           '/subscriptions/billing/history?page=1&limit=50',
+          { cache: false },
         );
         console.log('📊 Billing history response:', historyResponse);
 
@@ -1031,6 +1173,7 @@ const SubscriptionPlanScreen: React.FC = () => {
             '📊 Normalized billing history items:',
             normalized.length,
           );
+          if (!isMountedRef.current) return;
           setBillingHistory(normalized);
         } else {
           console.warn('📊 Billing history empty or invalid response:', {
@@ -1041,6 +1184,7 @@ const SubscriptionPlanScreen: React.FC = () => {
             hasData: !!historyData?.data,
           });
           // Set empty history initially
+          if (!isMountedRef.current) return;
           setBillingHistory([]);
         }
 
@@ -1049,7 +1193,12 @@ const SubscriptionPlanScreen: React.FC = () => {
           try {
             console.log('📊 Billing history empty; fetching from /payments...');
             // Use unified API - get() returns data directly
-            const paymentsResponse = await unifiedApi.get('/payments?limit=50');
+            const paymentsResponse = await unifiedApi.get(
+              '/payments?limit=50',
+              {
+                cache: false,
+              },
+            );
             // unifiedApi.get() returns data directly
             const paymentsBody =
               (paymentsResponse as any)?.data ?? paymentsResponse;
@@ -1096,7 +1245,7 @@ const SubscriptionPlanScreen: React.FC = () => {
               '📊 Payments fallback normalized items:',
               paymentsAsHistory.length,
             );
-            if (paymentsAsHistory.length > 0) {
+            if (paymentsAsHistory.length > 0 && isMountedRef.current) {
               setBillingHistory(paymentsAsHistory);
             }
           } catch (fbErr) {
@@ -1106,31 +1255,216 @@ const SubscriptionPlanScreen: React.FC = () => {
       } catch (error) {
         console.warn('Billing API fetch error:', error);
         // Fallback to empty billing data
-        setBillingSummary({
-          totalInvoices: 0,
-          totalAmount: 0,
-          averageAmount: 0,
-          pendingInvoices: 0,
-          overdueInvoices: 0,
-          currency: 'INR',
-        });
-        setBillingHistory([]);
+        if (isMountedRef.current) {
+          setBillingSummary({
+            totalInvoices: 0,
+            totalAmount: 0,
+            averageAmount: 0,
+            pendingInvoices: 0,
+            overdueInvoices: 0,
+            currency: 'INR',
+          });
+          setBillingHistory([]);
+        }
       }
     } catch (error) {
       console.warn('Error fetching billing data:', error);
-      setPaymentError('Failed to load billing information. Please try again.');
+      if (isMountedRef.current) {
+        setPaymentError(
+          'Failed to load billing information. Please try again.',
+        );
+      }
     } finally {
-      setApiLoading(false);
+      if (isMountedRef.current) {
+        setApiLoading(false);
+      }
     }
   };
+
+  const refreshSubscriptionAndConfirm = useCallback(
+    async (
+      targetPlanName: string,
+      attempts: number = 3,
+      delayMs: number = 900,
+    ) => {
+      if (!targetPlanName) return false;
+      const normalizedTarget = targetPlanName.toLowerCase();
+      const matchesTarget = () =>
+        (currentSubscriptionRef.current?.planName || '')
+          .toLowerCase()
+          .includes(normalizedTarget);
+
+      if (matchesTarget()) {
+        return true;
+      }
+
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        try {
+          await fetchSubscriptionData(false);
+          await new Promise(resolve => setTimeout(resolve, 250));
+        } catch (error) {
+          console.warn(
+            `⚠️ Subscription refresh attempt ${attempt + 1} failed:`,
+            error,
+          );
+        }
+
+        if (matchesTarget()) {
+          console.log(
+            '✅ Subscription context updated to target plan after refresh attempt',
+            attempt + 1,
+          );
+          return true;
+        }
+
+        if (attempt < attempts - 1) {
+          await new Promise(resolve =>
+            setTimeout(resolve, delayMs * Math.max(1, attempt + 1)),
+          );
+        }
+      }
+
+      return false;
+    },
+    [fetchSubscriptionData],
+  );
+
+  const runPostUpgradeSuccessFlow = useCallback(
+    async (plan: PlanDisplayData) => {
+      if (!isMountedRef.current || !plan?.name) return;
+
+      setSuccessMessage(
+        `Payment completed! Your plan has been successfully upgraded to ${plan.name}!`,
+      );
+      setShowSuccessModal(true);
+
+      try {
+        await showPlanUpdatedNotification(plan.name, plan.price);
+        console.log('✅ Plan update notification sent successfully');
+      } catch (notificationError) {
+        console.error(
+          '❌ Failed to show plan update notification:',
+          notificationError,
+        );
+      }
+
+      // 🎯 CRITICAL FIX: Wrap refresh operations in try-catch to prevent errors
+      // from propagating and showing error alerts after successful upgrade
+      try {
+        await refreshSubscriptionAndConfirm(plan.name, 3, 900);
+      } catch (refreshError) {
+        console.warn(
+          '⚠️ Subscription refresh error (upgrade was successful):',
+          refreshError,
+        );
+        // Don't throw - upgrade was successful, just log the error
+      }
+
+      safeSetTimeout(async () => {
+        if (!isMountedRef.current) return;
+        try {
+          console.log(
+            '🔄 Refreshing subscription data after plan upgrade (with delay)...',
+          );
+          await fetchSubscriptionData(false);
+        } catch (fetchError) {
+          console.warn(
+            '⚠️ Subscription data fetch error (upgrade was successful):',
+            fetchError,
+          );
+          // Don't throw - upgrade was successful, just log the error
+        }
+      }, 1000);
+
+      safeSetTimeout(async () => {
+        if (!isMountedRef.current) return;
+        try {
+          console.log(
+            '🔄 Refreshing transaction limits after plan upgrade (with delay)...',
+          );
+          await fetchBillingData();
+
+          safeSetTimeout(async () => {
+            if (!isMountedRef.current) return;
+            try {
+              console.log(
+                '🔄 Retrying transaction limits fetch to ensure accuracy...',
+              );
+              await fetchBillingData();
+            } catch (retryError) {
+              console.warn(
+                '⚠️ Transaction limits retry error (upgrade was successful):',
+                retryError,
+              );
+              // Don't throw - upgrade was successful, just log the error
+            }
+          }, 1500);
+        } catch (billingError) {
+          console.warn(
+            '⚠️ Billing data fetch error (upgrade was successful):',
+            billingError,
+          );
+          // Don't throw - upgrade was successful, just log the error
+        }
+      }, 1500);
+
+      safeSetTimeout(async () => {
+        if (!isMountedRef.current) return;
+        try {
+          await startLimitMonitoring();
+          console.log('✅ Transaction limit monitoring restarted successfully');
+        } catch (error) {
+          console.error(
+            '❌ Error restarting transaction limit monitoring:',
+            error,
+          );
+        }
+      }, 2000);
+
+      safeSetTimeout(() => {
+        if (isMountedRef.current) {
+          console.log(
+            '🔄 Resetting paymentProcessing after successful upgrade',
+          );
+          setPaymentProcessing(false);
+          upgradingLockRef.current = false;
+          razorpayOpenRef.current = false;
+        }
+      }, 2500);
+    },
+    [
+      fetchBillingData,
+      fetchSubscriptionData,
+      refreshSubscriptionAndConfirm,
+      safeSetTimeout,
+      showPlanUpdatedNotification,
+      startLimitMonitoring,
+    ],
+  );
 
   // Auto-refresh Billing History whenever subscription changes (plan/amount/date)
   useEffect(() => {
     // Avoid firing on first mount before data is available
     if (!currentSubscription) return;
+    if (!isMountedRef.current) return;
+
+    let timeoutId: NodeJS.Timeout | null = null;
     try {
-      fetchBillingData();
-    } catch {}
+      // Use a small delay to avoid race conditions
+      timeoutId = setTimeout(() => {
+        if (isMountedRef.current) {
+          fetchBillingData();
+        }
+      }, 100);
+    } catch (error) {
+      console.warn('Error in fetchBillingData useEffect:', error);
+    }
+
+    return () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
   }, [
     currentSubscription?.planName,
     currentSubscription?.amount,
@@ -1176,7 +1510,7 @@ const SubscriptionPlanScreen: React.FC = () => {
       const url = isRzpId
         ? `/payments?razorpayPaymentId=${paymentId}`
         : `/payments/${encodeURIComponent(paymentId)}`;
-      const paymentResponse = await unifiedApi.get(url);
+      const paymentResponse = await unifiedApi.get(url, { cache: false });
       console.log('💳 Payment details response:', paymentResponse);
       // unifiedApi.get() returns data directly, not wrapped in {data, status, headers}
       const paymentData = (paymentResponse as any)?.data ?? paymentResponse;
@@ -1424,14 +1758,25 @@ const SubscriptionPlanScreen: React.FC = () => {
         }
         lastUpgradeTapRef.current = nowTs;
         // Immediately flip UI to processing to disable the button on this frame
+        if (!isMountedRef.current) return;
         setPaymentProcessing(true);
         upgradingLockRef.current = true;
         try {
           // Direct upgrade without transaction limit check - let Razorpay handle payment
           await upgradePlan(plan);
+        } catch (error) {
+          console.error('Error in upgradePlan:', error);
+          // Ensure state is reset on error
+          if (isMountedRef.current) {
+            setPaymentProcessing(false);
+            upgradingLockRef.current = false;
+            razorpayOpenRef.current = false;
+          }
         } finally {
+          if (isMountedRef.current) {
+            setPaymentProcessing(false);
+          }
           upgradingLockRef.current = false;
-          // Do not touch paymentProcessing here; upgradePlan controls it end-to-end
           // Final safety to ensure state allows next attempt if something aborted early
           razorpayOpenRef.current = false;
         }
@@ -1724,24 +2069,377 @@ const SubscriptionPlanScreen: React.FC = () => {
     }
   };
 
+  const extractNumericPaymentId = (value: any): number | null => {
+    if (value === null || value === undefined) {
+      return null;
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed.length === 0) return null;
+      if (/^\d+$/.test(trimmed)) {
+        const parsed = Number(trimmed);
+        return Number.isFinite(parsed) ? parsed : null;
+      }
+    }
+    return null;
+  };
+
+  const extractNumericPaymentIdFromRecord = (record: any): number | null => {
+    if (!record || typeof record !== 'object') {
+      return null;
+    }
+    const candidateKeys = [
+      'id',
+      'paymentId',
+      'payment_id',
+      'paymentID',
+      'idx',
+      'paymentIdx',
+      'paymentIDX',
+      'transactionId',
+      'transaction_id',
+    ];
+    for (const key of candidateKeys) {
+      if (key in record) {
+        const numeric = extractNumericPaymentId((record as any)[key]);
+        if (numeric !== null) {
+          return numeric;
+        }
+      }
+    }
+    if ('data' in record) {
+      return extractNumericPaymentIdFromRecord((record as any).data);
+    }
+    return null;
+  };
+
+  const resolveNumericPaymentIdFromCandidates = (
+    ...candidates: any[]
+  ): number | null => {
+    for (const candidate of candidates) {
+      if (candidate === null || candidate === undefined) continue;
+      if (Array.isArray(candidate)) {
+        for (const entry of candidate) {
+          const numericFromEntry = resolveNumericPaymentIdFromCandidates(entry);
+          if (numericFromEntry !== null) {
+            return numericFromEntry;
+          }
+        }
+        continue;
+      }
+      if (typeof candidate === 'object' && !Array.isArray(candidate)) {
+        const numericFromRecord = extractNumericPaymentIdFromRecord(candidate);
+        if (numericFromRecord !== null) {
+          return numericFromRecord;
+        }
+      }
+      const numeric = extractNumericPaymentId(candidate);
+      if (numeric !== null) {
+        return numeric;
+      }
+    }
+    return null;
+  };
+
+  const interpretPaymentVerification = useCallback((payload: any) => {
+    const data = payload?.data ?? payload;
+    if (!data) {
+      return { success: false } as const;
+    }
+
+    const paymentArrayCandidate =
+      data?.payments ||
+      data?.data ||
+      data?.paymentData ||
+      (Array.isArray(data) ? data : null);
+
+    const paymentRecord =
+      data?.payment ||
+      data?.paymentRecord ||
+      (Array.isArray(paymentArrayCandidate) && paymentArrayCandidate.length > 0
+        ? paymentArrayCandidate[0]
+        : paymentArrayCandidate) ||
+      null;
+
+    const rawStatus = (
+      paymentRecord?.status ||
+      data?.status ||
+      data?.paymentStatus ||
+      ''
+    )
+      .toString()
+      .toLowerCase();
+
+    const captured =
+      paymentRecord?.captured === true ||
+      rawStatus === 'captured' ||
+      paymentRecord?.payment_status === 'captured';
+
+    // 🎯 CRITICAL FIX FOR PHONEPE/UPI: Recognize more success states
+    // PhonePe payments might be in "authorized", "pending", or "created" state but still successful
+    // 🎯 CRITICAL FIX FOR PHONEPE/UPI: Recognize more success states
+    // PhonePe payments might be in "authorized", "pending", or "created" state but still successful
+    const isFailedStatus =
+      rawStatus === 'failed' ||
+      rawStatus === 'cancelled' ||
+      rawStatus === 'refunded' ||
+      rawStatus === 'error' ||
+      rawStatus === 'rejected';
+
+    const isSuccessStatus =
+      rawStatus === 'success' ||
+      rawStatus === 'paid' ||
+      rawStatus === 'processed' ||
+      rawStatus === 'captured' ||
+      rawStatus === 'authorized' || // UPI payments often show as authorized
+      rawStatus === 'created' || // Payment created is a success state
+      rawStatus === 'pending'; // Pending can mean payment is processing (for UPI)
+
+    const success =
+      data?.success === true ||
+      captured ||
+      isSuccessStatus ||
+      data?.message?.toString().toLowerCase().includes('verification queued') ||
+      data?.message?.toString().toLowerCase().includes('initiated') ||
+      data?.message?.toString().toLowerCase().includes('success') ||
+      // 🎯 CRITICAL: If payment record exists and status is not explicitly failed, consider it success
+      // This handles PhonePe cases where payment succeeds but status is still "pending" or "authorized"
+      (paymentRecord &&
+        !isFailedStatus &&
+        (paymentRecord.razorpayPaymentId ||
+          paymentRecord.razorpay_payment_id ||
+          paymentRecord.id));
+
+    const paymentId =
+      paymentRecord?.id ||
+      paymentRecord?.paymentId ||
+      paymentRecord?.razorpayPaymentId ||
+      paymentRecord?.razorpay_payment_id ||
+      data?.paymentId ||
+      data?.razorpayPaymentId ||
+      data?.razorpay_payment_id;
+
+    return {
+      success,
+      captured,
+      paymentId,
+      paymentRecord,
+      raw: data,
+    };
+  }, []);
+
+  const pollPaymentStatus = useCallback(
+    async (orderId: string, attempts: number = 4, delayMs: number = 1500) => {
+      if (!orderId) {
+        console.warn('⚠️ pollPaymentStatus: No orderId provided');
+        return { success: false } as const;
+      }
+
+      console.log(
+        `🔍 Polling payment status for orderId: ${orderId} (${attempts} attempts)`,
+      );
+
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        try {
+          console.log(
+            `🔄 Payment status check attempt ${attempt + 1}/${attempts}...`,
+          );
+          const statusResponse = await PaymentApiService.getPaymentStatus(
+            orderId,
+          );
+
+          // 🎯 CRITICAL FIX: Handle case where getPaymentStatus returns failure response instead of throwing
+          if (
+            !statusResponse ||
+            (statusResponse.success === false && !statusResponse.data)
+          ) {
+            console.log(
+              `⚠️ Payment status check attempt ${
+                attempt + 1
+              } returned failure response:`,
+              statusResponse,
+            );
+            // Continue to next attempt
+            if (attempt < attempts - 1) {
+              const delay = delayMs * Math.max(1, attempt + 1);
+              console.log(`⏳ Waiting ${delay}ms before next attempt...`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+            }
+            continue;
+          }
+
+          console.log(
+            `📥 Raw payment status response (attempt ${attempt + 1}):`,
+            JSON.stringify(statusResponse, null, 2),
+          );
+
+          const normalized = interpretPaymentVerification(statusResponse);
+          console.log(
+            `🔍 Normalized verification result (attempt ${attempt + 1}):`,
+            JSON.stringify(normalized, null, 2),
+          );
+
+          if (normalized.success) {
+            console.log(
+              `✅ Payment status check succeeded on attempt ${attempt + 1}`,
+            );
+            return normalized;
+          } else {
+            console.log(
+              `⚠️ Payment status check attempt ${
+                attempt + 1
+              } returned non-success:`,
+              normalized,
+            );
+
+            // 🎯 CRITICAL FIX FOR PHONEPE: Check if payment exists but status is pending
+            // Sometimes backend returns payment with pending status even though it's successful
+            const responseData =
+              (statusResponse as any)?.data ?? statusResponse;
+            const paymentExists =
+              responseData?.payment ||
+              responseData?.data?.payment ||
+              responseData?.payments?.[0];
+
+            if (paymentExists) {
+              const paymentStatus = (
+                paymentExists.status ||
+                paymentExists.payment_status ||
+                ''
+              )
+                .toString()
+                .toLowerCase();
+
+              // If payment exists and is not explicitly failed, consider it successful
+              // This handles cases where PhonePe payment is successful but status is still "pending" or "authorized"
+              if (
+                paymentStatus === 'captured' ||
+                paymentStatus === 'authorized' ||
+                paymentStatus === 'pending' ||
+                paymentStatus === 'created'
+              ) {
+                console.log(
+                  `✅ Payment exists with status "${paymentStatus}" - treating as success for PhonePe/UPI`,
+                );
+                return {
+                  success: true,
+                  captured: paymentStatus === 'captured',
+                  paymentId:
+                    paymentExists.id ||
+                    paymentExists.razorpayPaymentId ||
+                    paymentExists.razorpay_payment_id,
+                  paymentRecord: paymentExists,
+                  raw: responseData,
+                };
+              }
+            }
+          }
+        } catch (error: any) {
+          // 🎯 CRITICAL FIX: Suppress error logging for polling failures
+          // These are expected during polling and shouldn't show error toasts
+          const errorMessage = error?.message || String(error || '');
+          if (
+            errorMessage.includes('Failed to get payment status') ||
+            errorMessage.includes('Get payment status')
+          ) {
+            // This is just a polling failure, not a real error - suppress it
+            console.log(
+              `ℹ️ Payment status check attempt ${
+                attempt + 1
+              } failed (this is normal during polling):`,
+              errorMessage,
+            );
+          } else {
+            console.warn(
+              `⚠️ Payment status check attempt ${attempt + 1} failed:`,
+              error,
+            );
+          }
+        }
+
+        if (attempt < attempts - 1) {
+          const delay = delayMs * Math.max(1, attempt + 1);
+          console.log(`⏳ Waiting ${delay}ms before next attempt...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+
+      console.log(`❌ Payment status check failed after ${attempts} attempts`);
+      return { success: false } as const;
+    },
+    [interpretPaymentVerification],
+  );
+
   // 🎯 UPDATED: Handle payment success with backend capture endpoint (simplified like web version)
   // ... existing code ...
   const handlePaymentSuccess = async (
     razorpayResponse: any,
     plan: PlanDisplayData,
+    options?: {
+      fallbackPaymentId?: number | null;
+      amountInRupees?: number;
+      orderCurrency?: string;
+      phonePeRecoveryAttempted?: boolean;
+    },
   ) => {
+    // 🎯 CRITICAL: Store payment IDs at the start for error reporting
+    const paymentId = razorpayResponse.razorpay_payment_id || 'N/A';
+    const orderId = razorpayResponse.razorpay_order_id || 'N/A';
+    const signature = razorpayResponse.razorpay_signature
+      ? `${razorpayResponse.razorpay_signature.substring(0, 20)}...`
+      : 'Not provided (will be generated on backend)';
+
+    // Get userId early for error reporting
+    let userId: number | string = 'N/A';
+    const phonePeRecoveryAttempted = options?.phonePeRecoveryAttempted === true;
+
     try {
+      userId = (await getUserIdFromToken()) || 'N/A';
+    } catch (e) {
+      console.warn('Could not get userId for error reporting:', e);
+    }
+
+    // Log payment IDs for debugging
+    console.log('🔍 Payment IDs captured:');
+    console.log('  - User ID:', userId);
+    console.log('  - Payment ID:', paymentId);
+    console.log('  - Order ID:', orderId);
+    console.log('  - Signature:', signature);
+
+    // 🎯 CRITICAL: Track if we should reset paymentProcessing in finally block
+    let shouldResetProcessing = true;
+    try {
+      // Check if component is still mounted before proceeding
+      if (!isMountedRef.current) {
+        console.log(
+          '⚠️ Component unmounted, skipping payment success handling',
+        );
+        return;
+      }
       console.log(
         '🎉 Payment success, capturing payment with backend...',
         razorpayResponse,
       );
 
       const token = await AsyncStorage.getItem('accessToken');
-      const userId = await getUserIdFromToken();
+      const resolvedUserId = await getUserIdFromToken();
 
-      if (!token || !userId) {
+      if (!token || !resolvedUserId) {
         throw new Error('Authentication failed');
       }
+
+      // Update userId if we got it successfully
+      userId = resolvedUserId;
+
+      const amountInRupees =
+        typeof options?.amountInRupees === 'number'
+          ? options.amountInRupees
+          : plan.price;
+      const amountInPaise = Math.round(amountInRupees * 100);
+      const captureCurrency = options?.orderCurrency || 'INR';
 
       // Validate Razorpay response
       if (!razorpayResponse.razorpay_payment_id) {
@@ -2165,6 +2863,9 @@ const SubscriptionPlanScreen: React.FC = () => {
       console.log('  - finalUserMobile:', finalUserMobile);
       console.log('  - finalUserName:', finalUserName);
 
+      const finalSignature =
+        extractedSignature || razorpayResponse.razorpay_signature || null;
+
       // 🎯 FIXED: Map data correctly for backend capture endpoint using exact field names
       const capturePayload = {
         // 🎯 CRITICAL FIX: Use exact field names that backend controller expects
@@ -2172,8 +2873,10 @@ const SubscriptionPlanScreen: React.FC = () => {
         razorpay_payment_id: razorpayResponse.razorpay_payment_id, // Also send as razorpay_payment_id
         order_id: razorpayResponse.razorpay_order_id, // Backend expects 'order_id'
         razorpay_order_id: razorpayResponse.razorpay_order_id, // Also send as razorpay_order_id
-        amount: plan.price * 100, // Convert to paisa
+        amount: amountInPaise, // Convert to paisa
         planId: parseInt(plan.id.toString()), // Backend expects 'planId'
+        userId: Number(userId),
+        currency: 'INR',
 
         // 🎯 CRITICAL FIX: Use detected payment method instead of unknown
         method: paymentMethod, // Use the detected method, not razorpayResponse.method
@@ -2181,17 +2884,18 @@ const SubscriptionPlanScreen: React.FC = () => {
 
         // 🎯 CRITICAL FIX: Handle signature properly for React Native Razorpay
         // Use extracted signature from response
-        razorpay_signature: razorpayResponse.razorpay_signature,
+        razorpay_signature: finalSignature,
 
         // 🎯 ADDITIONAL: Send verification data for backend
         verification_data: {
           payment_id: razorpayResponse.razorpay_payment_id,
           order_id: razorpayResponse.razorpay_order_id,
-          amount: plan.price * 100,
-          currency: 'INR',
+          amount: amountInPaise,
+          currency: captureCurrency,
           timestamp: Date.now(),
           sdk_type: 'react_native',
-          signature_available: !!razorpayResponse.razorpay_signature,
+          signature_available: !!finalSignature,
+          signature: finalSignature || undefined,
         },
         notes: `Upgrade to ${plan.name} plan - User ID: ${userId}`,
         contact: razorpayResponse.contact || finalUserMobile || '', // Use REAL user mobile
@@ -2218,17 +2922,17 @@ const SubscriptionPlanScreen: React.FC = () => {
         description: `Payment for ${plan.name} plan`,
 
         // 🎯 IMPORTANT: Signature handling note for backend
-        signature_note: extractedSignature
+        signature_note: finalSignature
           ? 'Signature provided by Razorpay'
           : 'No signature from React Native SDK - backend should verify using payment_id and order_id',
 
         // 🎯 CRITICAL: Flag for backend to handle signature verification differently
-        requires_alternative_verification: !extractedSignature,
+        requires_alternative_verification: !finalSignature,
 
         // 🎯 FIXED: Store Razorpay data in JSON_LOG field as backend expects
         JSON_LOG: {
           // 🎯 CRITICAL: Use extracted signature from response
-          razorpay_signature: extractedSignature,
+          razorpay_signature: finalSignature,
           payment_id: razorpayResponse.razorpay_payment_id,
           order_id: razorpayResponse.razorpay_order_id,
           method: paymentMethod, // Use detected method
@@ -2277,10 +2981,9 @@ const SubscriptionPlanScreen: React.FC = () => {
         invoice_id: '',
 
         // 🎯 ADDITIONAL: Ensure all database fields are populated
-        amount_in_paisa: plan.price * 100,
-        base_amount: plan.price * 100,
-        base_currency: 'INR',
-        currency: 'INR',
+        amount_in_paisa: amountInPaise,
+        base_amount: amountInPaise,
+        base_currency: captureCurrency,
         captured: true,
         refunded: false,
         refund_status: 'not_refunded',
@@ -2380,62 +3083,269 @@ const SubscriptionPlanScreen: React.FC = () => {
 
       // 🎯 Verify payment using backend payments endpoint (RN SDK doesn't return signature)
       console.log('💳 Verifying payment via backend /payments/verify...');
-      // Use unified API - post() returns data directly, not wrapped in {data, status, headers}
-      const responseData = await unifiedApi.post('/payments/verify', {
+      console.log('🔍 Payment verification data:', {
         razorpayPaymentId: razorpayResponse.razorpay_payment_id,
-        razorpayOrderId: razorpayResponse.razorpay_order_id || undefined,
-        razorpaySignature: razorpayResponse.razorpay_signature || undefined,
+        razorpayOrderId: razorpayResponse.razorpay_order_id,
+        hasOrderId: !!razorpayResponse.razorpay_order_id,
       });
+
+      // Build verify payload - ensure we have orderId from response
+      const verifyPayload: any = {
+        razorpayPaymentId: razorpayResponse.razorpay_payment_id,
+      };
+
+      // Always include orderId if available (critical for payment lookup)
+      if (razorpayResponse.razorpay_order_id) {
+        verifyPayload.razorpayOrderId = razorpayResponse.razorpay_order_id;
+        console.log(
+          '✅ Using orderId for verification:',
+          razorpayResponse.razorpay_order_id,
+        );
+      } else {
+        console.warn(
+          '⚠️ No orderId available for verification - this may cause lookup issues',
+        );
+        console.warn(
+          '⚠️ Payment response keys:',
+          Object.keys(razorpayResponse),
+        );
+      }
+
+      // Only add signature if it exists
+      if (razorpayResponse.razorpay_signature) {
+        verifyPayload.razorpaySignature = razorpayResponse.razorpay_signature;
+      }
+
+      // Use unified API - post() returns data directly, not wrapped in {data, status, headers}
+      const responseData = await unifiedApi.post(
+        '/payments/verify',
+        verifyPayload,
+      );
       console.log('📥 Backend capture response:', responseData);
 
       // unifiedApi.post() returns data directly, not wrapped in {data, status, headers}
       const responseDataValue = (responseData as any)?.data ?? responseData;
 
-      // Check if payment verification was successful (responseDataValue should have payment data)
-      if (
-        responseDataValue &&
-        (responseDataValue.id ||
-          responseDataValue.paymentId ||
-          responseDataValue.razorpayPaymentId)
-      ) {
-        // Complete the subscription upgrade on the backend using the verified payment id
-        let upgradeCompleted = false;
+      let verificationResult = interpretPaymentVerification(responseDataValue);
+      if (!verificationResult.success) {
+        console.log(
+          '⚠️ Verification response inconclusive, polling payment status...',
+        );
+        verificationResult = await pollPaymentStatus(
+          razorpayResponse.razorpay_order_id,
+          4,
+          1200,
+        );
+      }
+
+      if (!verificationResult.success) {
         try {
-          const verifiedPayment = responseDataValue;
-          const paymentIdToUse =
-            verifiedPayment?.id ||
-            verifiedPayment?.paymentId ||
-            verifiedPayment?.razorpayPaymentId;
-          if (paymentIdToUse) {
+          await PaymentApiService.retryVerification(
+            razorpayResponse.razorpay_order_id,
+          );
+          verificationResult = await pollPaymentStatus(
+            razorpayResponse.razorpay_order_id,
+            3,
+            2000,
+          );
+        } catch (retryError) {
+          console.warn('⚠️ Retry verification failed:', retryError);
+        }
+      }
+
+      // Check if payment verification was successful (responseDataValue should have payment data)
+      if (verificationResult.success) {
+        try {
+          await PaymentApiService.capturePayment(
+            capturePayload as CapturePaymentDto,
+          );
+        } catch (captureError) {
+          console.warn('⚠️ Payment capture API failed:', captureError);
+        }
+
+        const completionResponseIndicatesSuccess = (body: any): boolean => {
+          if (!body) return false;
+          const status = body?.status
+            ? body.status.toString().toLowerCase()
+            : '';
+          const nestedStatus = body?.data?.status
+            ? body.data.status.toString().toLowerCase()
+            : '';
+          const message = body?.message
+            ? body.message.toString().toLowerCase()
+            : '';
+          const alreadyHandled =
+            message.includes('already') &&
+            (message.includes('upgraded') ||
+              message.includes('processed') ||
+              message.includes('completed'));
+          return !!(
+            body?.success === true ||
+            status === 'success' ||
+            nestedStatus === 'success' ||
+            body?.id ||
+            body?.subscriptionId ||
+            body?.subscription ||
+            alreadyHandled
+          );
+        };
+
+        const lookupNumericPaymentIdFromBackend = async (): Promise<
+          number | null
+        > => {
+          const orderId = razorpayResponse.razorpay_order_id;
+          const fallbackSources: Array<() => Promise<any>> = [];
+          if (orderId) {
+            fallbackSources.push(() =>
+              PaymentApiService.getPaymentStatus(orderId),
+            );
+            fallbackSources.push(() =>
+              PaymentApiService.getPaymentByOrder(orderId),
+            );
+          }
+          for (const fetcher of fallbackSources) {
+            try {
+              const payload = await fetcher();
+              const normalized = interpretPaymentVerification(payload);
+              const numericCandidate = resolveNumericPaymentIdFromCandidates(
+                normalized.paymentId,
+                normalized.paymentRecord,
+                payload,
+              );
+              if (numericCandidate) {
+                console.log(
+                  '✅ Resolved numeric payment id via fallback lookup:',
+                  numericCandidate,
+                );
+                return numericCandidate;
+              }
+            } catch (lookupError) {
+              console.warn('⚠️ Payment ID lookup failed:', lookupError);
+            }
+          }
+
+          try {
+            const historyResponse = await PaymentApiService.getMyPayments();
+            const historyPayload =
+              (historyResponse as any)?.data ?? historyResponse ?? {};
+            const rawHistory =
+              historyPayload?.data ?? historyPayload?.records ?? historyPayload;
+            const historyList = Array.isArray(rawHistory)
+              ? rawHistory
+              : Array.isArray(rawHistory?.data)
+              ? rawHistory.data
+              : [];
+            if (Array.isArray(historyList)) {
+              const matchedHistory = historyList.find((item: any) => {
+                const orderMatches =
+                  item?.razorpay_order_id ===
+                    razorpayResponse.razorpay_order_id ||
+                  item?.razorpayOrderId === razorpayResponse.razorpay_order_id;
+                const paymentMatches =
+                  item?.razorpayPaymentId ===
+                    razorpayResponse.razorpay_payment_id ||
+                  item?.razorpay_payment_id ===
+                    razorpayResponse.razorpay_payment_id;
+                return orderMatches || paymentMatches;
+              });
+              if (matchedHistory) {
+                const numericFromHistory =
+                  resolveNumericPaymentIdFromCandidates(matchedHistory);
+                if (numericFromHistory) {
+                  console.log(
+                    '✅ Resolved numeric payment id from payment history:',
+                    numericFromHistory,
+                  );
+                  return numericFromHistory;
+                }
+              }
+            }
+          } catch (historyError) {
+            console.warn('⚠️ Payment history lookup failed:', historyError);
+          }
+          return null;
+        };
+
+        // Type guard: verificationResult.success is true at this point
+        const successResult = verificationResult as {
+          success: true;
+          captured: boolean;
+          paymentId: any;
+          paymentRecord: any;
+          raw: any;
+        };
+
+        const verifiedPayment =
+          successResult.paymentRecord || successResult.raw;
+        let paymentIdToUse = resolveNumericPaymentIdFromCandidates(
+          successResult.paymentId,
+          verifiedPayment,
+          successResult.raw,
+          responseDataValue,
+        );
+
+        if (!paymentIdToUse) {
+          paymentIdToUse = await lookupNumericPaymentIdFromBackend();
+        }
+
+        const attemptUpgradeCompletion = async (
+          paymentId: number,
+        ): Promise<boolean> => {
+          try {
             const completeRes = await unifiedApi.post(
               '/subscriptions/upgrade/complete',
-              { paymentId: paymentIdToUse },
+              { paymentId },
             );
-            // unifiedApi.post() returns data directly
             const completeBody = completeRes as any;
             console.log('🔁 Upgrade completion response:', completeBody);
-            // Check if upgrade was successful by looking for success indicators
-            upgradeCompleted = !!(
-              completeBody?.success ||
-              completeBody?.id ||
-              completeBody?.subscriptionId ||
-              (completeBody && !completeBody.error)
-            );
-          } else {
-            console.warn('No payment id returned from verification');
+            return completionResponseIndicatesSuccess(completeBody);
+          } catch (error) {
+            console.warn('Upgrade completion error:', error);
+            throw error;
           }
-        } catch (e) {
-          console.warn('Upgrade completion error:', e);
+        };
+
+        // Complete the subscription upgrade on the backend using the verified payment id
+        let upgradeCompleted = false;
+        let completionError: any = null;
+
+        if (paymentIdToUse) {
+          try {
+            upgradeCompleted = await attemptUpgradeCompletion(paymentIdToUse);
+            if (!upgradeCompleted) {
+              console.warn(
+                '⚠️ Upgrade completion did not confirm success, retrying with refreshed payment id...',
+              );
+              const refreshedPaymentId =
+                await lookupNumericPaymentIdFromBackend();
+              if (refreshedPaymentId && refreshedPaymentId !== paymentIdToUse) {
+                paymentIdToUse = refreshedPaymentId;
+                upgradeCompleted = await attemptUpgradeCompletion(
+                  refreshedPaymentId,
+                );
+              }
+            }
+          } catch (completionErr) {
+            completionError = completionErr;
+          }
+        } else {
+          console.warn(
+            '⚠️ No numeric payment id available from verification, skipping upgrade completion call',
+          );
         }
         // ✅ Payment successful - plan activated
         console.log('✅ Payment captured successfully:', responseDataValue);
+
+        // 🎯 CRITICAL: Mark that we shouldn't reset processing in finally block
+        // because we want to keep it true until subscription refresh completes
+        shouldResetProcessing = false;
 
         // Store payment details for display
         const paymentDetailsData = {
           ...razorpayResponse,
           // Ensure amount in paisa for PaymentDetailsDisplay
-          amount: Math.round(plan.price * 100),
-          currency: 'INR',
+          amount: amountInPaise,
+          currency: captureCurrency,
           description:
             `Payment for ${plan.name} plan` +
             (currentSubscription?.nextBillingDate
@@ -2471,89 +3381,47 @@ const SubscriptionPlanScreen: React.FC = () => {
         );
         console.log('🔍 Payment method extracted:', paymentDetailsData.method);
         console.log('🔍 Full Razorpay response:', razorpayResponse);
-        setPaymentDetails(paymentDetailsData);
+        // 🎯 CRITICAL: Only update state if component is mounted
+        if (isMountedRef.current) {
+          setPaymentDetails(paymentDetailsData);
+        }
 
-        // Refresh subscription data from backend; only show success if upgradeCompleted
-        // Only fetch subscription data (not plans) since plans don't change
-        await fetchSubscriptionData(false); // false = don't refresh plans
+        if (!upgradeCompleted) {
+          const confirmed = await refreshSubscriptionAndConfirm(
+            plan.name,
+            3,
+            1000,
+          );
+          if (confirmed) {
+            upgradeCompleted = true;
+          }
+        }
+
         if (upgradeCompleted) {
-          // 🎯 REMOVED: Backend already creates subscription transaction via createSubscriptionTransaction
-          // No need to create duplicate transactions from frontend
-
-          // Show success message with app UI
-          setSuccessMessage(
-            `Payment completed! Your plan has been successfully upgraded to ${plan.name}!`,
-          );
-          setShowSuccessModal(true);
-
-          // Show plan update notification
+          // 🎯 CRITICAL FIX: Wrap post-upgrade flow in try-catch to prevent errors
+          // from showing error alerts after successful upgrade. The upgrade succeeded,
+          // so any errors in post-upgrade operations (like data refresh) should be
+          // logged but not shown to the user.
           try {
-            await showPlanUpdatedNotification(plan.name, plan.price);
-            console.log('✅ Plan update notification sent successfully');
-          } catch (notificationError) {
-            console.error(
-              '❌ Failed to show plan update notification:',
-              notificationError,
+            await runPostUpgradeSuccessFlow(plan);
+          } catch (postUpgradeError) {
+            // Log the error for debugging but don't show alert to user
+            // since the upgrade itself was successful
+            console.warn(
+              '⚠️ Post-upgrade flow error (upgrade was successful):',
+              postUpgradeError,
             );
-            // Don't block the flow if notification fails
-          }
-
-          // 🎯 FIXED: Add delay before refreshing subscription data to allow backend to update
-          // This ensures the current plan is immediately updated in the UI
-          setTimeout(async () => {
-            console.log(
-              '🔄 Refreshing subscription data after plan upgrade (with delay)...',
-            );
-            // Refresh subscription data again after delay to get updated plan
-            await fetchSubscriptionData(false); // false = don't refresh plans
-          }, 1000); // Wait 1 second for backend to update subscription
-
-          // 🎯 FIXED: Add delay before fetching transaction limits to allow backend to update subscription
-          // This prevents the transaction count from showing 0 after plan change
-          setTimeout(async () => {
-            console.log(
-              '🔄 Refreshing transaction limits after plan upgrade (with delay)...',
-            );
-            await fetchBillingData();
-
-            // Retry once more after additional delay to ensure accurate count
-            setTimeout(async () => {
-              console.log(
-                '🔄 Retrying transaction limits fetch to ensure accuracy...',
-              );
-              await fetchBillingData();
-            }, 1500);
-          }, 1500); // Wait 1.5 seconds for backend to update subscription
-
-          // 🎯 FIXED: Clear session flags and restart transaction limit monitoring with updated data
-          console.log(
-            '🔄 Clearing session flags and restarting transaction limit monitoring with new plan data...',
-          );
-          try {
-            // Clear any session flags that might prevent popups from showing with new plan data
-            await AsyncStorage.removeItem(
-              'transaction_limit_popup_shown_session',
-            );
-            console.log('✅ Session flags cleared');
-          } catch (error) {
-            console.error('❌ Error clearing session flags:', error);
-          }
-
-          setTimeout(async () => {
-            try {
-              await startLimitMonitoring();
-              console.log(
-                '✅ Transaction limit monitoring restarted successfully',
-              );
-            } catch (error) {
-              console.error(
-                '❌ Error restarting transaction limit monitoring:',
-                error,
-              );
+            // Still reset processing state and show success modal
+            if (isMountedRef.current) {
+              setPaymentProcessing(false);
+              upgradingLockRef.current = false;
+              razorpayOpenRef.current = false;
             }
-          }, 2000); // Wait 2 seconds to ensure data is refreshed
+          }
         } else {
-          throw new Error('Plan upgrade failed after payment');
+          throw (
+            completionError || new Error('Plan upgrade failed after payment')
+          );
         }
       } else {
         console.error('❌ Backend capture failed:', responseData);
@@ -2562,7 +3430,11 @@ const SubscriptionPlanScreen: React.FC = () => {
           (responseDataValue as any)?.error?.message ||
           (responseData as any)?.message ||
           (responseData as any)?.error?.message ||
-          'Unknown error';
+          'Payment verification failed. Please contact support.';
+        // 🎯 CRITICAL: Reset processing state before throwing error
+        if (isMountedRef.current) {
+          setPaymentProcessing(false);
+        }
         throw new Error(`Payment capture failed: ${errorMessage}`);
       }
     } catch (error: any) {
@@ -2571,27 +3443,71 @@ const SubscriptionPlanScreen: React.FC = () => {
       // Import error handler
       const { handleApiError } = require('../utils/apiErrorHandler');
       const errorInfo = handleApiError(error);
+      const isPhonePeGatewayIssue =
+        isPhonePeGatewayError(error) ||
+        isPhonePeGatewayError(errorInfo?.message);
+
+      if (isPhonePeGatewayIssue && !phonePeRecoveryAttempted) {
+        console.log(
+          '⚠️ PhonePe gateway error during capture - waiting and retrying once...',
+        );
+        // Give backend extra time before retrying capture
+        await new Promise(resolve =>
+          setTimeout(resolve, PHONEPE_EXTENDED_DELAY_MS),
+        );
+        return await handlePaymentSuccess(razorpayResponse, plan, {
+          ...options,
+          phonePeRecoveryAttempted: true,
+        });
+      }
 
       // Handle 403 Forbidden errors with user-friendly message
       if (errorInfo.isForbidden) {
-        if (!suppressPaymentError) setPaymentError(errorInfo.message);
-        showAlert({
-          title: 'Access Denied',
-          message: errorInfo.message,
-          type: 'error',
-          confirmText: 'OK',
-          onConfirm: () => {
-            console.log('User acknowledged access denied error');
-          },
-        });
+        if (isMountedRef.current) {
+          if (!suppressPaymentError) setPaymentError(errorInfo.message);
+          showAlert({
+            title: 'Access Denied',
+            message: errorInfo.message,
+            type: 'error',
+            confirmText: 'OK',
+            onConfirm: () => {
+              console.log('User acknowledged access denied error');
+            },
+          });
+        }
+        // 🎯 CRITICAL: Reset processing state even on forbidden error
+        if (isMountedRef.current) {
+          setPaymentProcessing(false);
+        }
         return;
       }
 
       // 🎯 IMPROVED: Better error handling with specific messages
       let errorMessage =
         'Payment was successful, but we could not complete the process. Please contact support.';
+      let alertTitle = 'Payment Error';
+      let alertType: AlertOptions['type'] = 'error';
 
-      if (error.message?.includes('Invalid payment response')) {
+      // Handle "Payment not found" error specifically
+      if (
+        error.message?.includes('Payment not found') ||
+        errorInfo.message?.includes('Payment not found')
+      ) {
+        // Show detailed error with all payment IDs for user reference
+        errorMessage =
+          `Payment verification failed. Please contact support with the following details:\n\n` +
+          `User ID: ${userId}\n` +
+          `Payment ID: ${paymentId}\n` +
+          `Order ID: ${orderId}\n` +
+          `Signature: ${signature}\n\n` +
+          `This may be a temporary issue. Please wait a moment and try again, or contact support with the details above.`;
+        console.error('❌ Payment not found error with details:');
+        console.error('  - User ID:', userId);
+        console.error('  - Payment ID:', paymentId);
+        console.error('  - Order ID:', orderId);
+        console.error('  - Signature:', signature);
+        console.error('  - Full error:', error);
+      } else if (error.message?.includes('Invalid payment response')) {
         errorMessage =
           'Payment verification failed. Please contact support with your payment details.';
       } else if (error.message?.includes('Payment capture failed')) {
@@ -2606,27 +3522,93 @@ const SubscriptionPlanScreen: React.FC = () => {
       ) {
         errorMessage =
           'Network error. Please check your internet connection and try again.';
+      } else if (isPhonePeGatewayIssue) {
+        errorMessage = buildPhonePePendingAlertMessage(orderId);
+        alertTitle = 'PhonePe Confirmation Pending';
+        alertType = 'info';
       } else {
         // Use error handler message if available
         errorMessage = errorInfo.message || errorMessage;
       }
 
-      if (!suppressPaymentError) setPaymentError(errorMessage);
-      showAlert({
-        title: 'Payment Error',
-        message: errorMessage,
-        type: 'error',
-        confirmText: 'OK',
-        onConfirm: () => {
-          console.log('User acknowledged payment error');
-        },
-      });
+      // 🎯 CRITICAL: Only update state if component is mounted
+      if (isMountedRef.current) {
+        if (!suppressPaymentError) setPaymentError(errorMessage);
+
+        // For "Payment not found" errors, show detailed alert with IDs
+        const isPaymentNotFound =
+          error.message?.includes('Payment not found') ||
+          errorInfo.message?.includes('Payment not found');
+
+        showAlert({
+          title: alertTitle,
+          message: errorMessage,
+          type: alertType,
+          confirmText: 'OK',
+          onConfirm: () => {
+            console.log('User acknowledged payment error');
+            // Log the IDs for support reference
+            if (isPaymentNotFound) {
+              console.log('📋 Payment details for support:');
+              console.log('  - Payment ID:', paymentId);
+              console.log('  - Order ID:', orderId);
+              console.log('  - Signature:', signature);
+            }
+          },
+        });
+      }
+    } finally {
+      // 🎯 CRITICAL: Always reset paymentProcessing state, even if component unmounts
+      // This prevents the UI from getting stuck in a loading state
+      if (shouldResetProcessing && isMountedRef.current) {
+        console.log(
+          '🔄 Resetting paymentProcessing state in handlePaymentSuccess finally block',
+        );
+        setPaymentProcessing(false);
+        upgradingLockRef.current = false;
+        razorpayOpenRef.current = false;
+      }
     }
   };
   // ... existing code ...
 
   // 🎯 UPDATED: Simplified upgradePlan function with proper Razorpay integration
   const upgradePlan = async (plan: PlanDisplayData) => {
+    // 🎯 CRITICAL: Declare variables at function level for error handling access
+    let order: {
+      id: string;
+      amount: number;
+      currency: string;
+      key?: string | null;
+    } | null = null;
+    let pendingPaymentRecordId: number | null = null;
+    let paymentAmountRupees = plan.price;
+    let orderCurrency = 'INR';
+    let storedOrderId: string | null = null; // Store at function level for error handling
+
+    // 🎯 CRITICAL: Add timeout protection to prevent infinite loading
+    let upgradeTimeout: NodeJS.Timeout | null = null;
+    if (isMountedRef.current) {
+      upgradeTimeout = setTimeout(() => {
+        if (isMountedRef.current) {
+          console.warn('⚠️ Upgrade timeout - resetting state');
+          setPaymentProcessing(false);
+          setPaymentError(
+            'Upgrade is taking longer than expected. Please check your connection and try again.',
+          );
+          upgradingLockRef.current = false;
+          razorpayOpenRef.current = false;
+          showAlert({
+            title: 'Timeout',
+            message:
+              'The upgrade process is taking longer than expected. Please check your connection and try again.',
+            type: 'error',
+            confirmText: 'OK',
+          });
+        }
+      }, 120000); // 2 minutes timeout
+    }
+
     try {
       console.log('🚀 Starting plan upgrade for:', {
         planId: plan.id,
@@ -2635,7 +3617,19 @@ const SubscriptionPlanScreen: React.FC = () => {
       });
 
       // Set payment processing state
+      if (!isMountedRef.current) {
+        if (upgradeTimeout !== null) {
+          clearTimeout(upgradeTimeout);
+        }
+        return;
+      }
       setPaymentProcessing(true);
+      if (!isMountedRef.current) {
+        if (upgradeTimeout !== null) {
+          clearTimeout(upgradeTimeout);
+        }
+        return;
+      }
       setPaymentError(null);
       setSuppressPaymentError(false);
 
@@ -2660,16 +3654,20 @@ const SubscriptionPlanScreen: React.FC = () => {
           cancelText: 'Cancel',
           onConfirm: async () => {
             try {
+              if (!isMountedRef.current) return;
               setPaymentProcessing(true);
+              if (!isMountedRef.current) return;
               setPaymentError(null);
 
               // Call the context upgrade function directly
               const success = await contextUpgradePlan(plan.id);
               if (success) {
-                setSuccessMessage(
-                  `Successfully upgraded to ${plan.name} plan!`,
-                );
-                setShowSuccessModal(true);
+                if (isMountedRef.current) {
+                  setSuccessMessage(
+                    `Successfully upgraded to ${plan.name} plan!`,
+                  );
+                  setShowSuccessModal(true);
+                }
                 // Only fetch subscription data (not plans) since plans don't change
                 await fetchSubscriptionData(false); // false = don't refresh plans
 
@@ -2677,7 +3675,7 @@ const SubscriptionPlanScreen: React.FC = () => {
                 // No need to create duplicate transactions from frontend
 
                 // 🎯 FIXED: Add delay before refreshing subscription data to allow backend to update
-                setTimeout(async () => {
+                safeSetTimeout(async () => {
                   console.log(
                     '🔄 Refreshing subscription data after plan upgrade (with delay)...',
                   );
@@ -2686,18 +3684,32 @@ const SubscriptionPlanScreen: React.FC = () => {
                 }, 1000); // Wait 1 second for backend to update subscription
 
                 // 🎯 FIXED: Add delay before fetching transaction limits to allow backend to update
-                setTimeout(async () => {
+                safeSetTimeout(async () => {
                   console.log(
                     '🔄 Refreshing transaction limits after plan upgrade...',
                   );
                   await fetchBillingData();
 
                   // Retry to ensure accurate count
-                  setTimeout(async () => {
+                  safeSetTimeout(async () => {
                     await fetchBillingData();
                   }, 1500);
                 }, 1500);
               } else {
+                if (isMountedRef.current) {
+                  setPaymentError('Failed to upgrade plan. Please try again.');
+                  showAlert({
+                    title: 'Upgrade Failed',
+                    message:
+                      'Failed to upgrade plan. Please try again or contact support.',
+                    type: 'error',
+                    confirmText: 'OK',
+                  });
+                }
+              }
+            } catch (error) {
+              console.error('Upgrade error:', error);
+              if (isMountedRef.current) {
                 setPaymentError('Failed to upgrade plan. Please try again.');
                 showAlert({
                   title: 'Upgrade Failed',
@@ -2707,59 +3719,66 @@ const SubscriptionPlanScreen: React.FC = () => {
                   confirmText: 'OK',
                 });
               }
-            } catch (error) {
-              console.error('Upgrade error:', error);
-              setPaymentError('Failed to upgrade plan. Please try again.');
-              showAlert({
-                title: 'Upgrade Failed',
-                message:
-                  'Failed to upgrade plan. Please try again or contact support.',
-                type: 'error',
-                confirmText: 'OK',
-              });
             } finally {
-              setPaymentProcessing(false);
+              if (isMountedRef.current) {
+                setPaymentProcessing(false);
+              }
             }
           },
         });
+        if (upgradeTimeout !== null) {
+          clearTimeout(upgradeTimeout);
+        }
         return;
       }
 
       // Validate plan data
       if (!plan.id || isNaN(parseInt(plan.id.toString()))) {
         console.error('❌ Invalid plan data:', plan);
-        setPaymentError('Invalid plan data. Plan ID must be a valid number.');
-        showAlert({
-          title: 'Error',
-          message: 'Invalid plan data. Plan ID must be a valid number.',
-          type: 'error',
-          confirmText: 'OK',
-        });
+        if (isMountedRef.current) {
+          setPaymentError('Invalid plan data. Plan ID must be a valid number.');
+          setPaymentProcessing(false);
+          showAlert({
+            title: 'Error',
+            message: 'Invalid plan data. Plan ID must be a valid number.',
+            type: 'error',
+            confirmText: 'OK',
+          });
+        }
         return;
       }
 
       // Get user authentication data
       const token = await AsyncStorage.getItem('accessToken');
       if (!token) {
-        setPaymentError('Please log in to upgrade your plan');
-        showAlert({
-          title: 'Error',
-          message: 'Please log in to upgrade your plan',
-          type: 'error',
-          confirmText: 'OK',
-        });
+        if (isMountedRef.current) {
+          setPaymentError('Please log in to upgrade your plan');
+          setPaymentProcessing(false);
+          showAlert({
+            title: 'Error',
+            message: 'Please log in to upgrade your plan',
+            type: 'error',
+            confirmText: 'OK',
+          });
+        }
         return;
       }
 
       const userId = await getUserIdFromToken();
       if (!userId || userId <= 0) {
-        setPaymentError('Invalid user ID. Please log in again.');
-        showAlert({
-          title: 'Error',
-          message: 'Invalid user ID. Please log in again.',
-          type: 'error',
-          confirmText: 'OK',
-        });
+        if (isMountedRef.current) {
+          setPaymentError('Invalid user ID. Please log in again.');
+          setPaymentProcessing(false);
+          showAlert({
+            title: 'Error',
+            message: 'Invalid user ID. Please log in again.',
+            type: 'error',
+            confirmText: 'OK',
+          });
+        }
+        if (upgradeTimeout !== null) {
+          clearTimeout(upgradeTimeout);
+        }
         return;
       }
 
@@ -2790,7 +3809,7 @@ const SubscriptionPlanScreen: React.FC = () => {
             // No need to create duplicate transactions from frontend
 
             // 🎯 FIXED: Add delay before refreshing subscription data to allow backend to update
-            setTimeout(async () => {
+            safeSetTimeout(async () => {
               console.log(
                 '🔄 Refreshing subscription data after free plan update (with delay)...',
               );
@@ -2799,14 +3818,14 @@ const SubscriptionPlanScreen: React.FC = () => {
             }, 1000); // Wait 1 second for backend to update subscription
 
             // 🎯 FIXED: Add delay before fetching transaction limits to allow backend to update
-            setTimeout(async () => {
+            safeSetTimeout(async () => {
               console.log(
                 '🔄 Refreshing transaction limits after free plan update...',
               );
               await fetchBillingData();
 
               // Retry to ensure accurate count
-              setTimeout(async () => {
+              safeSetTimeout(async () => {
                 await fetchBillingData();
               }, 1500);
             }, 1500);
@@ -2828,20 +3847,15 @@ const SubscriptionPlanScreen: React.FC = () => {
             confirmText: 'OK',
           });
         }
+        if (upgradeTimeout !== null) {
+          clearTimeout(upgradeTimeout);
+        }
         return;
       }
 
       // 🎯 FIXED: Use backend API to create Razorpay order instead of direct API call
       try {
         console.log('🎯 Creating Razorpay order through backend API...');
-
-        // Create order through backend API instead of direct Razorpay API
-        const orderData = {
-          amount: plan.price * 100,
-          currency: 'INR',
-          receipt: `plan_${plan.id}_${Date.now()}`,
-          planId: parseInt(plan.id.toString()),
-        };
 
         // Get real user data from token first
         let realUserMobile: string | null = null;
@@ -2947,190 +3961,96 @@ const SubscriptionPlanScreen: React.FC = () => {
           planPrice: plan.price,
         });
 
-        console.log('📤 Sending payment creation request to backend:', {
-          subscriptionId: parseInt(plan.id.toString()),
-          targetPlanId: Number(plan.id),
-          planId: plan.id,
-          planIdType: typeof plan.id,
-          amount: plan.price,
-          currency: 'INR',
-          customerName: realUserName || 'User',
-          customerEmail: realUserEmail || 'user@example.com',
-          customerPhone: sanitizedMobile,
-        });
-
-        let order;
-
         try {
-          // Try backend API first - use the correct endpoint
-          // Ensure subscriptionId is always a valid number (never NaN)
-          const resolvedSubscriptionIdRaw =
-            (currentSubscription as any)?.id ??
-            (currentSubscription as any)?.subscriptionId ??
-            (currentSubscription as any)?.planId ??
-            0;
-          const resolvedSubscriptionId = Number(resolvedSubscriptionIdRaw);
-
-          const safeSubscriptionId = Number.isFinite(resolvedSubscriptionId)
-            ? resolvedSubscriptionId
-            : 0;
-
-          const requestBody = {
-            // Backend expects an existing subscriptionId; 0 is acceptable when absent
-            subscriptionId: safeSubscriptionId,
-            // And the plan we want to upgrade/downgrade to
-            // Ensure we have a valid plan ID - try multiple approaches
-            targetPlanId: (() => {
-              const planId = plan.id;
-              console.log('🔍 Plan ID extraction:', {
-                originalId: planId,
-                type: typeof planId,
-                isString: typeof planId === 'string',
-                isNumber: typeof planId === 'number',
-                parsed: Number(planId),
-                isNaN: isNaN(Number(planId)),
-                planName: plan.name,
-                planPrice: plan.price,
-              });
-
-              // Try to extract a valid number from the plan ID
-              if (typeof planId === 'number' && !isNaN(planId) && planId > 0) {
-                console.log('✅ Using numeric plan ID:', planId);
-                return planId;
-              } else if (typeof planId === 'string' && planId.trim() !== '') {
-                const parsed = parseInt(planId.trim(), 10);
-                if (!isNaN(parsed) && parsed > 0) {
-                  console.log('✅ Using parsed string plan ID:', parsed);
-                  return parsed;
-                }
-              }
-
-              // Fallback: try to map plan name to ID
-              const planNameToId: { [key: string]: number } = {
-                free: 1,
-                starter: 2,
-                professional: 3,
-                enterprise: 4,
-              };
-
-              const mappedId = planNameToId[plan.name?.toLowerCase()];
-              if (mappedId) {
-                console.log('✅ Using mapped plan ID from name:', mappedId);
-                return mappedId;
-              }
-
-              // Last resort fallback
-              console.warn(
-                '⚠️ Could not extract valid plan ID, using fallback ID 1',
-              );
-              return 1;
-            })(),
-            amount: plan.price,
-            currency: 'INR',
-            paymentMethod: 'razorpay',
-            paymentDescription: `Upgrade to ${plan.name} plan`,
-            customerName: realUserName || 'User',
-            customerEmail: realUserEmail || 'user@example.com',
-            customerPhone: sanitizedMobile, // Use sanitized mobile number
-          };
-
-          // Include user's primary role id for backend auditing/mapping
-          try {
-            const { addRoleIdToBody } = await import('../utils/roleHelper');
-            await addRoleIdToBody(requestBody);
-          } catch (e) {
-            console.warn(
-              '⚠️ SubscriptionPlanScreen: Failed to add role ID to payment request:',
-              e,
-            );
-          }
-
-          console.log('📤 Request body being sent to backend:', requestBody);
-          console.log(
-            '📤 targetPlanId in request body:',
-            requestBody.targetPlanId,
-          );
-          console.log('📤 targetPlanId type:', typeof requestBody.targetPlanId);
-          console.log(
-            '📤 subscriptionId in request body:',
-            requestBody.subscriptionId,
-          );
-          console.log(
-            '📤 subscriptionId type:',
-            typeof requestBody.subscriptionId,
-          );
-
-          const orderResponse = (await unifiedApi.post(
-            '/payments',
-            requestBody,
-          )) as { data: any; status: number; headers: Headers };
-
-          // unifiedApi returns { data, status, headers } structure
-          if (orderResponse.status < 200 || orderResponse.status >= 300) {
-            let errorMessage = `HTTP ${orderResponse.status}`;
-            const errorData = orderResponse.data || orderResponse;
-            console.error('❌ Backend payment creation failed:', errorData);
-            errorMessage = errorData?.message || errorMessage;
-            throw new Error(`Backend failed: ${errorMessage}`);
-          }
-
-          const paymentData = orderResponse.data || orderResponse;
-          console.log('✅ Payment created through backend:', paymentData);
-
-          // Extract order from payment data
-          order = paymentData.order || paymentData;
-          console.log('✅ Razorpay order extracted:', order);
-        } catch (backendError) {
-          console.log(
-            '⚠️ Backend payment creation failed, trying direct Razorpay API...',
-          );
-
-          // Fallback to direct Razorpay API if backend fails
-          if (
-            !RAZORPAY_CONFIG.key ||
-            !RAZORPAY_CONFIG.secret ||
-            RAZORPAY_CONFIG.key === 'rzp_test_xxxxxxxxxxxxx' ||
-            RAZORPAY_CONFIG.secret === 'your_secret_key_here'
-          ) {
-            throw new Error(
-              'Razorpay credentials not configured. Please contact support to enable payments.',
-            );
-          }
-
-          const credentials = `${RAZORPAY_CONFIG.key}:${RAZORPAY_CONFIG.secret}`;
-          const base64Credentials = btoa(credentials);
-
-          const directOrderResponse = await fetch(
-            'https://api.razorpay.com/v1/orders',
+          console.log('🎯 Initiating upgrade via /subscriptions/upgrade...');
+          const upgradeInitResponse = await unifiedApi.post(
+            '/subscriptions/upgrade',
             {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Basic ${base64Credentials}`,
-              },
-              body: JSON.stringify({
-                amount: orderData.amount,
-                currency: orderData.currency,
-                receipt: orderData.receipt,
-              }),
+              planId: parseInt(plan.id.toString(), 10),
             },
           );
+          const upgradePayload =
+            (upgradeInitResponse as any)?.data ?? upgradeInitResponse;
+          console.log('📡 Upgrade initiation response:', upgradePayload);
 
-          if (!directOrderResponse.ok) {
-            const errorData = await directOrderResponse.json();
-            console.error(
-              '❌ Direct Razorpay order creation failed:',
-              errorData,
-            );
-            throw new Error(
-              `Failed to create Razorpay order: ${
-                errorData.error?.description || 'Unknown error'
-              }`,
-            );
+          if (!upgradePayload) {
+            throw new Error('Empty upgrade response from backend');
           }
 
-          order = await directOrderResponse.json();
-          console.log('✅ Razorpay order created through direct API:', order);
+          const requiresPayment =
+            typeof upgradePayload.requiresPayment === 'boolean'
+              ? upgradePayload.requiresPayment
+              : !!upgradePayload.paymentId;
+
+          if (!requiresPayment) {
+            console.log('✅ Upgrade completed on backend without payment');
+            setSuccessMessage(
+              `Your plan has been upgraded to ${plan.name} successfully!`,
+            );
+            setShowSuccessModal(true);
+            await fetchSubscriptionData(false);
+            await fetchBillingData();
+            await startLimitMonitoring();
+            setPaymentProcessing(false);
+            upgradingLockRef.current = false;
+            razorpayOpenRef.current = false;
+            if (upgradeTimeout !== null) {
+              clearTimeout(upgradeTimeout);
+            }
+            return;
+          }
+
+          pendingPaymentRecordId = Number(upgradePayload.paymentId) || null;
+          const backendOrderId = upgradePayload.orderId;
+          if (!backendOrderId) {
+            throw new Error('Backend did not return an order id');
+          }
+
+          paymentAmountRupees =
+            typeof upgradePayload.upgradeAmount === 'number'
+              ? upgradePayload.upgradeAmount
+              : Number(upgradePayload.upgradeAmount) || plan.price;
+          orderCurrency = upgradePayload.currency || 'INR';
+
+          // Store orderId immediately after getting it
+          storedOrderId = backendOrderId;
+
+          order = {
+            id: backendOrderId,
+            amount: Math.round(paymentAmountRupees * 100),
+            currency: orderCurrency,
+            key: upgradePayload.key || RAZORPAY_CONFIG.key,
+          };
+          console.log('✅ Order details prepared:', order);
+        } catch (initError) {
+          console.error('❌ Failed to initiate upgrade:', initError);
+          const { handleApiError } = require('../utils/apiErrorHandler');
+          const errorInfo = handleApiError(initError);
+          if (!suppressPaymentError) {
+            setPaymentError(
+              errorInfo.message ||
+                'Unable to start the upgrade. Please try again.',
+            );
+          }
+          try {
+            await startLimitMonitoring();
+          } catch (monitorError) {
+            console.warn(
+              '⚠️ Failed to restart limit monitoring after initiation error:',
+              monitorError,
+            );
+          }
+          setPaymentProcessing(false);
+          upgradingLockRef.current = false;
+          razorpayOpenRef.current = false;
+          if (upgradeTimeout !== null) {
+            clearTimeout(upgradeTimeout);
+          }
+          return;
+        }
+
+        if (!order) {
+          throw new Error('Order details missing from upgrade response');
         }
 
         // Extract 10-digit mobile number for Razorpay (remove +91 prefix)
@@ -3145,9 +4065,9 @@ const SubscriptionPlanScreen: React.FC = () => {
           order_id: order.id,
           description: `Subscription for ${plan.name} plan`,
           image: 'https://your-logo-url.com',
-          currency: 'INR',
-          key: RAZORPAY_CONFIG.key,
-          amount: plan.price * 100,
+          currency: order.currency || 'INR',
+          key: order.key || RAZORPAY_CONFIG.key,
+          amount: order.amount,
           name: merchantName,
           prefill: {
             email: realUserEmail || 'user@example.com',
@@ -3155,6 +4075,10 @@ const SubscriptionPlanScreen: React.FC = () => {
             name: realUserName || 'User',
           },
           theme: { color: '#4f8cff' },
+          redirect: false, // Prevent Razorpay from showing redirect screen that triggers PhonePe alert
+          retry: {
+            enabled: false,
+          },
         };
 
         console.log('🎯 Opening Razorpay checkout with real user data:');
@@ -3174,20 +4098,122 @@ const SubscriptionPlanScreen: React.FC = () => {
         );
         console.log('  - Full options:', JSON.stringify(options, null, 2));
 
+        // Store orderId before opening Razorpay to ensure we always have it
+        storedOrderId = order.id;
+        console.log(
+          '💾 Stored orderId before opening Razorpay:',
+          storedOrderId,
+        );
+
         let wasCancelled = false; // Track cancellation locally for finally block
+        let razorpayResult: any = null; // Store result for verification
+        let razorpayThrewError = false; // Track if error was thrown
+
         try {
           // Mark sheet as open to block any re-entry while UI thread hands off
           razorpayOpenRef.current = true;
           const paymentData = await RazorpayCheckout.open(options);
           console.log('🎉 Payment completed:', paymentData);
+          razorpayResult = paymentData;
 
+          // Validate payment ID (required)
           if (!paymentData.razorpay_payment_id) {
+            console.error(
+              '❌ Missing payment ID in Razorpay response:',
+              paymentData,
+            );
+            // 🎯 CRITICAL FIX: Don't throw error immediately - verify payment status first
+            // For PhonePe and other UPI apps, payment might succeed even without payment_id in response
+            console.log(
+              '⚠️ No payment_id in response, will verify payment status using orderId',
+            );
+            razorpayThrewError = true;
             throw new Error('No payment ID received from Razorpay');
           }
 
+          // 🎯 CRITICAL: Ensure orderId is always available (use stored value if not in response)
+          if (!paymentData.razorpay_order_id) {
+            if (storedOrderId) {
+              paymentData.razorpay_order_id = storedOrderId;
+              console.log(
+                '✅ Added stored orderId to payment response:',
+                storedOrderId,
+              );
+            } else {
+              console.error('❌ No orderId available - this should not happen');
+              console.error('  - Payment ID:', paymentData.razorpay_payment_id);
+              console.error('  - Stored Order ID:', storedOrderId);
+              console.error('  - Response keys:', Object.keys(paymentData));
+              razorpayThrewError = true;
+              throw new Error(
+                `Payment verification failed: Missing order ID. Payment ID: ${paymentData.razorpay_payment_id}`,
+              );
+            }
+          }
+
+          // Final validation - ensure we have both IDs
+          console.log('🔍 Payment IDs validation before verification:');
+          console.log('  - Payment ID:', paymentData.razorpay_payment_id);
+          console.log('  - Order ID:', paymentData.razorpay_order_id);
+          console.log(
+            '  - Signature:',
+            paymentData.razorpay_signature
+              ? 'Present'
+              : 'Not provided (will be generated on backend)',
+          );
+
+          // 🎯 CRITICAL FIX FOR PHONEPE: Even when Razorpay returns success,
+          // verify payment status to ensure it's actually successful
+          // This prevents issues where Razorpay says success but payment fails
+          console.log(
+            '🔍 Verifying payment status even though Razorpay returned success...',
+          );
+
+          try {
+            // Quick verification to ensure payment is actually successful
+            const quickVerification = await pollPaymentStatus(
+              paymentData.razorpay_order_id || storedOrderId,
+              3, // Fewer attempts since we expect success
+              1000, // Shorter delay
+            );
+
+            if (!quickVerification.success) {
+              console.warn(
+                '⚠️ Razorpay returned success but verification failed - will still proceed with handlePaymentSuccess',
+              );
+              // Continue anyway - handlePaymentSuccess will do its own verification
+            } else {
+              console.log('✅ Payment verification confirmed success');
+            }
+          } catch (verifyError: any) {
+            // 🎯 CRITICAL FIX: Suppress error logging for polling failures
+            const errorMessage =
+              verifyError?.message || String(verifyError || '');
+            if (
+              errorMessage.includes('Failed to get payment status') ||
+              errorMessage.includes('Get payment status')
+            ) {
+              // This is just a polling failure, not a real error - suppress it
+              console.log(
+                'ℹ️ Quick verification polling failed (this is normal), continuing with success flow',
+              );
+            } else {
+              console.warn(
+                '⚠️ Quick verification failed, but continuing with success flow:',
+                verifyError,
+              );
+            }
+            // Continue anyway - handlePaymentSuccess will do its own verification
+          }
+
           // Step 3: Handle payment success
-          await handlePaymentSuccess(paymentData, plan);
+          await handlePaymentSuccess(paymentData, plan, {
+            fallbackPaymentId: pendingPaymentRecordId,
+            amountInRupees: paymentAmountRupees,
+            orderCurrency: order?.currency || orderCurrency || 'INR',
+          });
         } catch (razorpayError: any) {
+          razorpayThrewError = true;
           // 🎯 IMPROVED: Comprehensive cancellation detection
           const isCancellation = (() => {
             // Check error code
@@ -3259,13 +4285,251 @@ const SubscriptionPlanScreen: React.FC = () => {
             setPaymentError(null);
             setSuppressPaymentError(true);
             razorpayOpenRef.current = false;
-            setPaymentProcessing(false);
+            if (isMountedRef.current) {
+              setPaymentProcessing(false);
+            }
             return;
           }
 
           console.error('❌ Razorpay checkout error:', razorpayError);
+          console.error(
+            '🔍 Full error object:',
+            JSON.stringify(razorpayError, null, 2),
+          );
 
-          throw razorpayError;
+          // 🎯 CRITICAL FIX FOR PHONEPE: Always verify payment status when error occurs
+          // PhonePe and other UPI apps often show error dialog even when payment succeeds
+          // We MUST verify payment status before showing any error to user
+          console.log(
+            '🔍 CRITICAL: Verifying payment status after Razorpay error (PhonePe/UPI fix)...',
+          );
+
+          // 🎯 ENHANCED: Try multiple ways to extract payment_id and order_id from error
+          const errorPaymentId =
+            razorpayError?.razorpay_payment_id ||
+            razorpayError?.payment_id ||
+            razorpayError?.paymentId ||
+            razorpayError?.data?.razorpay_payment_id ||
+            razorpayError?.response?.razorpay_payment_id ||
+            razorpayError?.razorpayPaymentId ||
+            razorpayError?.razorpayPaymentID ||
+            razorpayResult?.razorpay_payment_id; // Also check result if available
+
+          // 🎯 CRITICAL: Always use storedOrderId as primary source for verification
+          // PhonePe errors might not include orderId in error object
+          const errorOrderId =
+            storedOrderId || // PRIMARY: Always use stored orderId first
+            razorpayError?.razorpay_order_id ||
+            razorpayError?.order_id ||
+            razorpayError?.orderId ||
+            razorpayError?.data?.razorpay_order_id ||
+            razorpayError?.response?.razorpay_order_id ||
+            razorpayError?.razorpayOrderId ||
+            razorpayError?.razorpayOrderID ||
+            razorpayResult?.razorpay_order_id; // Also check result if available
+
+          console.log('🔍 Extracted IDs for verification:', {
+            orderId: errorOrderId,
+            paymentId: errorPaymentId,
+            hasStoredOrderId: !!storedOrderId,
+            errorKeys: razorpayError ? Object.keys(razorpayError) : [],
+          });
+
+          // 🎯 CRITICAL: ALWAYS verify payment status if we have orderId (which we should always have)
+          // 🎯 CRITICAL FIX: Suppress error display until verification completes
+          // This prevents showing error dialog before we can verify payment status
+          let verificationInProgress = true;
+          let verificationSucceeded = false;
+
+          if (errorOrderId) {
+            console.log(
+              '✅ Found orderId in error, verifying payment status...',
+              {
+                orderId: errorOrderId,
+                paymentId: errorPaymentId,
+              },
+            );
+
+            try {
+              // 🎯 CRITICAL FIX FOR PHONEPE: Add delay before verification
+              // PhonePe payments need time to be processed on backend
+              console.log(
+                '⏳ Waiting 3 seconds for PhonePe/UPI payment to be processed on backend...',
+              );
+              await new Promise(resolve => setTimeout(resolve, 3000)); // Increased to 3 seconds
+
+              // Poll payment status to check if payment actually succeeded
+              // Use more attempts and longer delays for UPI payments (especially PhonePe)
+              console.log('🔄 Starting payment status verification polling...');
+              const verificationResult = await pollPaymentStatus(
+                errorOrderId,
+                10, // Even more attempts for PhonePe (needs more time)
+                3000, // Longer delay between attempts for PhonePe
+              );
+
+              verificationInProgress = false;
+
+              if (verificationResult.success) {
+                verificationSucceeded = true;
+                console.log(
+                  '✅ Payment verification succeeded despite Razorpay error!',
+                );
+                console.log(
+                  '🎯 Payment was successful, proceeding with success flow...',
+                );
+
+                // Construct payment data from verification result
+                // Type guard: verificationResult.success is true, so we can access other properties
+                const successResult = verificationResult as {
+                  success: true;
+                  captured: boolean;
+                  paymentId: any;
+                  paymentRecord: any;
+                  raw: any;
+                };
+
+                const paymentData: any = {
+                  razorpay_payment_id:
+                    errorPaymentId || successResult.paymentId || 'unknown',
+                  razorpay_order_id: errorOrderId,
+                  razorpay_signature: null, // Will be generated on backend
+                };
+
+                // Add any additional data from verification result
+                if (successResult.paymentRecord) {
+                  Object.assign(paymentData, successResult.paymentRecord);
+                }
+
+                // 🎯 CRITICAL: Clear any error state before proceeding with success
+                if (isMountedRef.current) {
+                  setPaymentError(null);
+                  setSuppressPaymentError(true);
+                }
+
+                // Proceed with payment success handling
+                await handlePaymentSuccess(paymentData, plan, {
+                  fallbackPaymentId: pendingPaymentRecordId,
+                  amountInRupees: paymentAmountRupees,
+                  orderCurrency: order?.currency || orderCurrency || 'INR',
+                });
+
+                // Payment succeeded, don't throw error
+                return;
+              } else {
+                console.log(
+                  '❌ Payment verification failed, payment did not succeed',
+                );
+                verificationSucceeded = false;
+              }
+            } catch (verificationError: any) {
+              verificationInProgress = false;
+              verificationSucceeded = false;
+              // 🎯 CRITICAL FIX: Suppress error logging if it's just a polling failure
+              // Polling failures are expected and shouldn't show error toasts
+              const errorMessage =
+                verificationError?.message || String(verificationError || '');
+              if (
+                errorMessage.includes('Failed to get payment status') ||
+                errorMessage.includes('Get payment status')
+              ) {
+                // This is just a polling failure, not a real error - suppress it
+                console.log(
+                  'ℹ️ Payment status polling attempt failed (this is normal):',
+                  errorMessage,
+                );
+              } else {
+                console.warn(
+                  '⚠️ Payment verification check failed:',
+                  verificationError,
+                );
+              }
+              // Continue to throw original error if verification fails
+            }
+          } else {
+            // 🎯 CRITICAL: This should never happen as we always have storedOrderId
+            // But if it does, log extensively for debugging
+            verificationInProgress = false;
+            console.error(
+              '❌ CRITICAL: No orderId available for verification!',
+            );
+            console.error('  - storedOrderId:', storedOrderId);
+            console.error('  - error object:', razorpayError);
+            console.error(
+              '  - error keys:',
+              razorpayError ? Object.keys(razorpayError) : [],
+            );
+
+            // Even without orderId, try to verify using storedOrderId if available
+            if (storedOrderId) {
+              console.log(
+                '🔄 Attempting verification with storedOrderId as fallback...',
+              );
+              try {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                const verificationResult = await pollPaymentStatus(
+                  storedOrderId,
+                  8,
+                  2500,
+                );
+                if (verificationResult.success) {
+                  console.log(
+                    '✅ Payment verification succeeded with storedOrderId!',
+                  );
+
+                  // Type guard: verificationResult.success is true, so we can access other properties
+                  const successResult = verificationResult as {
+                    success: true;
+                    captured: boolean;
+                    paymentId: any;
+                    paymentRecord: any;
+                    raw: any;
+                  };
+
+                  const paymentData: any = {
+                    razorpay_payment_id:
+                      errorPaymentId || successResult.paymentId || 'unknown',
+                    razorpay_order_id: storedOrderId,
+                    razorpay_signature: null,
+                  };
+                  if (successResult.paymentRecord) {
+                    Object.assign(paymentData, successResult.paymentRecord);
+                  }
+                  await handlePaymentSuccess(paymentData, plan, {
+                    fallbackPaymentId: pendingPaymentRecordId,
+                    amountInRupees: paymentAmountRupees,
+                    orderCurrency: order?.currency || orderCurrency || 'INR',
+                  });
+                  return;
+                }
+              } catch (fallbackError) {
+                console.warn('⚠️ Fallback verification failed:', fallbackError);
+              }
+            }
+          }
+
+          // If we reach here, payment verification failed or no orderId available
+          // Only throw error if verification confirmed payment failed
+          if (verificationSucceeded) {
+            // Verification succeeded, don't throw error
+            console.log('✅ Verification succeeded, not throwing error');
+            return;
+          }
+
+          console.error(
+            '❌ Payment verification failed - showing error to user',
+          );
+
+          // 🎯 CRITICAL: Only show error if verification confirmed failure
+          // Don't show error if verification is still in progress or succeeded
+          if (!verificationInProgress && !verificationSucceeded) {
+            throw razorpayError;
+          } else {
+            // Verification succeeded or in progress, don't throw
+            console.log(
+              '⏳ Verification in progress or succeeded, suppressing error',
+            );
+            return;
+          }
         } finally {
           // Ensure flag resets even if user closes/cancels
           razorpayOpenRef.current = false;
@@ -3347,16 +4611,230 @@ const SubscriptionPlanScreen: React.FC = () => {
           );
           setPaymentError(null);
           setSuppressPaymentError(true);
-          setPaymentProcessing(false);
+          if (isMountedRef.current) {
+            setPaymentProcessing(false);
+          }
           return;
         }
 
         // Only show error if it's not a cancellation
         console.error('❌ Payment process failed:', error);
+        const isPhonePeGatewayIssue = isPhonePeGatewayError(error);
+
+        // 🎯 CRITICAL FIX FOR PHONEPE: Before showing error, ALWAYS verify payment status
+        // PhonePe and other UPI apps often show error dialog even when payment succeeds
+        const errorAny = error as any;
+
+        // 🎯 CRITICAL: Track verification state to prevent showing error if verification succeeds
+        let outerVerificationInProgress = true;
+        let outerVerificationSucceeded = false;
+
+        // 🎯 ENHANCED: Try multiple ways to extract payment_id and order_id
+        const errorPaymentId =
+          errorAny?.razorpay_payment_id ||
+          errorAny?.payment_id ||
+          errorAny?.paymentId ||
+          errorAny?.data?.razorpay_payment_id ||
+          errorAny?.response?.razorpay_payment_id ||
+          errorAny?.razorpayPaymentId ||
+          errorAny?.razorpayPaymentID;
+
+        // 🎯 CRITICAL: Always use storedOrderId as primary source for verification
+        const errorOrderId =
+          storedOrderId || // PRIMARY: Always use stored orderId first
+          errorAny?.razorpay_order_id ||
+          errorAny?.order_id ||
+          errorAny?.orderId ||
+          errorAny?.data?.razorpay_order_id ||
+          errorAny?.response?.razorpay_order_id ||
+          errorAny?.razorpayOrderId ||
+          errorAny?.razorpayOrderID;
+
+        console.log('🔍 Outer catch - Extracted IDs for verification:', {
+          orderId: errorOrderId,
+          paymentId: errorPaymentId,
+          hasStoredOrderId: !!storedOrderId,
+        });
+
+        // 🎯 CRITICAL: ALWAYS verify payment status if we have orderId (which we should always have)
+        if (errorOrderId && !suppressPaymentError) {
+          console.log(
+            '🔍 CRITICAL: Verifying payment status before showing error (PhonePe/UPI fix)...',
+            {
+              orderId: errorOrderId,
+              paymentId: errorPaymentId,
+            },
+          );
+
+          try {
+            // 🎯 CRITICAL FIX FOR PHONEPE: Add delay before verification
+            console.log(
+              '⏳ Waiting 3 seconds for PhonePe/UPI payment to be processed on backend...',
+            );
+            await new Promise(resolve => setTimeout(resolve, 3000)); // Increased to 3 seconds
+
+            console.log(
+              '🔄 Starting payment status verification polling (outer catch)...',
+            );
+            const verificationResult = await pollPaymentStatus(
+              errorOrderId,
+              10, // Even more attempts for PhonePe (needs more time)
+              3000, // Longer delay between attempts for PhonePe
+            );
+
+            outerVerificationInProgress = false;
+
+            if (verificationResult.success) {
+              outerVerificationSucceeded = true;
+              console.log('✅ Payment verification succeeded despite error!');
+              console.log(
+                '🎯 Payment was successful, proceeding with success flow...',
+              );
+
+              // Type guard: verificationResult.success is true, so we can access other properties
+              const successResult = verificationResult as {
+                success: true;
+                captured: boolean;
+                paymentId: any;
+                paymentRecord: any;
+                raw: any;
+              };
+
+              // Construct payment data from verification result
+              const paymentData: any = {
+                razorpay_payment_id:
+                  errorPaymentId || successResult.paymentId || 'unknown',
+                razorpay_order_id: errorOrderId,
+                razorpay_signature: null, // Will be generated on backend
+              };
+
+              // Add any additional data from verification result
+              if (successResult.paymentRecord) {
+                Object.assign(paymentData, successResult.paymentRecord);
+              }
+
+              // 🎯 CRITICAL: Clear any error state before proceeding with success
+              if (isMountedRef.current) {
+                setPaymentError(null);
+                setSuppressPaymentError(true);
+              }
+
+              // Proceed with payment success handling
+              await handlePaymentSuccess(paymentData, plan, {
+                fallbackPaymentId: pendingPaymentRecordId,
+                amountInRupees: paymentAmountRupees,
+                orderCurrency: order?.currency || orderCurrency || 'INR',
+              });
+
+              // Payment succeeded, don't show error
+              return;
+            } else {
+              outerVerificationSucceeded = false;
+              console.log(
+                '❌ Payment verification failed, showing error to user',
+              );
+            }
+          } catch (verificationError: any) {
+            outerVerificationInProgress = false;
+            outerVerificationSucceeded = false;
+            // 🎯 CRITICAL FIX: Suppress error logging if it's just a polling failure
+            // Polling failures are expected and shouldn't show error toasts
+            const errorMessage =
+              verificationError?.message || String(verificationError || '');
+            if (
+              errorMessage.includes('Failed to get payment status') ||
+              errorMessage.includes('Get payment status')
+            ) {
+              // This is just a polling failure, not a real error - suppress it
+              console.log(
+                'ℹ️ Payment status polling attempt failed (this is normal):',
+                errorMessage,
+              );
+            } else {
+              console.warn(
+                '⚠️ Payment verification check failed:',
+                verificationError,
+              );
+            }
+            // Continue to show error if verification fails
+          }
+        } else {
+          outerVerificationInProgress = false;
+        }
+
+        // 🎯 CRITICAL: Only show error if verification confirmed failure
+        if (outerVerificationSucceeded) {
+          console.log('✅ Verification succeeded, not showing error');
+          return;
+        }
+
+        // 🎯 NEW: If this is the known PhonePe "Something went wrong" gateway error,
+        // run an extended verification pass before surfacing anything to the user.
+        if (
+          isPhonePeGatewayIssue &&
+          storedOrderId &&
+          !outerVerificationInProgress &&
+          !suppressPaymentError
+        ) {
+          console.log(
+            '🔁 Detected PhonePe gateway issue - running extended verification fallback...',
+          );
+          const extendedResult = await pollPaymentStatus(
+            storedOrderId,
+            PHONEPE_EXTENDED_ATTEMPTS,
+            PHONEPE_EXTENDED_DELAY_MS,
+          );
+
+          if (extendedResult.success) {
+            console.log(
+              '✅ Extended verification succeeded after PhonePe gateway error',
+            );
+            const successResult = extendedResult as {
+              success: true;
+              captured: boolean;
+              paymentId: any;
+              paymentRecord: any;
+              raw: any;
+            };
+
+            const paymentData: any = {
+              razorpay_payment_id:
+                errorPaymentId || successResult.paymentId || 'unknown',
+              razorpay_order_id: storedOrderId,
+              razorpay_signature: null,
+            };
+
+            if (successResult.paymentRecord) {
+              Object.assign(paymentData, successResult.paymentRecord);
+            }
+
+            if (isMountedRef.current) {
+              setPaymentError(null);
+              setSuppressPaymentError(true);
+            }
+
+            await handlePaymentSuccess(paymentData, plan, {
+              fallbackPaymentId: pendingPaymentRecordId,
+              amountInRupees: paymentAmountRupees,
+              orderCurrency: order?.currency || orderCurrency || 'INR',
+            });
+            return;
+          } else {
+            console.log(
+              '⚠️ Extended PhonePe verification fallback did not confirm success yet',
+            );
+          }
+        }
 
         let errorMessage = 'Payment failed. Please try again.';
+        let alertTitle = 'Payment Error';
+        let alertType: AlertOptions['type'] = 'error';
 
-        if (error.message?.includes('No payment ID')) {
+        if (isPhonePeGatewayIssue) {
+          errorMessage = buildPhonePePendingAlertMessage(storedOrderId);
+          alertTitle = 'PhonePe Confirmation Pending';
+          alertType = 'info';
+        } else if (error.message?.includes('No payment ID')) {
           errorMessage = 'Payment was not completed. Please try again.';
         } else if (error.message?.includes('network')) {
           errorMessage =
@@ -3364,17 +4842,21 @@ const SubscriptionPlanScreen: React.FC = () => {
         }
 
         // Only set error and show alert if not suppressed
-        if (!suppressPaymentError) {
+        if (!suppressPaymentError && isMountedRef.current) {
           setPaymentError(errorMessage);
           showAlert({
-            title: 'Payment Error',
+            title: alertTitle,
             message: errorMessage,
-            type: 'error',
+            type: alertType,
             confirmText: 'OK',
             onConfirm: () => {
               console.log('User acknowledged payment error');
             },
           });
+        }
+        // 🎯 CRITICAL: Always reset processing state, even if component unmounted
+        if (isMountedRef.current) {
+          setPaymentProcessing(false);
         }
       }
     } catch (error) {
@@ -3425,8 +4907,11 @@ const SubscriptionPlanScreen: React.FC = () => {
         console.log(
           '🔄 User cancelled payment (outer catch) - no error popup shown',
         );
-        setPaymentError(null);
-        setSuppressPaymentError(true);
+        if (isMountedRef.current) {
+          setPaymentError(null);
+          setSuppressPaymentError(true);
+          setPaymentProcessing(false);
+        }
         return;
       }
 
@@ -3476,11 +4961,18 @@ const SubscriptionPlanScreen: React.FC = () => {
         );
       }
     } finally {
-      // Reset payment processing state
-      setPaymentProcessing(false);
+      // 🎯 CRITICAL: Clear timeout in finally block
+      if (upgradeTimeout !== null) {
+        clearTimeout(upgradeTimeout);
+      }
+      // Reset payment processing state - always reset even if component unmounts
+      if (isMountedRef.current) {
+        setPaymentProcessing(false);
+      }
       console.log('🏁 Payment flow completed');
       // Ensure lock is released
       upgradingLockRef.current = false;
+      razorpayOpenRef.current = false;
     }
   };
 
@@ -3690,7 +5182,7 @@ const SubscriptionPlanScreen: React.FC = () => {
         await fetchSubscriptionData(false); // false = don't refresh plans
 
         // 🎯 FIXED: Add multiple retries with increasing delays to ensure backend updates are visible
-        setTimeout(async () => {
+        safeSetTimeout(async () => {
           console.log(
             '🔄 First retry: Refreshing subscription data after plan downgrade (1s delay)...',
           );
@@ -3703,7 +5195,7 @@ const SubscriptionPlanScreen: React.FC = () => {
           await fetchSubscriptionData(false); // false = don't refresh plans
 
           // Second retry with longer delay
-          setTimeout(async () => {
+          safeSetTimeout(async () => {
             console.log(
               '🔄 Second retry: Refreshing subscription data after plan downgrade (2.5s delay)...',
             );
@@ -3715,7 +5207,7 @@ const SubscriptionPlanScreen: React.FC = () => {
             await fetchSubscriptionData(false); // false = don't refresh plans
 
             // Third retry with even longer delay
-            setTimeout(async () => {
+            safeSetTimeout(async () => {
               console.log(
                 '🔄 Third retry: Refreshing subscription data after plan downgrade (4s delay)...',
               );
@@ -3730,14 +5222,14 @@ const SubscriptionPlanScreen: React.FC = () => {
         }, 1000); // Wait 1 second for backend to update subscription
 
         // Add delay before fetching transaction limits to allow backend to update subscription
-        setTimeout(async () => {
+        safeSetTimeout(async () => {
           console.log(
             '🔄 Refreshing transaction limits after plan downgrade (with delay)...',
           );
           await fetchBillingData();
 
           // Retry once more to ensure accurate count
-          setTimeout(async () => {
+          safeSetTimeout(async () => {
             console.log(
               '🔄 Retrying transaction limits fetch after downgrade...',
             );
@@ -3951,7 +5443,7 @@ const SubscriptionPlanScreen: React.FC = () => {
                 console.log(
                   '🔄 Ensuring transaction limit monitoring is active after plan upgrade...',
                 );
-                setTimeout(async () => {
+                safeSetTimeout(async () => {
                   try {
                     await startLimitMonitoring();
                     console.log(

@@ -84,9 +84,9 @@ const defaultConfig: EnvConfig = {
   FIREBASE_API_KEY: '',
 
   // Razorpay Payment Gateway
-  // Using test credentials for development
-  RAZORPAY_KEY_ID: 'rzp_test_1DP5mmOlF5G5ag', // Test Key ID
-  RAZORPAY_KEY_SECRET: 'thisissupersecret', // Test Secret Key
+  // Using test credentials for development - MATCHED WITH BACKEND
+  RAZORPAY_KEY_ID: 'rzp_test_R7rnkgNnXtBN0W', // Test Key ID (matches backend)
+  RAZORPAY_KEY_SECRET: 'bdCjXy50Ld7XQ2RGZJeg8CGy', // Test Secret Key (matches backend)
 
   // OpenAI API
   OPENAI_API_KEY: '',

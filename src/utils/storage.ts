@@ -62,3 +62,29 @@ export const getUserIdFromToken = async (): Promise<number | null> => {
     return null;
   }
 };
+
+export const clearStoragePreservingNotificationPrefs = async () => {
+  const keysToPreserve = ['notificationsNeverAsk', 'notificationsGranted'];
+
+  try {
+    const preservedEntries = await AsyncStorage.multiGet(keysToPreserve);
+    await AsyncStorage.clear();
+
+    const entriesToRestore = preservedEntries.filter(
+      ([, value]) => value !== null,
+    ) as [string, string][];
+
+    if (entriesToRestore.length > 0) {
+      await AsyncStorage.multiSet(entriesToRestore);
+    }
+  } catch (error) {
+    console.error(
+      ' Failed to preserve notification prefs while clearing storage:',
+      error,
+    );
+    await AsyncStorage.clear();
+  }
+};
+
+
+

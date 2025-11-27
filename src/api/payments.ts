@@ -145,6 +145,7 @@ export interface ApiResponse<T = any> {
   data?: T;
   code?: number;
   status?: string;
+  error?: any;
 }
 
 export interface PaymentRecord {
@@ -372,17 +373,31 @@ export class PaymentApiService {
         },
       );
 
-      const result = await response.json();
+      const result = await response.json().catch(() => null);
       console.log('📥 Capture payment response:', result);
 
       if (!response.ok) {
-        throw new Error(result.message || 'Failed to capture payment');
+        const fallback = {
+          success: false,
+          message:
+            result?.message ||
+            `Capture endpoint unavailable (${response.status})`,
+        };
+        console.warn('⚠️ Capture payment non-200 response:', fallback);
+        return fallback;
       }
 
       return result;
     } catch (error: any) {
-      console.error('❌ Capture payment error:', error);
-      throw new Error(error.message || 'Failed to capture payment');
+      const message = error?.message?.includes('Cannot POST')
+        ? 'Capture endpoint not available in this environment'
+        : error?.message || 'Failed to capture payment';
+      console.warn('⚠️ Capture payment error:', message);
+      return {
+        success: false,
+        message,
+        error,
+      };
     }
   }
 
@@ -421,6 +436,8 @@ export class PaymentApiService {
 
   /**
    * Get payment status by order ID
+   * 🎯 FIXED: Uses /payments/order/{orderId} endpoint which actually exists
+   * Falls back to /payments/status/{orderId} if needed
    */
   static async getPaymentStatus(orderId: string): Promise<ApiResponse> {
     try {
@@ -430,16 +447,121 @@ export class PaymentApiService {
       const baseUrl = await getBaseUrl();
 
       const headers = await this.getAuthHeaders();
-      const response = await fetch(
-        `${baseUrl}${PAYMENT_ENDPOINTS.GET_PAYMENT_STATUS}/${orderId}`,
-        {
-          method: 'GET',
-          headers,
-        },
-      );
 
-      const result = await response.json();
-      console.log('📥 Payment status response:', result);
+      // 🎯 CRITICAL FIX: Try /payments/order/{orderId} first (this endpoint exists)
+      // The /payments/status/{orderId} endpoint doesn't exist on backend
+      let response: Response;
+      let result: any;
+
+      try {
+        // Try the correct endpoint: /payments/order/{orderId}
+        console.log(
+          `🔄 Trying endpoint: ${baseUrl}${PAYMENT_ENDPOINTS.GET_PAYMENT_BY_ORDER}/${orderId}`,
+        );
+        response = await fetch(
+          `${baseUrl}${PAYMENT_ENDPOINTS.GET_PAYMENT_BY_ORDER}/${orderId}`,
+          {
+            method: 'GET',
+            headers,
+          },
+        );
+
+        result = await response.json();
+        console.log(
+          '📥 Payment status response (from /payments/order):',
+          result,
+        );
+
+        if (response.ok) {
+          return result;
+        }
+
+        // If 404 or endpoint doesn't exist, try alternative endpoint
+        if (response.status === 404) {
+          console.log(
+            '⚠️ /payments/order endpoint returned 404, trying /payments/status...',
+          );
+          throw new Error('Endpoint not found, trying fallback');
+        }
+      } catch (firstError: any) {
+        // Fallback: Try /payments/status/{orderId} if /payments/order fails
+        console.log('🔄 Fallback: Trying /payments/status endpoint...');
+        try {
+          response = await fetch(
+            `${baseUrl}${PAYMENT_ENDPOINTS.GET_PAYMENT_STATUS}/${orderId}`,
+            {
+              method: 'GET',
+              headers,
+            },
+          );
+
+          result = await response.json();
+          console.log(
+            '📥 Payment status response (from /payments/status):',
+            result,
+          );
+
+          if (!response.ok) {
+            throw new Error(result.message || 'Failed to get payment status');
+          }
+
+          return result;
+        } catch (fallbackError: any) {
+          // If both endpoints fail, try querying all payments and filtering
+          console.log(
+            '🔄 Both endpoints failed, trying to get payment from /payments list...',
+          );
+          try {
+            const allPaymentsResponse = await fetch(
+              `${baseUrl}${PAYMENT_ENDPOINTS.GET_PAYMENTS}?razorpayOrderId=${orderId}`,
+              {
+                method: 'GET',
+                headers,
+              },
+            );
+
+            if (allPaymentsResponse.ok) {
+              const allPaymentsResult = await allPaymentsResponse.json();
+              const paymentsData =
+                allPaymentsResult?.data || allPaymentsResult || [];
+              const paymentsArray = Array.isArray(paymentsData)
+                ? paymentsData
+                : paymentsData?.data || [];
+
+              // Find payment with matching orderId
+              const matchingPayment = paymentsArray.find(
+                (p: any) =>
+                  p.razorpayOrderId === orderId ||
+                  p.razorpay_order_id === orderId ||
+                  p.orderId === orderId,
+              );
+
+              if (matchingPayment) {
+                console.log(
+                  '✅ Found payment in payments list:',
+                  matchingPayment,
+                );
+                return {
+                  success: true,
+                  data: matchingPayment,
+                  message: 'Payment found',
+                };
+              }
+            }
+          } catch (listError) {
+            console.warn('⚠️ Failed to get payment from list:', listError);
+          }
+
+          // If all methods fail, throw the original error
+          throw new Error(
+            `Failed to get payment status: ${
+              firstError.message ||
+              fallbackError.message ||
+              'All endpoints failed'
+            }`,
+          );
+        }
+      }
 
       if (!response.ok) {
         throw new Error(result.message || 'Failed to get payment status');
@@ -447,8 +569,18 @@ export class PaymentApiService {
 
       return result;
     } catch (error: any) {
-      console.error('❌ Get payment status error:', error);
-      throw new Error(error.message || 'Failed to get payment status');
+      // 🎯 CRITICAL FIX: Use console.warn instead of console.error to prevent error handlers from showing toasts
+      // This is expected during polling - payment might not be ready yet
+      console.warn(
+        '⚠️ Get payment status attempt failed (this is normal during polling):',
+        error.message || error,
+      );
+      // Don't throw error - return a failure response instead so polling can continue
+      return {
+        success: false,
+        message: error.message || 'Failed to get payment status',
+        data: null,
+      };
     }
   }
 

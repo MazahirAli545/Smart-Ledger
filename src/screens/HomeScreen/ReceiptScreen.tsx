@@ -1898,39 +1898,10 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
     status: 'complete' | 'draft',
     syncYNOverride?: 'Y' | 'N',
   ) => {
-    // Guard: block submit if monthly limit reached
-    try {
-      const token = await AsyncStorage.getItem('accessToken');
-      if (token) {
-        // Use unified API for transaction limits
-        const limitsData = await unifiedApi.getTransactionLimits();
-        if (limitsData && (limitsData as any).canCreate === false) {
-          await forceShowPopup();
-          showAlert({
-            title: 'Monthly Limit Reached',
-            message:
-              'You have reached your monthly transaction limit. Please upgrade your plan to continue.',
-            type: 'error',
-          });
-          return;
-        }
-      }
-    } catch {
-      // Ignore errors in limit check
-    }
     console.log('handleSubmit called with status:', status);
     setTriedSubmit(true);
     setError(null);
     setSuccess(null);
-
-    // Check transaction limits BEFORE making API call
-    try {
-      console.log('🔍 Checking transaction limits before receipt creation...');
-      await forceCheckTransactionLimit();
-    } catch (limitError) {
-      console.error('❌ Error checking transaction limits:', limitError);
-      // Continue with API call if limit check fails
-    }
 
     // Validate all required fields BEFORE showing loader or calling API
     console.log('Validating fields:', {
@@ -2004,6 +1975,16 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
       setAmount(String(normalizedAmount));
     }
 
+    const userIdPromise = getUserIdFromToken();
+    const nextReceiptNumberPromise = !editingItem
+      ? generateNextDocumentNumber(folderName.toLowerCase(), true).catch(
+          error => {
+            console.error('Error generating receipt number:', error);
+            return null;
+          },
+        )
+      : Promise.resolve<string | null>(null);
+
     if (status === 'complete') setLoadingSave(true);
     if (status === 'draft') setLoadingDraft(true);
     try {
@@ -2073,9 +2054,9 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
           existingCustomerFull: existingCustomer,
         });
 
-        await fetchAll('');
+        fetchAll('').catch(() => {});
       }
-      const userId = await getUserIdFromToken();
+      const userId = await userIdPromise;
       if (!userId) {
         setError('User not authenticated. Please login again.');
         return;
@@ -2112,19 +2093,15 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
       // This ensures accuracy even if other transactions were created since initialization
       let finalReceiptNumber = receiptNumber || '';
       if (!editingItem) {
-        // New transaction - regenerate based on current backend state
-        try {
-          finalReceiptNumber = await generateNextDocumentNumber(
-            folderName.toLowerCase(),
-            true, // Store now - transaction is being saved
-          );
-          setReceiptNumber(finalReceiptNumber);
+        const generatedReceiptNumber = await nextReceiptNumberPromise;
+        if (generatedReceiptNumber) {
+          finalReceiptNumber = generatedReceiptNumber;
+          setReceiptNumber(generatedReceiptNumber);
           console.log(
             '🔍 Generated receiptNumber on submit:',
-            finalReceiptNumber,
+            generatedReceiptNumber,
           );
-        } catch (error) {
-          console.error('Error generating receipt number:', error);
+        } else {
           // Fallback: use preview number if available, otherwise default to REC-001
           finalReceiptNumber = receiptNumber || 'REC-001';
         }
@@ -2152,7 +2129,7 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
               customerInput.trim(),
               needsAddressUpdate ? customerAddress : undefined,
             );
-            await fetchAll('');
+            fetchAll('').catch(() => {});
           }
         }
       } catch {}

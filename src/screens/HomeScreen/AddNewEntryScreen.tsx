@@ -22,7 +22,10 @@ import { AppStackParamList } from '../../types/navigation';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { unifiedApi } from '../../api/unifiedApiService';
-import { getUserIdFromToken } from '../../utils/storage';
+import {
+  getUserIdFromToken,
+  clearStoragePreservingNotificationPrefs,
+} from '../../utils/storage';
 import { generateNextDocumentNumber } from '../../utils/autoNumberGenerator';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 import AttachDocument from '../../components/AttachDocument';
@@ -519,7 +522,9 @@ const AddNewEntryScreen: React.FC = () => {
         };
 
         // Load items if editing invoice/purchase - check multiple possible item properties (matching PurchaseScreen logic exactly)
-        let mergedDetailItems: any[] = flattenAndValidateItems(editingItem.items);
+        let mergedDetailItems: any[] = flattenAndValidateItems(
+          editingItem.items,
+        );
 
         // If still no items, try alternative fields
         if (!mergedDetailItems || mergedDetailItems.length === 0) {
@@ -560,61 +565,62 @@ const AddNewEntryScreen: React.FC = () => {
           console.log('🔍 ===== END MAPPING SOURCE ITEMS =====');
 
           // Map source items to component format (matching PurchaseScreen logic exactly)
-          const mappedItems = mergedDetailItems.map((item: any, idx: number) => {
-            // Handle tuple format: [name, qty, rate, amount, gstPct]
-            if (Array.isArray(item) && item.length >= 2) {
-              const [name, qty, rate, amount, gstPct] = item;
+          const mappedItems = mergedDetailItems.map(
+            (item: any, idx: number) => {
+              // Handle tuple format: [name, qty, rate, amount, gstPct]
+              if (Array.isArray(item) && item.length >= 2) {
+                const [name, qty, rate, amount, gstPct] = item;
+                return {
+                  id: `${Date.now()}_${idx}`,
+                  description: String(name || ''),
+                  quantity: Number(qty) || 1,
+                  rate: Number(rate) || 0,
+                  amount:
+                    Number(amount) || (Number(qty) || 1) * (Number(rate) || 0),
+                  gstPct: Number(gstPct ?? gstPercentage ?? 0) || 0,
+                  gstAmount: 0,
+                };
+              }
+
+              // Handle object format
+              const qty =
+                item?.qty != null
+                  ? Number(item.qty)
+                  : Number(item?.quantity) || 1;
+              const rate = item?.rate != null ? Number(item.rate) : 0;
+              const amount =
+                item?.amount != null ? Number(item.amount) : qty * rate;
+
+              console.log('🔍 Item data for mapping:', {
+                item,
+                qty,
+                rate,
+                amount,
+                gstPercentage,
+              });
+
+              // Match PurchaseScreen description logic exactly
+              const itemDescription =
+                item?.description || item?.name || item?.itemName || '';
+
+              console.log('🔍 Item description mapping:', {
+                item,
+                description: itemDescription,
+                itemName: item.name,
+                itemName_field: item.itemName,
+              });
+
               return {
-                id: `${Date.now()}_${idx}`,
-                description: String(name || ''),
-                quantity: Number(qty) || 1,
-                rate: Number(rate) || 0,
-                amount: Number(amount) || (Number(qty) || 1) * (Number(rate) || 0),
-                gstPct: Number(gstPct ?? gstPercentage ?? 0) || 0,
-                gstAmount: 0,
+                id: item.id || `${Date.now()}_${idx}`,
+                description: itemDescription,
+                quantity: isNaN(qty) ? 1 : qty,
+                rate: isNaN(rate) ? 0 : rate,
+                amount: isNaN(amount) ? 0 : amount,
+                gstPct: Number(item.gstPct ?? gstPercentage ?? 0) || 0,
+                gstAmount: Number(item.gstAmount ?? 0) || 0,
               };
-            }
-
-            // Handle object format
-            const qty =
-              item?.qty != null
-                ? Number(item.qty)
-                : Number(item?.quantity) || 1;
-            const rate = item?.rate != null ? Number(item.rate) : 0;
-            const amount =
-              item?.amount != null
-                ? Number(item.amount)
-                : qty * rate;
-
-            console.log('🔍 Item data for mapping:', {
-              item,
-              qty,
-              rate,
-              amount,
-              gstPercentage,
-            });
-
-            // Match PurchaseScreen description logic exactly
-            const itemDescription =
-              item?.description || item?.name || item?.itemName || '';
-
-            console.log('🔍 Item description mapping:', {
-              item,
-              description: itemDescription,
-              itemName: item.name,
-              itemName_field: item.itemName,
-            });
-
-            return {
-              id: item.id || `${Date.now()}_${idx}`,
-              description: itemDescription,
-              quantity: isNaN(qty) ? 1 : qty,
-              rate: isNaN(rate) ? 0 : rate,
-              amount: isNaN(amount) ? 0 : amount,
-              gstPct: Number(item.gstPct ?? gstPercentage ?? 0) || 0,
-              gstAmount: Number(item.gstAmount ?? 0) || 0,
-            };
-          });
+            },
+          );
           console.log('🔍 ===== INITIAL MAPPED ITEMS =====');
           console.log('🔍 Mapped items:', mappedItems);
           console.log('🔍 Mapped items length:', mappedItems.length);
@@ -773,7 +779,9 @@ const AddNewEntryScreen: React.FC = () => {
                     description: String(name || ''),
                     quantity: Number(qty) || 1,
                     rate: Number(rate) || 0,
-                    amount: Number(amount) || (Number(qty) || 1) * (Number(rate) || 0),
+                    amount:
+                      Number(amount) ||
+                      (Number(qty) || 1) * (Number(rate) || 0),
                     gstPct: Number(gstPct ?? gstPercentage ?? 0) || 0,
                     gstAmount: 0,
                   };
@@ -784,9 +792,7 @@ const AddNewEntryScreen: React.FC = () => {
                   it?.qty != null ? Number(it.qty) : Number(it?.quantity) || 1;
                 const rate = it?.rate != null ? Number(it.rate) : 0;
                 const amount =
-                  it?.amount != null
-                    ? Number(it.amount)
-                    : qty * rate;
+                  it?.amount != null ? Number(it.amount) : qty * rate;
 
                 const apiItemDescription =
                   it?.description || it?.name || it?.itemName || '';
@@ -1798,7 +1804,7 @@ const AddNewEntryScreen: React.FC = () => {
           'Please login again to continue.',
           'error',
           () => {
-            AsyncStorage.clear().then(() => {
+            clearStoragePreservingNotificationPrefs().then(() => {
               // Navigation will be handled by the auth system
             });
           },
@@ -1867,7 +1873,7 @@ const AddNewEntryScreen: React.FC = () => {
               'Please login again to continue.',
               'error',
               () => {
-                AsyncStorage.clear().then(() => {
+                clearStoragePreservingNotificationPrefs().then(() => {
                   // Navigation handled by auth system
                 });
               },
@@ -2381,25 +2387,18 @@ const AddNewEntryScreen: React.FC = () => {
                       <Text style={styles.inputLabel}>Tax Amount</Text>
                       <TextInput
                         ref={taxAmountRef}
-                        style={styles.textInput}
+                        style={[
+                          styles.textInput,
+                          {
+                            backgroundColor: '#e9ecef',
+                            borderColor: '#d0d0d0',
+                          },
+                        ]}
                         placeholder="0.00"
-                        value={taxAmount ? String(taxAmount) : ''}
-                        onChangeText={text => {
-                          const value = parseFloat(text) || 0;
-                          setTaxAmount(value);
-                        }}
+                        value={taxAmount.toFixed(2)}
+                        editable={false}
                         placeholderTextColor="#666666"
                         keyboardType="numeric"
-                        onFocus={() => {
-                          console.log(
-                            '🔍 Tax amount input focused, centering...',
-                          );
-                          // Close any open dropdowns when Tax amount field gets focus
-                          setShowPaymentMethodModal(false);
-                          setShowGstModal(false);
-                          setFocusedItemId(null);
-                          scrollToInputCenter(taxAmountRef);
-                        }}
                       />
                     </View>
                     <View style={styles.taxDiscountColumn}>

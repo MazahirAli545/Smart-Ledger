@@ -482,13 +482,6 @@ const ReportsScreen: React.FC = () => {
             <Text style={styles.headerTitle}>
               {customerName ? `${customerName} Report` : 'Advanced Reports'}
             </Text>
-            <Text style={styles.headerSubtitle}>
-              {customerName
-                ? `${
-                    partyType === 'supplier' ? 'Supplier' : 'Customer'
-                  } specific analytics`
-                : 'Comprehensive analytics and insights'}
-            </Text>
           </View>
           <View style={styles.headerRightPlaceholder} />
         </View>

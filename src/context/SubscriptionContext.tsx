@@ -301,6 +301,9 @@ export const SubscriptionProvider: React.FC<{ children: ReactNode }> = ({
         console.log('🔍 Fetching subscription from /subscriptions/current...');
         const subscriptionResult = await unifiedApi.get(
           '/subscriptions/current',
+          {
+            cache: false, // always fetch latest plan status (live vs cached)
+          },
         );
         const subscriptionResultData =
           (subscriptionResult as any)?.data ?? subscriptionResult ?? {};
@@ -335,7 +338,9 @@ export const SubscriptionProvider: React.FC<{ children: ReactNode }> = ({
       if (!subscriptionData) {
         try {
           console.log('🔍 Fetching user data from /users/profile...');
-          const result = await unifiedApi.get('/users/profile');
+          const result = await unifiedApi.get('/users/profile', {
+            cache: false,
+          });
           userData = (result as any)?.data ?? result;
           console.log('📡 User data fetched:', userData);
         } catch (userError) {

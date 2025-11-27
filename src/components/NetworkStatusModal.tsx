@@ -36,9 +36,12 @@ const NetworkStatusModal: React.FC = () => {
         setIsConnected(hasInternet);
         setConnectionType(state.type || 'unknown');
 
+        // Show modal if no internet, hide if internet is available
+        setIsModalVisible(!hasInternet);
         if (!hasInternet) {
-          console.log('🚨 No internet connection detected');
-          setIsModalVisible(true);
+          console.log('🚨 No internet connection detected - showing modal');
+        } else {
+          console.log('✅ Internet connection available - modal hidden');
         }
       } catch (error) {
         console.error('❌ Network check failed:', error);
@@ -59,14 +62,14 @@ const NetworkStatusModal: React.FC = () => {
       setIsConnected(prevConnected => {
         const wasConnected = prevConnected;
 
-        if (!hasInternet && wasConnected) {
-          console.log('🚨 Internet connection lost - showing popup');
+        if (!hasInternet) {
+          // Always show modal when there's no internet (regardless of previous state)
+          console.log('🚨 No internet connection - showing modal');
           setIsModalVisible(true);
         } else if (hasInternet && !wasConnected) {
-          console.log('✅ Internet connection restored - hiding popup');
-          setTimeout(() => {
-            setIsModalVisible(false);
-          }, 1500);
+          // Only hide modal when internet is restored
+          console.log('✅ Internet connection restored - hiding modal');
+          setIsModalVisible(false);
         }
 
         return hasInternet;
@@ -89,41 +92,33 @@ const NetworkStatusModal: React.FC = () => {
       const internetReachable = state.isInternetReachable ?? true;
       const hasInternet = connected && internetReachable;
 
+      // Only hide modal if internet is actually available
       if (hasInternet) {
+        console.log('✅ Network check successful - hiding modal');
         setIsModalVisible(false);
-        showAlert({
-          title: 'Success',
-          message: 'Internet connection restored!',
-          type: 'success',
-        });
+        setIsConnected(true);
       } else {
-        showAlert({
-          title: 'No Internet',
-          message: 'Please check your network settings and try again',
-          type: 'error',
-        });
+        console.log('⚠️ Network still unavailable after retry');
+        // Keep modal visible - don't dismiss
       }
     } catch (error) {
       console.error('❌ Retry failed:', error);
-      showAlert({
-        title: 'Error',
-        message: 'Failed to check network status',
-        type: 'error',
-      });
     }
   };
 
-  const handleDismiss = () => {
-    console.log('❌ User dismissed network popup');
-    setIsModalVisible(false);
-  };
+  // Removed handleDismiss - modal should only close when network is restored
 
   return (
     <Modal
       visible={isModalVisible}
       transparent={true}
       animationType="fade"
-      onRequestClose={handleDismiss}
+      onRequestClose={() => {
+        // Prevent dismissing modal - it should only close when network is restored
+        console.log(
+          '⚠️ Modal dismissal prevented - waiting for network connection',
+        );
+      }}
       statusBarTranslucent={true}
     >
       <View style={styles.modalOverlay}>
@@ -189,14 +184,6 @@ const NetworkStatusModal: React.FC = () => {
                   style={styles.buttonIcon}
                 />
                 <Text style={styles.primaryButtonText}>Retry Connection</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.secondaryButton}
-                onPress={handleDismiss}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.secondaryButtonText}>Dismiss</Text>
               </TouchableOpacity>
             </View>
 

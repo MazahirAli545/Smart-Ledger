@@ -17,7 +17,14 @@ import { unifiedApi } from '../api/unifiedApiService';
 import { showLocalNotification } from '../utils/notificationHelper';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAlert } from '../context/AlertContext';
-import notifee, { AndroidImportance } from '@notifee/react-native';
+import notifee, {
+  AndroidImportance,
+  AuthorizationStatus,
+} from '@notifee/react-native';
+import {
+  hasUserDeclinedNotifications,
+  markNotificationsAsDeclined,
+} from '../utils/notificationPrefs';
 
 interface ContactSalesModalProps {
   visible: boolean;
@@ -220,8 +227,25 @@ const ContactSalesModal: React.FC<ContactSalesModalProps> = ({
         try {
           console.log('🔔 Attempting to show foreground notification...');
 
+          const userDeclined = await hasUserDeclinedNotifications();
+          if (userDeclined) {
+            console.log(
+              '⚠️ ContactSalesModal: User declined notifications - skipping foreground notification prompt',
+            );
+            return;
+          }
+
           // Request permission if needed
-          await notifee.requestPermission();
+          const permissionStatus = await notifee.requestPermission();
+          if (
+            permissionStatus?.authorizationStatus === AuthorizationStatus.DENIED
+          ) {
+            console.log(
+              '⚠️ ContactSalesModal: Notifee permission denied - respecting preference',
+            );
+            await markNotificationsAsDeclined();
+            return;
+          }
 
           // Create or get channel
           await notifee.createChannel({

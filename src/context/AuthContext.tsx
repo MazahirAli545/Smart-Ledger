@@ -10,6 +10,8 @@ import { clearContactsCache } from '../screens/HomeScreen/AddCustomerFromContact
 import { sessionManager } from '../utils/sessionManager';
 import { clearNavigationState } from '../utils/navigationStateManager';
 import NotificationService from '../services/notificationService';
+import sessionWarmUpService from '../services/SessionWarmUpService';
+import { clearStoragePreservingNotificationPrefs } from '../utils/storage';
 
 // Define the shape of the authentication context
 interface AuthContextType {
@@ -55,10 +57,45 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           // Start session monitoring
           sessionManager.startSessionMonitoring();
 
+          // Initialize session warm-up service for authenticated users
+          try {
+            sessionWarmUpService.initialize();
+            console.log('🔥 Session warm-up service initialized');
+          } catch (e) {
+            console.log('⚠️ Failed to initialize session warm-up service', e);
+          }
+
           // Initialize notifications on app start when session is present
           try {
             const notificationService = NotificationService.getInstance();
-            await notificationService.initializeNotifications();
+
+            // Skip if already initialized
+            if (notificationService.isServiceInitialized()) {
+              console.log(
+                '✅ AuthContext: Notification service already initialized on app start',
+              );
+            } else {
+              // CRITICAL: Check if user has declined before attempting initialization
+              const userDeclined =
+                await notificationService.hasUserDeclinedNotifications();
+              if (userDeclined) {
+                console.log(
+                  '⚠️ AuthContext: User has declined notification permission - skipping initialization',
+                );
+              } else {
+                // Check if permission was already granted (to avoid popup)
+                const grantedFlag = await AsyncStorage.getItem(
+                  'notificationsGranted',
+                );
+                if (grantedFlag === 'true') {
+                  console.log(
+                    '✅ AuthContext: Permission already granted, initializing silently on app start',
+                  );
+                }
+
+                await notificationService.initializeNotifications();
+              }
+            }
           } catch (e) {
             console.log(
               '⚠️ Failed to initialize notifications on app start',
@@ -117,6 +154,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       // Start session monitoring for new login
       sessionManager.startSessionMonitoring();
 
+      // Initialize session warm-up service for new login
+      try {
+        sessionWarmUpService.initialize();
+        console.log('🔥 Session warm-up service initialized after login');
+      } catch (e) {
+        console.log(
+          '⚠️ Failed to initialize session warm-up service after login',
+          e,
+        );
+      }
+
       // Initialize notifications post-login and register FCM token with backend
       // Use a small delay to ensure token is stored in AsyncStorage
       setTimeout(async () => {
@@ -124,8 +172,41 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           console.log('🔔 Starting FCM token registration after login...');
 
           const notificationService = NotificationService.getInstance();
-          const initialized =
-            await notificationService.initializeNotifications();
+
+          // Check if already initialized or permission already granted
+          if (notificationService.isServiceInitialized()) {
+            console.log(
+              '✅ AuthContext: Notification service already initialized after login',
+            );
+            // Still try to get and send token
+            const existingToken = await notificationService.refreshFCMToken();
+            if (existingToken) {
+              await notificationService.sendTokenToBackend(existingToken);
+            }
+            return;
+          }
+
+          // CRITICAL: Check if user has declined before attempting initialization
+          const userDeclined =
+            await notificationService.hasUserDeclinedNotifications();
+          let initialized = false;
+          if (userDeclined) {
+            console.log(
+              '⚠️ AuthContext: User has declined notification permission - skipping initialization after login',
+            );
+          } else {
+            // Check if permission was already granted (to avoid popup)
+            const grantedFlag = await AsyncStorage.getItem(
+              'notificationsGranted',
+            );
+            if (grantedFlag === 'true') {
+              console.log(
+                '✅ AuthContext: Permission already granted, initializing silently after login',
+              );
+            }
+
+            initialized = await notificationService.initializeNotifications();
+          }
 
           let fcmToken: string | null = null;
           if (initialized) {
@@ -179,7 +260,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   const logout = async () => {
-    await AsyncStorage.clear();
+    await clearStoragePreservingNotificationPrefs();
     clearProfileCache(); // Clear profile cache on logout
     clearAddFolderCache(); // Clear add folder cache on logout
     clearCashFlowCache(); // Clear cash flow cache on logout
@@ -190,6 +271,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
     // Stop session monitoring
     sessionManager.stopSessionMonitoring();
+
+    // Cleanup session warm-up service
+    try {
+      sessionWarmUpService.cleanup();
+      console.log('🔥 Session warm-up service cleaned up');
+    } catch (e) {
+      console.log('⚠️ Failed to cleanup session warm-up service', e);
+    }
 
     // Clear navigation state
     await clearNavigationState();

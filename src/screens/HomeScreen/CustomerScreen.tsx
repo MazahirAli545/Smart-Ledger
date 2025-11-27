@@ -43,6 +43,10 @@ import { BASE_URL } from '../../api';
 import { getUserIdFromToken } from '../../utils/storage';
 import { useScreenTracking } from '../../hooks/useScreenTracking';
 import { profileUpdateManager } from '../../utils/profileUpdateManager';
+import {
+  loadFromPersistentCache,
+  saveToPersistentCache,
+} from '../../utils/persistentCache';
 import { useStatusBarWithGradient } from '../../hooks/useStatusBar';
 import { getStatusBarHeight } from 'react-native-status-bar-height';
 import {
@@ -78,10 +82,10 @@ let globalCustomerCacheChecked = false;
 // 🎯 FIXED: Rate limiting protection to prevent 429 errors
 let isFetchingCustomers = false;
 let lastFetchTime = 0;
-const MIN_FETCH_INTERVAL = 2000; // Minimum 2 seconds between API calls
+const MIN_FETCH_INTERVAL = 1000; // Minimum 1 second between API calls (reduced for better responsiveness)
 
-// Cache TTL: 30 seconds (30,000 ms) - reduced for more responsive updates
-const CACHE_TTL = 30 * 1000;
+// Cache TTL: 5 minutes (300,000 ms) - increased for better cold start performance
+const CACHE_TTL = 5 * 60 * 1000;
 
 // 🎯 FIXED: Enhanced cache clearing with refresh state reset
 export const clearCustomerCache = () => {
@@ -916,15 +920,23 @@ const CustomerScreen: React.FC = () => {
         } else {
           // Ensure notifications are initialized
           if (!notificationService.isServiceInitialized()) {
-            console.log(
-              '🔧 CustomerScreen: Initializing notification service...',
-            );
-            const initResult =
-              await notificationService.initializeNotifications();
-            console.log(
-              '🔧 CustomerScreen: Notification service init result:',
-              initResult,
-            );
+            // Check if user has declined before initializing
+            const userDeclined = await notificationService.hasUserDeclinedNotifications();
+            if (userDeclined) {
+              console.log(
+                '⚠️ CustomerScreen: User has declined notification permission - skipping initialization',
+              );
+            } else {
+              console.log(
+                '🔧 CustomerScreen: Initializing notification service...',
+              );
+              const initResult =
+                await notificationService.initializeNotifications();
+              console.log(
+                '🔧 CustomerScreen: Notification service init result:',
+                initResult,
+              );
+            }
           }
         }
 
@@ -1008,7 +1020,7 @@ const CustomerScreen: React.FC = () => {
   const fadeAnim = new Animated.Value(0);
   const slideAnim = new Animated.Value(50);
 
-  // 🎯 FIXED: Simplified data initialization with proper error handling
+  // 🎯 OPTIMIZED: Load persistent cache immediately, then fetch fresh data in background
   useEffect(() => {
     console.log('🚀 CustomerScreen: Mount effect triggered');
 
@@ -1030,52 +1042,97 @@ const CustomerScreen: React.FC = () => {
           throw new Error('Authentication required');
         }
 
-        console.log('🔄 CustomerScreen: Fetching initial data...');
+        // 🚀 OPTIMIZATION: Load persistent cache immediately for instant display
+        console.log('📦 CustomerScreen: Loading persistent cache...');
+        const cachedCustomers = await loadFromPersistentCache<Customer[]>(
+          'customers',
+          CACHE_TTL,
+        );
+        const cachedVouchers = await loadFromPersistentCache<any[]>(
+          'vouchers',
+          CACHE_TTL,
+        );
+        const cachedUserData = await loadFromPersistentCache<any>(
+          'userData',
+          CACHE_TTL,
+        );
 
-        // Fetch all data in parallel
-        const [userDataResult, customersResult, vouchersResponse] =
-          await Promise.all([
-            fetchUserData(accessToken),
-            fetchCustomersData(accessToken),
-            // Use unified API with caching
-            unifiedApi
-              .getTransactions({ limit: 50 })
-              .then((data: any) => (data?.data || data || []) as any[])
-              .catch(err => {
-                console.warn('Vouchers fetch failed:', err);
-                return [];
-              }),
-          ]);
+        // Show cached data immediately if available
+        if (cachedCustomers && cachedCustomers.length > 0) {
+          console.log(
+            `✅ CustomerScreen: Loaded ${cachedCustomers.length} customers from persistent cache`,
+          );
+          setCustomers(cachedCustomers);
+          globalCustomerCache.customers = cachedCustomers;
+          globalCustomerCache.lastUpdated = Date.now();
+        }
+        if (cachedVouchers && cachedVouchers.length > 0) {
+          setAllVouchers(cachedVouchers);
+          globalCustomerCache.vouchers = cachedVouchers;
+        }
+        if (cachedUserData) {
+          setUserData(cachedUserData);
+          globalCustomerCache.userData = cachedUserData;
+          updateBusinessNameIfPresent(cachedUserData?.businessName);
+        }
 
-        // Update cache with fresh data
-        globalCustomerCache = {
-          customers: customersResult,
-          vouchers: vouchersResponse,
-          userData: userDataResult,
-          lastUpdated: Date.now(),
-          activeTab: activeTab,
-          isRefreshing: false,
-          isInitializing: false,
-          isComponentInitialized: true,
-        };
+        // Fetch fresh data in background (non-blocking)
+        console.log('🔄 CustomerScreen: Fetching fresh data in background...');
+        Promise.all([
+          fetchUserData(accessToken),
+          fetchCustomersData(accessToken),
+          // Use unified API with caching
+          unifiedApi
+            .getTransactions({ limit: 50 })
+            .then((data: any) => (data?.data || data || []) as any[])
+            .catch(err => {
+              console.warn('Vouchers fetch failed:', err);
+              return [];
+            }),
+        ])
+          .then(([userDataResult, customersResult, vouchersResponse]) => {
+            // Update cache with fresh data
+            globalCustomerCache = {
+              customers: customersResult,
+              vouchers: vouchersResponse,
+              userData: userDataResult,
+              lastUpdated: Date.now(),
+              activeTab: activeTab,
+              isRefreshing: false,
+              isInitializing: false,
+              isComponentInitialized: true,
+            };
 
-        // Update state
-        setCustomers(customersResult);
-        console.log('🔍 DEBUG: Setting allVouchers:', {
-          vouchersResponseLength: vouchersResponse.length,
-          vouchersResponse: vouchersResponse.slice(0, 3), // Show first 3 vouchers
-        });
-        setAllVouchers(vouchersResponse);
-        setUserData(userDataResult);
-        updateBusinessNameIfPresent(userDataResult?.businessName);
+            // Update state with fresh data
+            setCustomers(customersResult);
+            setAllVouchers(vouchersResponse);
+            setUserData(userDataResult);
+            updateBusinessNameIfPresent(userDataResult?.businessName);
 
-        console.log('✅ CustomerScreen: Initial data fetch completed');
+            // Save to persistent cache for next cold start
+            saveToPersistentCache('customers', customersResult);
+            saveToPersistentCache('vouchers', vouchersResponse);
+            saveToPersistentCache('userData', userDataResult);
+
+            console.log('✅ CustomerScreen: Fresh data loaded and cached');
+          })
+          .catch(error => {
+            console.error('❌ CustomerScreen: Background fetch error:', error);
+            // Don't show error if we have cached data
+            if (!cachedCustomers || cachedCustomers.length === 0) {
+              setError(
+                error instanceof Error ? error.message : 'Failed to load data',
+              );
+            }
+          })
+          .finally(() => {
+            globalCustomerCache.isInitializing = false;
+          });
       } catch (error) {
         console.error('❌ CustomerScreen: Initial data fetch error:', error);
         setError(
           error instanceof Error ? error.message : 'Failed to load data',
         );
-      } finally {
         globalCustomerCache.isInitializing = false;
       }
     };
@@ -1210,6 +1267,11 @@ const CustomerScreen: React.FC = () => {
       setUserData(userDataResult);
       updateBusinessNameIfPresent(userDataResult?.businessName);
 
+      // Save to persistent cache for next cold start
+      saveToPersistentCache('customers', customersResult);
+      saveToPersistentCache('vouchers', vouchersResponse);
+      saveToPersistentCache('userData', userDataResult);
+
       console.log('✅ CustomerScreen: fetchAllData completed');
     } catch (err: any) {
       console.error('Error fetching customer data:', err);
@@ -1237,6 +1299,8 @@ const CustomerScreen: React.FC = () => {
         globalCustomerCache.customers = customersResult;
         globalCustomerCache.lastUpdated = Date.now();
         setCustomers(customersResult);
+        // Save to persistent cache
+        saveToPersistentCache('customers', customersResult);
         console.log(
           '✅ CustomerScreen: Background refresh completed - Customers:',
           customersResult.length,
@@ -1284,14 +1348,19 @@ const CustomerScreen: React.FC = () => {
 
       // Always refresh on focus to ensure data is up-to-date
       // This is especially important when returning from AddPartyScreen or PurchaseScreen
-      if (!globalCustomerCache.isRefreshing && !globalCustomerCache.isInitializing) {
+      if (
+        !globalCustomerCache.isRefreshing &&
+        !globalCustomerCache.isInitializing
+      ) {
         console.log('🔄 Triggering refresh on focus to ensure fresh data...');
         setTimeout(() => {
           handleManualRefresh();
         }, 100); // Small delay to prevent conflicts
       } else if (shouldRefresh) {
         // If refresh is in progress but data is stale, queue another refresh
-        console.log('⏸️ Refresh in progress, will refresh again when complete...');
+        console.log(
+          '⏸️ Refresh in progress, will refresh again when complete...',
+        );
         setTimeout(() => {
           if (!globalCustomerCache.isRefreshing) {
             handleManualRefresh();
@@ -1336,13 +1405,15 @@ const CustomerScreen: React.FC = () => {
         // Clear cache immediately to force fresh data fetch
         clearCustomerCache();
         clearVoucherCache();
-        
+
         // Mark cache as stale to trigger refresh
         globalCustomerCache.lastUpdated = 0;
         globalCustomerCache.isRefreshing = false;
 
         // Trigger immediate refresh using handleManualRefresh which properly updates state
-        console.log('🔄 CustomerScreen: Triggering manual refresh after profile update...');
+        console.log(
+          '🔄 CustomerScreen: Triggering manual refresh after profile update...',
+        );
         setTimeout(() => {
           handleManualRefresh();
         }, 100); // Small delay to ensure cache is cleared
@@ -1676,9 +1747,12 @@ const CustomerScreen: React.FC = () => {
           clearCustomerCache();
           clearVoucherCache();
         }
-        
+
         // Trigger refresh if not already refreshing
-        if (!globalCustomerCache.isRefreshing && !globalCustomerCache.isInitializing) {
+        if (
+          !globalCustomerCache.isRefreshing &&
+          !globalCustomerCache.isInitializing
+        ) {
           setTimeout(() => {
             handleManualRefresh();
           }, 100);
@@ -1686,8 +1760,13 @@ const CustomerScreen: React.FC = () => {
       } else {
         // Even if data seems fresh, do a lightweight refresh to catch any updates
         // This ensures data is always up-to-date when screen comes into focus
-        if (!globalCustomerCache.isRefreshing && !globalCustomerCache.isInitializing) {
-          console.log('🔄 useFocusEffect: Triggering background refresh to ensure fresh data...');
+        if (
+          !globalCustomerCache.isRefreshing &&
+          !globalCustomerCache.isInitializing
+        ) {
+          console.log(
+            '🔄 useFocusEffect: Triggering background refresh to ensure fresh data...',
+          );
           setTimeout(() => {
             handleManualRefresh();
           }, 300);

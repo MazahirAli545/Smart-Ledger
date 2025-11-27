@@ -47,6 +47,15 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const initializeNotifications = async (): Promise<boolean> => {
     try {
+      // Skip if already initialized
+      if (notificationService.isServiceInitialized()) {
+        console.log(
+          '✅ NotificationContext: Service already initialized, skipping',
+        );
+        setIsInitialized(true);
+        return true;
+      }
+
       // Check if user has declined notification permission
       const neverAsk = await AsyncStorage.getItem('notificationsNeverAsk');
       if (neverAsk === 'true') {
@@ -55,6 +64,14 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({
         );
         setIsInitialized(false);
         return false;
+      }
+
+      // Check if permission was already granted
+      const grantedFlag = await AsyncStorage.getItem('notificationsGranted');
+      if (grantedFlag === 'true') {
+        console.log(
+          '✅ NotificationContext: Permission already granted, initializing silently',
+        );
       }
 
       console.log('🚀 Initializing notifications from context...');

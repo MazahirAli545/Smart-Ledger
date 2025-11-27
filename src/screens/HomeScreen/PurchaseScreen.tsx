@@ -2168,15 +2168,6 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
     setTriedSubmit(true);
     setError(null);
 
-    // Check transaction limits BEFORE making API call
-    try {
-      console.log('🔍 Checking transaction limits before purchase creation...');
-      await forceCheckTransactionLimit();
-    } catch (limitError) {
-      console.error('❌ Error checking transaction limits:', limitError);
-      // Continue with API call if limit check fails
-    }
-
     // Validate required fields BEFORE showing loader or calling API
     console.log('Validating fields:', {
       purchaseNumber,
@@ -2199,6 +2190,15 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
       );
       return;
     }
+
+    // Prepare async prerequisites early so they can run in parallel
+    const userIdPromise = getUserIdFromToken();
+    const nextPurchaseNumberPromise = !editingItem
+      ? generateNextDocumentNumber('purchase', true).catch(error => {
+          console.error('Error generating purchase number:', error);
+          return null;
+        })
+      : Promise.resolve<string | null>(null);
 
     // Validate optional fields if they have values
     if (supplierPhone && isFieldInvalid(supplierPhone, 'phone')) {
@@ -2335,7 +2335,7 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
           if (newSupplier) {
             supplierNameToUse = newSupplier.name || '';
             supplierIdToUse = Number(newSupplier.id) || null;
-            await fetchSuppliersCtx('');
+            fetchSuppliersCtx('').catch(() => {});
           }
         }
         if (existingSupplier && !supplierIdToUse) {
@@ -2348,7 +2348,7 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
           supplierIdToUse = Number(editingItem.partyId);
         }
       }
-      const userId = await getUserIdFromToken();
+      const userId = await userIdPromise;
       if (!userId) throw new Error('User not authenticated.');
 
       // Hard block if supplierId is still missing
@@ -2371,19 +2371,15 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
       // This ensures accuracy even if other transactions were created since initialization
       let finalPurchaseNumber = purchaseNumber || billNumber || '';
       if (!editingItem) {
-        // New transaction - regenerate based on current backend state
-        try {
-          finalPurchaseNumber = await generateNextDocumentNumber(
-            'purchase',
-            true, // Store now - transaction is being saved
-          );
-          setPurchaseNumber(finalPurchaseNumber);
+        const generatedNumber = await nextPurchaseNumberPromise;
+        if (generatedNumber) {
+          finalPurchaseNumber = generatedNumber;
+          setPurchaseNumber(generatedNumber);
           console.log(
             '🔍 Generated purchaseNumber on submit:',
-            finalPurchaseNumber,
+            generatedNumber,
           );
-        } catch (error) {
-          console.error('Error generating purchase number:', error);
+        } else {
           // Fallback: use preview number if available, otherwise default to PUR-001
           finalPurchaseNumber = purchaseNumber || 'PUR-001';
         }
@@ -2834,7 +2830,7 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
                   needsAddressUpdate ? supplierAddress : undefined,
                 );
                 // Refresh suppliers list to get updated data
-                await fetchSuppliersCtx('');
+                fetchSuppliersCtx('').catch(() => {});
                 // Emit profile update event to refresh CustomerScreen
                 console.log(
                   '📢 PurchaseScreen: Emitting profile update event after supplier update',
@@ -2961,8 +2957,9 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
       // Force refresh suppliers to ensure we have latest data
       // This ensures supplier changes in purchases are reflected immediately
       try {
-        const refreshedSuppliers = await fetchSuppliersCtx('');
-        console.log('✅ Suppliers refreshed:', refreshedSuppliers?.length || 0);
+        fetchSuppliersCtx('')
+          .then(res => console.log('✅ Suppliers refreshed:', res?.length || 0))
+          .catch(err => console.warn('⚠️ Supplier refresh failed:', err));
       } catch (err) {
         console.warn('⚠️ Supplier refresh failed:', err);
       }
@@ -4416,18 +4413,14 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
                         paddingVertical: scale(22),
                         fontSize: scale(18),
                         paddingHorizontal: scale(12),
-                        backgroundColor: '#f9f9f9',
-                        borderColor: '#e0e0e0',
+                        backgroundColor: '#e9ecef',
+                        borderColor: '#d0d0d0',
                         borderWidth: 1,
                         fontFamily: 'Roboto-Medium',
                       },
                     ]}
-                    value={taxAmount.toString()}
-                    onChangeText={text => {
-                      const value = parseFloat(text) || 0;
-                      setTaxAmount(value);
-                      // Tax Amount now includes GST, so no separate GST calculation needed
-                    }}
+                    value={taxAmount.toFixed(2)}
+                    editable={false}
                     placeholderTextColor="#666666"
                     placeholder="0.00"
                     keyboardType="numeric"

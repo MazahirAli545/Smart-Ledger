@@ -3,12 +3,17 @@ import { Alert, AppState, AppStateStatus } from 'react-native';
 import notifee, {
   AndroidImportance,
   AndroidVisibility,
+  AuthorizationStatus,
   TriggerType,
   RepeatFrequency,
 } from '@notifee/react-native';
 import { BASE_URL } from '../api';
 import { getUserIdFromToken } from '../utils/storage';
 import { unifiedApi } from '../api/unifiedApiService';
+import {
+  hasUserDeclinedNotifications,
+  markNotificationsAsDeclined,
+} from '../utils/notificationPrefs';
 
 export interface TransactionLimitData {
   currentCount: number;
@@ -113,8 +118,25 @@ class TransactionLimitService {
 
   private async setupPushNotification() {
     try {
+      const userDeclined = await hasUserDeclinedNotifications();
+      if (userDeclined) {
+        console.log(
+          '⚠️ TransactionLimitService: User declined notifications - skipping Notifee permission prompt',
+        );
+        return;
+      }
+
       // Request permission for notifications
-      await notifee.requestPermission();
+      const permissionStatus = await notifee.requestPermission();
+      if (
+        permissionStatus?.authorizationStatus === AuthorizationStatus.DENIED
+      ) {
+        console.log(
+          '⚠️ TransactionLimitService: Notifee permission denied - respecting preference',
+        );
+        await markNotificationsAsDeclined();
+        return;
+      }
 
       // Create notification channel for Android
       await notifee.createChannel({

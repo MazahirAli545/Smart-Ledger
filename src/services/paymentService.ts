@@ -304,6 +304,7 @@ export class PaymentService {
         theme: { color: '#4f8cff' },
         fullscreen: true,
         backdropClose: false,
+        redirect: false,
         // Add new parameters from latest integration guide
         partial_payment: false, // Set to true if you want to allow partial payments
         first_payment_min_amount: undefined, // Only needed if partial_payment is true
@@ -327,8 +328,8 @@ export class PaymentService {
           name: false,
         },
         retry: {
-          enabled: true,
-          max_count: 3,
+          enabled: false,
+          max_count: 0,
         },
         config: {
           display: {

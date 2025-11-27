@@ -2252,44 +2252,10 @@ const InvoiceScreen: React.FC = () => {
     status: 'complete' | 'draft',
     syncYNOverride?: 'Y' | 'N',
   ) => {
-    // Guard: block submit if monthly limit reached
-    try {
-      const token = await AsyncStorage.getItem('accessToken');
-      if (token) {
-        // Use unified API for transaction limits
-        const limitsData = (await unifiedApi.getTransactionLimits()) as {
-          canCreate?: boolean;
-        };
-        if (limitsData && limitsData.canCreate === false) {
-          // Show global transaction limit modal and a local popup message
-          try {
-            await forceShowPopup();
-          } catch {}
-          showCustomPopup(
-            'Monthly Limit Reached',
-            'You have reached your monthly transaction limit. Please upgrade your plan to continue.',
-            'error',
-          );
-          return;
-        }
-      }
-    } catch {}
     console.log('handleSubmit called with status:', status);
     setTriedSubmit(true);
     setError(null);
     setSuccess(null);
-
-    // Check transaction limits BEFORE making API call
-    try {
-      console.log(
-        '🔍 Checking transaction limits before invoice creation (non-blocking)...',
-      );
-      // Fire-and-forget to avoid blocking or triggering validation noise
-      forceCheckTransactionLimit().catch(() => {});
-    } catch (limitError) {
-      console.error('❌ Error checking transaction limits:', limitError);
-      // Continue with API call if limit check fails
-    }
 
     // Validate required fields BEFORE showing loader or calling API
     const hasCustomerSelected = (() => {
@@ -2327,6 +2293,18 @@ const InvoiceScreen: React.FC = () => {
       );
       return;
     }
+
+    // Prepare async prerequisites early so they can run concurrently with other work
+    const userIdPromise = getUserIdFromToken();
+    const nextInvoiceNumberPromise = !editingItem
+      ? generateNextDocumentNumber(
+          folderType || folderName.toLowerCase(),
+          true,
+        ).catch(error => {
+          console.error('Error generating invoice number:', error);
+          return null;
+        })
+      : Promise.resolve<string | null>(null);
 
     // Validate optional fields if they have values
     if (customerPhone && isFieldInvalid(customerPhone, 'phone')) {
@@ -2400,7 +2378,7 @@ const InvoiceScreen: React.FC = () => {
         if (newCustomer) {
           customerNameToUse = newCustomer.partyName || '';
         }
-        await fetchAll('');
+        fetchAll('').catch(() => {});
         // Try to refresh existingCustomer after creation
         existingCustomer = (customers || []).find(
           c =>
@@ -2461,7 +2439,7 @@ const InvoiceScreen: React.FC = () => {
         }
       } catch {}
 
-      const userId = await getUserIdFromToken();
+      const userId = await userIdPromise;
       if (!userId) {
         setError('User not authenticated. Please login again.');
         setTimeout(() => scrollToErrorField('api'), 100);
@@ -2472,19 +2450,15 @@ const InvoiceScreen: React.FC = () => {
       // This ensures accuracy even if other transactions were created since initialization
       let finalInvoiceNumber = invoiceNumber || '';
       if (!editingItem) {
-        // New transaction - regenerate based on current backend state
-        try {
-          finalInvoiceNumber = await generateNextDocumentNumber(
-            folderType || folderName.toLowerCase(),
-            true, // Store now - transaction is being saved
-          );
-          setInvoiceNumber(finalInvoiceNumber);
+        const generatedInvoiceNumber = await nextInvoiceNumberPromise;
+        if (generatedInvoiceNumber) {
+          finalInvoiceNumber = generatedInvoiceNumber;
+          setInvoiceNumber(generatedInvoiceNumber);
           console.log(
             '🔍 Generated invoiceNumber on submit:',
-            finalInvoiceNumber,
+            generatedInvoiceNumber,
           );
-        } catch (error) {
-          console.error('Error generating invoice number:', error);
+        } else {
           // Fallback: use preview number if available, otherwise default to SEL-001
           finalInvoiceNumber = invoiceNumber || 'SEL-001';
         }
@@ -2736,7 +2710,7 @@ const InvoiceScreen: React.FC = () => {
               needsAddressUpdate ? customerAddress : undefined,
             );
             // Refresh customers list to get updated data
-            await fetchAll('');
+            fetchAll('').catch(() => {});
             // Update existingCustomer reference after refresh
             const refreshedAfter =
               customers && customers.length > 0 ? customers : [];
@@ -4766,18 +4740,14 @@ const InvoiceScreen: React.FC = () => {
                       paddingVertical: scale(22),
                       fontSize: scale(18),
                       paddingHorizontal: scale(12),
-                      backgroundColor: '#f9f9f9',
-                      borderColor: '#e0e0e0',
+                      backgroundColor: '#e9ecef',
+                      borderColor: '#d0d0d0',
                       borderWidth: 1,
                       fontFamily: 'Roboto-Medium',
                     },
                   ]}
-                  value={taxAmount.toString()}
-                  onChangeText={text => {
-                    const value = parseFloat(text) || 0;
-                    setTaxAmount(value);
-                    // Tax Amount now includes GST, so no separate GST calculation needed
-                  }}
+                  value={taxAmount.toFixed(2)}
+                  editable={false}
                   placeholderTextColor="#666666"
                   placeholder="0.00"
                   keyboardType="numeric"

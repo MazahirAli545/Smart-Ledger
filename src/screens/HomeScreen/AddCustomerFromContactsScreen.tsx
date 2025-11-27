@@ -7,13 +7,12 @@ import {
   TouchableOpacity,
   TextInput,
   Dimensions,
-  Alert,
   PermissionsAndroid,
   Platform,
   ActivityIndicator,
   Linking,
-  NativeModules,
 } from 'react-native';
+import type { Permission } from 'react-native';
 import {
   useNavigation,
   useFocusEffect,
@@ -32,31 +31,8 @@ import {
   getSolidHeaderStyle,
 } from '../../utils/headerLayout';
 
-// Import contacts with multiple fallback methods
-let Contacts: any = null;
-try {
-  // Method 1: Direct import
-  Contacts = require('react-native-contacts');
-  console.log('✅ react-native-contacts imported successfully');
-} catch (error) {
-  console.log('❌ react-native-contacts direct import failed:', error);
-
-  try {
-    // Method 2: Default import
-    Contacts = require('react-native-contacts').default;
-    console.log('✅ react-native-contacts default import successful');
-  } catch (error2) {
-    console.log('❌ react-native-contacts default import failed:', error2);
-
-    try {
-      // Method 3: Dynamic import
-      Contacts = require('react-native-contacts');
-      console.log('✅ react-native-contacts dynamic import successful');
-    } catch (error3) {
-      console.log('❌ All react-native-contacts import methods failed');
-    }
-  }
-}
+// Import contacts properly
+import Contacts from 'react-native-contacts';
 
 const { width } = Dimensions.get('window');
 // Responsive sizes for ADD button (slightly smaller overall)
@@ -75,14 +51,16 @@ interface Contact {
 // Global cache to persist contacts across component unmounts and prevent loading screen flash
 let globalContactsCache: Contact[] | null = null;
 let globalContactsCacheChecked = false;
-let globalContactsUsingReal = false;
 
 // Function to clear global cache (called from logout)
 export const clearContactsCache = () => {
   globalContactsCache = null;
   globalContactsCacheChecked = false;
-  globalContactsUsingReal = false;
 };
+
+const ANDROID_READ_CONTACTS = 'android.permission.READ_CONTACTS';
+const ANDROID_WRITE_CONTACTS = 'android.permission.WRITE_CONTACTS';
+const ANDROID_GET_ACCOUNTS = 'android.permission.GET_ACCOUNTS';
 
 const AddCustomerFromContactsScreen: React.FC = () => {
   // StatusBar like ProfileScreen for colored header
@@ -110,24 +88,17 @@ const AddCustomerFromContactsScreen: React.FC = () => {
   const [loading, setLoading] = useState(!globalContactsCache);
   const [error, setError] = useState<string | null>(null);
   const [showSettingsButton, setShowSettingsButton] = useState(false);
-  const [usingRealContacts, setUsingRealContacts] = useState(
-    globalContactsUsingReal,
-  );
-  const [cacheChecked, setCacheChecked] = useState(globalContactsCacheChecked);
-
   // Check for cached contacts on component mount
   useEffect(() => {
     checkCachedContacts();
   }, []);
 
-  const checkCachedContacts = async () => {
+  const checkCachedContacts = () => {
     // If we already have global cache, use it immediately
     if (globalContactsCache && globalContactsCache.length > 0) {
       setContacts(globalContactsCache);
       setFilteredContacts(globalContactsCache);
-      setUsingRealContacts(globalContactsUsingReal);
       setLoading(false);
-      setCacheChecked(true);
       globalContactsCacheChecked = true;
       console.log(
         '✅ Using cached contacts:',
@@ -137,114 +108,150 @@ const AddCustomerFromContactsScreen: React.FC = () => {
       return;
     }
 
-    // If no cached data, load mock contacts first as fallback
-    const mockContacts = getMockContacts();
-    setContacts(mockContacts);
-    setFilteredContacts(mockContacts);
-    setLoading(false);
-    setCacheChecked(true);
+    // No cached data – show loader and request permission to fetch real contacts
+    setLoading(true);
     globalContactsCacheChecked = true;
-
-    // Then try to load real contacts in background
     requestContactsPermission();
   };
 
   const requestContactsPermission = async () => {
     try {
+      setShowSettingsButton(false);
+      setError(null);
       console.log('🔍 Starting contacts permission request...');
 
       if (Platform.OS === 'android') {
-        // Check if permission is already granted
-        const hasPermission = await PermissionsAndroid.check(
-          PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
-        );
+        // First verify Contacts module is available
+        if (!Contacts) {
+          throw new Error('Contacts module not available');
+        }
 
-        console.log('📱 Permission check result:', hasPermission);
+        // On Android, use PermissionsAndroid (checkPermission is iOS-only)
+        const hasPermission = await PermissionsAndroid.check(
+          ANDROID_READ_CONTACTS,
+        );
+        console.log('📱 Android permission check result:', hasPermission);
 
         if (hasPermission) {
           console.log('✅ Contacts permission already granted');
+          // Small delay to ensure native module is ready
+          await new Promise(resolve => setTimeout(resolve, 200));
           fetchDeviceContacts();
           return;
         }
 
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.READ_CONTACTS,
-          {
-            title: 'Contacts Permission',
-            message: 'This app needs access to your contacts to add customers.',
-            buttonNeutral: 'Ask Me Later',
-            buttonNegative: 'Cancel',
-            buttonPositive: 'OK',
-          },
+        // Request permission using Android API
+        console.log('📱 Requesting contacts permission...');
+        const grantedMap = await PermissionsAndroid.requestMultiple(
+          [
+            ANDROID_READ_CONTACTS,
+            ANDROID_WRITE_CONTACTS,
+            ANDROID_GET_ACCOUNTS,
+          ].filter(Boolean) as Permission[],
         );
+        const readContactsStatus = grantedMap[ANDROID_READ_CONTACTS];
+        console.log('📱 Permission request result:', grantedMap);
 
-        console.log('📱 Permission request result:', granted);
-
-        if (granted === PermissionsAndroid.RESULTS.GRANTED) {
+        if (readContactsStatus === PermissionsAndroid.RESULTS.GRANTED) {
           console.log('✅ Contacts permission granted');
-          fetchDeviceContacts();
-        } else if (granted === PermissionsAndroid.RESULTS.DENIED) {
-          console.log('❌ Contacts permission denied');
-          setError(
-            'Contacts permission denied. Please grant permission in settings.',
+          // Wait for native module to recognize the new permission
+          // This delay is critical - the native bridge needs time to sync
+          await new Promise(resolve => setTimeout(resolve, 500));
+
+          // Double-check permission was actually granted
+          const verifyPermission = await PermissionsAndroid.check(
+            ANDROID_READ_CONTACTS,
           );
-          setShowSettingsButton(true);
-        } else {
-          console.log('❌ Contacts permission denied permanently');
-          setError(
-            'Contacts permission denied. Please grant permission in settings.',
-          );
-          setShowSettingsButton(true);
+          if (verifyPermission) {
+            console.log('✅ Permission verified, fetching contacts...');
+            fetchDeviceContacts();
+          } else {
+            console.error('❌ Permission verification failed after grant');
+            setError(
+              'Permission was granted but could not be verified. Please try again.',
+            );
+            setShowSettingsButton(true);
+            setLoading(false);
+          }
+          return;
         }
+
+        const isNeverAskAgain =
+          readContactsStatus === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN;
+
+        console.log(
+          isNeverAskAgain
+            ? '❌ Contacts permission permanently denied'
+            : '❌ Contacts permission denied',
+        );
+        setError(
+          isNeverAskAgain
+            ? 'Contacts permission denied with "Don\'t ask again". Please enable it from Settings.'
+            : 'Contacts permission denied. Please grant permission in settings.',
+        );
+        setShowSettingsButton(true);
+        setLoading(false);
+        return;
       } else {
         // iOS - Check permission status first
         console.log('🍎 iOS platform, checking contact permission status...');
         try {
-          if (Contacts && typeof Contacts.checkPermission === 'function') {
-            const permission = await Contacts.checkPermission();
-            console.log('🍎 iOS permission check result:', permission);
+          if (!Contacts) {
+            throw new Error('Contacts module not available');
+          }
 
-            if (permission === 'authorized') {
-              console.log('✅ iOS contacts permission already granted');
+          const permission = await Contacts.checkPermission();
+          console.log('🍎 iOS permission check result:', permission);
+
+          if (permission === 'authorized') {
+            console.log('✅ iOS contacts permission already granted');
+            fetchDeviceContacts();
+            return;
+          } else if (permission === 'denied') {
+            setError(
+              'Contacts permission denied. Please grant permission in settings.',
+            );
+            setShowSettingsButton(true);
+            setLoading(false);
+            return;
+          } else {
+            // Permission not determined, request it
+            const requestResult = await Contacts.requestPermission();
+            console.log('🍎 iOS permission request result:', requestResult);
+
+            if (requestResult === 'authorized') {
+              console.log('✅ iOS contacts permission granted');
+              // Small delay to ensure native module is ready
+              await new Promise(resolve => setTimeout(resolve, 300));
               fetchDeviceContacts();
-              return;
-            } else if (permission === 'denied') {
+            } else {
               setError(
                 'Contacts permission denied. Please grant permission in settings.',
               );
               setShowSettingsButton(true);
-              return;
-            } else {
-              // Permission not determined, request it
-              const requestResult = await Contacts.requestPermission();
-              console.log('🍎 iOS permission request result:', requestResult);
-
-              if (requestResult === 'authorized') {
-                console.log('✅ iOS contacts permission granted');
-                fetchDeviceContacts();
-              } else {
-                setError(
-                  'Contacts permission denied. Please grant permission in settings.',
-                );
-                setShowSettingsButton(true);
-              }
+              setLoading(false);
             }
-          } else {
-            // Fallback for iOS - try to fetch directly
-            console.log('🍎 iOS fallback: attempting direct contact fetch');
-            fetchDeviceContacts();
           }
         } catch (iosError) {
-          console.log(
-            '🍎 iOS permission check failed, attempting direct fetch:',
-            iosError,
+          console.error('❌ iOS permission error:', iosError);
+          setError(
+            iosError instanceof Error
+              ? `iOS permission error: ${iosError.message}`
+              : 'Failed to check iOS contacts permission.',
           );
-          fetchDeviceContacts();
+          setShowSettingsButton(true);
+          setLoading(false);
         }
       }
     } catch (err) {
       console.error('❌ Error requesting contacts permission:', err);
-      setError('Error requesting contacts permission. Please try again.');
+      setError(
+        err instanceof Error
+          ? `Error requesting contacts permission: ${err.message}`
+          : 'Error requesting contacts permission. Please try again.',
+      );
+      setShowSettingsButton(true);
+      setLoading(false);
     }
   };
 
@@ -262,124 +269,163 @@ const AddCustomerFromContactsScreen: React.FC = () => {
         throw new Error('Contacts module not available');
       }
 
+      // Verify permission one more time before fetching
+      if (Platform.OS === 'android') {
+        const hasPermission = await PermissionsAndroid.check(
+          ANDROID_READ_CONTACTS,
+        );
+        if (!hasPermission) {
+          console.error('❌ Permission check failed before fetch');
+          throw new Error('READ_CONTACTS permission not granted');
+        }
+        console.log('✅ Permission verified before fetch');
+      }
+
       console.log('📱 Contacts module type:', typeof Contacts);
       console.log('📱 Available methods:', Object.keys(Contacts));
 
       // Try multiple methods to get contacts with fallbacks
       let deviceContacts: any[] = [];
       let fetchMethod = '';
+      let lastError: Error | null = null;
 
-      try {
-        // Method 1: getAll() - most reliable but may have limits
-        if (typeof Contacts.getAll === 'function') {
-          console.log('📞 Using Contacts.getAll() method...');
-          try {
-            deviceContacts = await Contacts.getAll();
-            fetchMethod = 'getAll';
-            console.log(
-              `✅ getAll() returned ${deviceContacts.length} contacts`,
-            );
-          } catch (getAllError) {
-            console.warn(
-              '⚠️ getAll() failed, trying alternative methods:',
-              getAllError,
-            );
-            throw getAllError;
+      // Method 1: getAll() - most reliable but may have limits
+      if (typeof Contacts.getAll === 'function') {
+        console.log('📞 Using Contacts.getAll() method...');
+        try {
+          deviceContacts = await Contacts.getAll();
+          fetchMethod = 'getAll';
+          console.log(`✅ getAll() returned ${deviceContacts.length} contacts`);
+
+          // Validate we got actual contact data
+          if (
+            deviceContacts &&
+            Array.isArray(deviceContacts) &&
+            deviceContacts.length > 0
+          ) {
+            console.log('✅ Contacts array is valid and non-empty');
+          } else {
+            console.warn('⚠️ getAll() returned empty or invalid array');
+            deviceContacts = [];
           }
-        }
-
-        // Method 2: getAllWithoutPhotos() - often more reliable
-        if (
-          (!deviceContacts || deviceContacts.length === 0) &&
-          typeof Contacts.getAllWithoutPhotos === 'function'
-        ) {
-          console.log('📞 Using Contacts.getAllWithoutPhotos() method...');
-          try {
-            deviceContacts = await Contacts.getAllWithoutPhotos();
-            fetchMethod = 'getAllWithoutPhotos';
-            console.log(
-              `✅ getAllWithoutPhotos() returned ${deviceContacts.length} contacts`,
-            );
-          } catch (getAllWithoutPhotosError) {
-            console.warn(
-              '⚠️ getAllWithoutPhotos() failed:',
-              getAllWithoutPhotosError,
-            );
-          }
-        }
-
-        // Method 3: getContactsMatchingString() with empty string
-        if (
-          (!deviceContacts || deviceContacts.length === 0) &&
-          typeof Contacts.getContactsMatchingString === 'function'
-        ) {
-          console.log(
-            '📞 Using Contacts.getContactsMatchingString("") method...',
+        } catch (getAllError: any) {
+          lastError = getAllError instanceof Error ? getAllError : null;
+          console.error(
+            '❌ getAll() failed with error:',
+            getAllError?.message || getAllError,
+            getAllError?.stack,
           );
-          try {
-            deviceContacts = await Contacts.getContactsMatchingString('');
-            fetchMethod = 'getContactsMatchingString';
-            console.log(
-              `✅ getContactsMatchingString("") returned ${deviceContacts.length} contacts`,
-            );
-          } catch (getContactsMatchingStringError) {
-            console.warn(
-              '⚠️ getContactsMatchingString("") failed:',
-              getContactsMatchingStringError,
-            );
-          }
+          deviceContacts = [];
         }
-
-        // Method 4: Progressive contact fetching with alphabet search
-        if (
-          (!deviceContacts || deviceContacts.length === 0) &&
-          typeof Contacts.getContactsMatchingString === 'function'
-        ) {
-          console.log('📞 Using progressive alphabet search method...');
-          try {
-            deviceContacts = await fetchContactsProgressive();
-            fetchMethod = 'progressive_search';
-            console.log(
-              `✅ Progressive search returned ${deviceContacts.length} contacts`,
-            );
-          } catch (progressiveError) {
-            console.warn('⚠️ Progressive search failed:', progressiveError);
-          }
-        }
-
-        // Method 5: Batch getContactById() as last resort
-        if (
-          (!deviceContacts || deviceContacts.length === 0) &&
-          typeof Contacts.getContactById === 'function'
-        ) {
-          console.log('📞 Using batch getContactById() method...');
-          try {
-            deviceContacts = await fetchContactsBatch();
-            fetchMethod = 'getContactById_batch';
-            console.log(
-              `✅ Batch getContactById returned ${deviceContacts.length} contacts`,
-            );
-          } catch (batchError) {
-            console.warn('⚠️ Batch getContactById failed:', batchError);
-          }
-        }
-
-        // If still no contacts, throw error
-        if (!deviceContacts || deviceContacts.length === 0) {
-          throw new Error('All contact fetching methods failed');
-        }
-
-        console.log(
-          `✅ Contacts fetched using ${fetchMethod}: ${deviceContacts.length} contacts`,
-        );
-      } catch (fetchError: any) {
-        console.error(`❌ All contact fetching methods failed:`, fetchError);
-        throw new Error(
-          `Failed to fetch contacts: ${
-            fetchError?.message || 'All methods failed'
-          }`,
-        );
+      } else {
+        console.warn('⚠️ Contacts.getAll is not a function');
       }
+
+      // Method 2: getAllWithoutPhotos() - often more reliable
+      if (
+        (!deviceContacts || deviceContacts.length === 0) &&
+        typeof Contacts.getAllWithoutPhotos === 'function'
+      ) {
+        console.log('📞 Using Contacts.getAllWithoutPhotos() method...');
+        try {
+          deviceContacts = await Contacts.getAllWithoutPhotos();
+          fetchMethod = 'getAllWithoutPhotos';
+          console.log(
+            `✅ getAllWithoutPhotos() returned ${deviceContacts.length} contacts`,
+          );
+        } catch (getAllWithoutPhotosError: any) {
+          lastError =
+            getAllWithoutPhotosError instanceof Error
+              ? getAllWithoutPhotosError
+              : lastError;
+          console.warn(
+            '⚠️ getAllWithoutPhotos() failed:',
+            getAllWithoutPhotosError,
+          );
+          deviceContacts = [];
+        }
+      }
+
+      // Method 3: getContactsMatchingString() with empty string
+      if (
+        (!deviceContacts || deviceContacts.length === 0) &&
+        typeof Contacts.getContactsMatchingString === 'function'
+      ) {
+        console.log(
+          '📞 Using Contacts.getContactsMatchingString("") method...',
+        );
+        try {
+          deviceContacts = await Contacts.getContactsMatchingString('');
+          fetchMethod = 'getContactsMatchingString';
+          console.log(
+            `✅ getContactsMatchingString("") returned ${deviceContacts.length} contacts`,
+          );
+        } catch (getContactsMatchingStringError: any) {
+          lastError =
+            getContactsMatchingStringError instanceof Error
+              ? getContactsMatchingStringError
+              : lastError;
+          console.warn(
+            '⚠️ getContactsMatchingString("") failed:',
+            getContactsMatchingStringError,
+          );
+          deviceContacts = [];
+        }
+      }
+
+      // Method 4: Progressive contact fetching with alphabet search
+      if (
+        (!deviceContacts || deviceContacts.length === 0) &&
+        typeof Contacts.getContactsMatchingString === 'function'
+      ) {
+        console.log('📞 Using progressive alphabet search method...');
+        try {
+          deviceContacts = await fetchContactsProgressive();
+          fetchMethod = 'progressive_search';
+          console.log(
+            `✅ Progressive search returned ${deviceContacts.length} contacts`,
+          );
+        } catch (progressiveError: any) {
+          lastError =
+            progressiveError instanceof Error ? progressiveError : lastError;
+          console.warn('⚠️ Progressive search failed:', progressiveError);
+          deviceContacts = [];
+        }
+      }
+
+      // Method 5: Batch getContactById() as last resort
+      if (
+        (!deviceContacts || deviceContacts.length === 0) &&
+        typeof Contacts.getContactById === 'function'
+      ) {
+        console.log('📞 Using batch getContactById() method...');
+        try {
+          deviceContacts = await fetchContactsBatch();
+          fetchMethod = 'getContactById_batch';
+          console.log(
+            `✅ Batch getContactById returned ${deviceContacts.length} contacts`,
+          );
+        } catch (batchError: any) {
+          lastError = batchError instanceof Error ? batchError : lastError;
+          console.warn('⚠️ Batch getContactById failed:', batchError);
+          deviceContacts = [];
+        }
+      }
+
+      // If still no contacts, throw error
+      if (!deviceContacts || deviceContacts.length === 0) {
+        const errorToThrow =
+          lastError ??
+          new Error(
+            'All contact fetching methods failed or returned 0 contacts',
+          );
+        console.error('❌ Unable to fetch contacts from device:', errorToThrow);
+        throw errorToThrow;
+      }
+
+      console.log(
+        `✅ Contacts fetched using ${fetchMethod}: ${deviceContacts.length} contacts`,
+      );
 
       // Process contacts with detailed logging
       console.log('🔄 Processing contacts...');
@@ -398,13 +444,11 @@ const AddCustomerFromContactsScreen: React.FC = () => {
 
       // Update global cache
       globalContactsCache = processedContacts;
-      globalContactsUsingReal = true;
       globalContactsCacheChecked = true;
 
       // Set real contacts (no limit - show all valid contacts)
       setContacts(processedContacts);
       setFilteredContacts(processedContacts);
-      setUsingRealContacts(true);
       setError(null);
 
       console.log('🎉 Real device contacts loaded successfully!');
@@ -429,16 +473,27 @@ const AddCustomerFromContactsScreen: React.FC = () => {
           err.message.includes('getAll is not available') ||
           err.message.includes('getAll is not a function')
         ) {
-          errorMessage =
-            'Contacts feature not available. Using sample contacts.';
+          errorMessage = 'Contacts feature not available on this device.';
         } else if (err.message.includes('Failed to fetch contacts')) {
           errorMessage = `Contact fetching failed: ${err.message}`;
         }
       }
 
-      setError(errorMessage);
-      setUsingRealContacts(false);
+      if (
+        err instanceof Error &&
+        err.message &&
+        !errorMessage.includes(err.message)
+      ) {
+        errorMessage = `${errorMessage}\nDetails: ${err.message}`;
+      }
 
+      setError(errorMessage);
+      if (
+        err instanceof Error &&
+        err.message.toLowerCase().includes('permission')
+      ) {
+        setShowSettingsButton(true);
+      }
       // Try retry logic for certain errors
       if (
         retryCount < 2 &&
@@ -456,18 +511,10 @@ const AddCustomerFromContactsScreen: React.FC = () => {
         return;
       }
 
-      // Fallback to mock contacts on error
-      const mockContacts = getMockContacts();
-
-      // Update global cache with mock contacts
-      globalContactsCache = mockContacts;
-      globalContactsUsingReal = false;
-      globalContactsCacheChecked = true;
-
-      setContacts(mockContacts);
-      setFilteredContacts(mockContacts);
-
-      console.log('🔄 Falling back to mock contacts');
+      if (!globalContactsCache || globalContactsCache.length === 0) {
+        setContacts([]);
+        setFilteredContacts([]);
+      }
     } finally {
       setLoading(false);
     }
@@ -822,68 +869,9 @@ const AddCustomerFromContactsScreen: React.FC = () => {
     Linking.openSettings();
   };
 
-  const getMockContacts = (): Contact[] => [
-    {
-      id: '1',
-      name: '2Factor',
-      phoneNumber: '+91-9769355548',
-      avatar: '2',
-    },
-    {
-      id: '2',
-      name: '3I Guest House',
-      phoneNumber: '+91-48850019',
-      avatar: '3G',
-    },
-    {
-      id: '3',
-      name: '3I Infotech Sharjah',
-      phoneNumber: '+971-504620755',
-      avatar: '3I',
-    },
-    {
-      id: '4',
-      name: '3I Infotech Support Dubai',
-      phoneNumber: '+971-504620756',
-      avatar: '3I',
-    },
-    {
-      id: '5',
-      name: '502 Flat. Siyaz',
-      phoneNumber: '+91-9829161284',
-      avatar: '5F',
-    },
-    {
-      id: '6',
-      name: '503110022',
-      phoneNumber: '+91-503110022',
-      avatar: '5',
-    },
-    {
-      id: '7',
-      name: '503770707',
-      phoneNumber: '+91-503770707',
-      avatar: '5',
-    },
-    {
-      id: '8',
-      name: 'Aarav Patel',
-      phoneNumber: '+91-9876543210',
-      avatar: 'AP',
-    },
-    {
-      id: '9',
-      name: 'Business Solutions',
-      phoneNumber: '+91-9876543211',
-      avatar: 'BS',
-    },
-    {
-      id: '10',
-      name: 'Customer Care',
-      phoneNumber: '+91-9876543212',
-      avatar: 'CC',
-    },
-  ];
+  const handleRetryFetch = () => {
+    requestContactsPermission();
+  };
 
   const renderContactItem = (contact: Contact) => (
     <View key={contact.id} style={styles.contactItem}>
@@ -975,6 +963,33 @@ const AddCustomerFromContactsScreen: React.FC = () => {
             color="#4f8cff"
           />
         </TouchableOpacity>
+
+        {error && (
+          <View style={styles.errorBanner}>
+            <MaterialCommunityIcons
+              name="alert-circle-outline"
+              size={18}
+              color="#f97316"
+            />
+            <Text style={styles.errorBannerText}>{error}</Text>
+            <View style={styles.errorBannerButtons}>
+              <TouchableOpacity
+                style={styles.retryButtonSmall}
+                onPress={handleRetryFetch}
+              >
+                <Text style={styles.retryButtonTextSmall}>Retry</Text>
+              </TouchableOpacity>
+              {showSettingsButton && (
+                <TouchableOpacity
+                  style={styles.settingsButtonSmall}
+                  onPress={openAppSettings}
+                >
+                  <Text style={styles.settingsButtonTextSmall}>Settings</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        )}
 
         {/* Contacts List */}
         <View style={styles.contactsList}>

@@ -561,7 +561,7 @@ class AppApiService extends UnifiedApiService {
     params.append('limit', limit.toString());
 
     return this.get(`/customers/customers-only?${params.toString()}`, {
-      cacheTTL: 30 * 1000, // 30 seconds
+      cacheTTL: 5 * 60 * 1000, // 5 minutes - increased for better cold start performance
     });
   }
 

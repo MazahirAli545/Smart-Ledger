@@ -290,7 +290,12 @@ const Dashboard: React.FC = () => {
       try {
         // First ensure notifications are initialized
         if (!notificationService.isServiceInitialized()) {
-          await notificationService.initializeNotifications();
+          // Check if user has declined before initializing
+          const userDeclined =
+            await notificationService.hasUserDeclinedNotifications();
+          if (!userDeclined) {
+            await notificationService.initializeNotifications();
+          }
         }
 
         // Get FCM token (this will fetch from Firebase if not cached)
