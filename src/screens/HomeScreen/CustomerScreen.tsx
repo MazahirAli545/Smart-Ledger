@@ -4,6 +4,7 @@ import React, {
   useLayoutEffect,
   useRef,
   useCallback,
+  useMemo,
 } from 'react';
 import {
   View,
@@ -265,6 +266,8 @@ interface FilterOptions {
   hasPhone: 'all' | 'yes' | 'no';
   hasGST: 'all' | 'yes' | 'no';
 }
+
+const PAGE_SIZE = 20;
 
 const CustomerScreen: React.FC = () => {
   // Screen tracking hook
@@ -596,6 +599,10 @@ const CustomerScreen: React.FC = () => {
   });
   const [refreshKey, setRefreshKey] = useState(0); // Force re-render key
 
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [customers.length, activeTab]);
+
   // Business Information Modal State
   const [showBusinessInfoModal, setShowBusinessInfoModal] = useState(false);
   const [businessInfoForm, setBusinessInfoForm] = useState({
@@ -609,6 +616,8 @@ const CustomerScreen: React.FC = () => {
   });
   const [businessInfoSaving, setBusinessInfoSaving] = useState(false);
   const [checkingBusinessInfo, setCheckingBusinessInfo] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   // Ref to track last button press time for debouncing
   const lastAddCustomerPressRef = useRef<number>(0);
@@ -921,7 +930,8 @@ const CustomerScreen: React.FC = () => {
           // Ensure notifications are initialized
           if (!notificationService.isServiceInitialized()) {
             // Check if user has declined before initializing
-            const userDeclined = await notificationService.hasUserDeclinedNotifications();
+            const userDeclined =
+              await notificationService.hasUserDeclinedNotifications();
             if (userDeclined) {
               console.log(
                 '⚠️ CustomerScreen: User has declined notification permission - skipping initialization',
@@ -3961,11 +3971,26 @@ const CustomerScreen: React.FC = () => {
   // Apply strict deduplication to prevent any duplicate IDs
   const filteredCustomers = dedupeCustomers(rawFilteredCustomers);
 
+  useEffect(() => {
+    setVisibleCount(prev =>
+      Math.min(prev, filteredCustomers.length || PAGE_SIZE),
+    );
+  }, [filteredCustomers.length]);
+
+  const paginatedCustomers = useMemo(
+    () => filteredCustomers.slice(0, visibleCount),
+    [filteredCustomers, visibleCount],
+  );
+
+  const hasMoreData = visibleCount < filteredCustomers.length;
+
   // Debug logging
   console.log('🔍 Current state:', {
     activeTab,
     customersCount: customers.length,
     filteredCount: filteredCustomers.length,
+    visibleCount,
+    paginatedCount: paginatedCustomers.length,
     error,
     searchQuery: searchQuery || 'none',
     sampleCustomers: customers.slice(0, 2).map(c => ({
@@ -4040,6 +4065,7 @@ const CustomerScreen: React.FC = () => {
       console.log(`🔄 Tab changing from ${activeTab} to ${tab}`);
       setActiveTab(tab);
       setSearchQuery('');
+      setVisibleCount(PAGE_SIZE);
       setFilterOptions({
         sortBy: 'name',
         sortOrder: 'asc',
@@ -4709,6 +4735,7 @@ const CustomerScreen: React.FC = () => {
   const applyFilters = (newFilters: FilterOptions) => {
     setFilterOptions(newFilters);
     setShowFilterModal(false);
+    setVisibleCount(PAGE_SIZE);
   };
 
   // Enhanced filter modal with professional design
@@ -5050,6 +5077,7 @@ const CustomerScreen: React.FC = () => {
                   hasGST: 'all',
                 });
                 setSearchQuery('');
+                setVisibleCount(PAGE_SIZE);
               }}
             >
               <MaterialCommunityIcons
@@ -5220,8 +5248,8 @@ const CustomerScreen: React.FC = () => {
   // Safety wrapper for rendering customer items
   const renderCustomerList = () => {
     try {
-      if (!Array.isArray(filteredCustomers)) {
-        console.warn('Filtered customers is not an array:', filteredCustomers);
+      if (!Array.isArray(paginatedCustomers)) {
+        console.warn('Filtered customers is not an array:', paginatedCustomers);
         return (
           <View style={styles.emptyContainer}>
             <MaterialCommunityIcons
@@ -5238,10 +5266,10 @@ const CustomerScreen: React.FC = () => {
       // STRICT Deduplication: Remove ALL duplicates by ID
       // This is critical to prevent React duplicate key errors
       const seenIds = new Set<string | number>();
-      const uniqueCustomers: typeof filteredCustomers = [];
+      const uniqueCustomers: typeof paginatedCustomers = [];
       let duplicateCount = 0;
 
-      filteredCustomers.forEach((customer, originalIndex) => {
+      paginatedCustomers.forEach((customer, originalIndex) => {
         if (!customer || typeof customer !== 'object') return;
 
         const id = customer.id;
@@ -5308,11 +5336,11 @@ const CustomerScreen: React.FC = () => {
         .filter(Boolean); // Remove any null/undefined items
 
       // Log deduplication results for debugging
-      if (uniqueCustomers.length !== filteredCustomers.length) {
+      if (uniqueCustomers.length !== paginatedCustomers.length) {
         console.log('🔍 Deduplication removed duplicates:', {
-          original: filteredCustomers.length,
+          original: paginatedCustomers.length,
           afterDedup: uniqueCustomers.length,
-          removed: filteredCustomers.length - uniqueCustomers.length,
+          removed: paginatedCustomers.length - uniqueCustomers.length,
         });
       }
 
@@ -5466,11 +5494,19 @@ const CustomerScreen: React.FC = () => {
                 'Search by name, location, phone, GST...'
               }
               value={searchQuery}
-              onChangeText={setSearchQuery}
+              onChangeText={text => {
+                setSearchQuery(text);
+                setVisibleCount(PAGE_SIZE);
+              }}
               placeholderTextColor="#666666"
             />
             {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={() => setSearchQuery('')}>
+              <TouchableOpacity
+                onPress={() => {
+                  setSearchQuery('');
+                  setVisibleCount(PAGE_SIZE);
+                }}
+              >
                 <MaterialCommunityIcons
                   name="close-circle"
                   size={20}
@@ -5594,6 +5630,20 @@ const CustomerScreen: React.FC = () => {
     }
   };
 
+  const handleLoadMore = () => {
+    if (isLoadingMore || !hasMoreData) return;
+    setIsLoadingMore(true);
+    requestAnimationFrame(() => {
+      setVisibleCount(prev =>
+        Math.min(
+          prev + PAGE_SIZE,
+          filteredCustomers.length || prev + PAGE_SIZE,
+        ),
+      );
+      setIsLoadingMore(false);
+    });
+  };
+
   // Main render function with error boundary
   const renderMainContent = () => {
     try {
@@ -5706,7 +5756,7 @@ const CustomerScreen: React.FC = () => {
             <View style={styles.customerList}>
               <PartyList
                 items={
-                  (filteredCustomers || []).map((it: any) => {
+                  (paginatedCustomers || []).map((it: any) => {
                     const raw = String(
                       it?.phoneNumber || it?.partyPhone || it?.phone || '',
                     );
@@ -5731,6 +5781,9 @@ const CustomerScreen: React.FC = () => {
                     console.error('Navigation error:', e);
                   }
                 }}
+                onEndReached={handleLoadMore}
+                isLoadingMore={isLoadingMore}
+                hasMore={hasMoreData}
               />
             </View>
           </ScrollView>

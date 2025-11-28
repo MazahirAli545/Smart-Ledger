@@ -45,6 +45,7 @@ import SubscriptionPlanScreen from './src/screens/SubscriptionPlanScreen';
 import NotificationScreen from './src/screens/HomeScreen/NotificationScreen';
 import ReportsScreen from './src/screens/ReportsScreen';
 import LinkToCAScreen from './src/screens/LinkToCAScreen';
+import TallyScreen from './src/screens/TallyScreen';
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useAuth } from './src/context/AuthContext';
@@ -290,6 +291,7 @@ const AppStack = () => {
             <Stack.Screen name="Notifications" component={NotificationScreen} />
             <Stack.Screen name="Report" component={ReportsScreen} />
             <Stack.Screen name="LinkToCA" component={LinkToCAScreen} />
+            <Stack.Screen name="Tally" component={TallyScreen} />
           </Stack.Navigator>
         </GlobalTransactionLimitWrapper>
       </GlobalPlanExpiryWrapper>

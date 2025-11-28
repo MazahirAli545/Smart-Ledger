@@ -63,6 +63,7 @@ const CARD_WIDTH = Math.max(
   SCREEN_WIDTH - (LIST_SIDE_PADDING + RIGHT_PADDING),
 );
 const H_PADDING = LIST_SIDE_PADDING; // left padding
+const HISTORY_PAGE_SIZE = 10;
 
 const PHONEPE_GATEWAY_ERROR_PATTERNS = [
   'something went wrong',
@@ -268,6 +269,7 @@ const PlansCarousel: React.FC<{
   planActionLoading: string | null;
   paymentError: string | null;
   successMessage: string;
+  successPlanId: string | null;
   onPlanPress: (plan: any) => void;
   setSelectedPlanId: (id: string) => void;
   getPlanIcon: (name: string) => string;
@@ -281,6 +283,7 @@ const PlansCarousel: React.FC<{
   planActionLoading,
   paymentError,
   successMessage,
+  successPlanId,
   onPlanPress,
   setSelectedPlanId,
   getPlanIcon,
@@ -294,101 +297,117 @@ const PlansCarousel: React.FC<{
   const [isInitialized, setIsInitialized] = useState(false);
 
   const PlanSlide = React.memo(
-    ({ plan, isCurrent, isUpgradeTier, isDowngradeTier, onPress }: any) => (
-      <View style={[styles.slide, getPlanCardStyle(plan.name)]}>
-        <View style={styles.planIconContainer}>
-          <MaterialCommunityIcons
-            name={getPlanIcon(plan.name)}
-            size={28}
-            color={getPlanColor(plan.name)}
-          />
-        </View>
-        <Text style={styles.planSummaryName}>{plan.name}</Text>
-        <Text style={styles.planSubtitle}>{getPlanFeature(plan.name)}</Text>
-        <View style={styles.priceContainer}>
-          <Text style={styles.planSummaryPrice}>
-            ₹{plan.price.toLocaleString('en-IN')}
-          </Text>
-          <Text style={styles.planSummaryPeriod}>/{plan.period}</Text>
-        </View>
-        <View style={styles.featuresListCompact}>
-          {(plan.features || [])
-            .slice(0, 4)
-            .map((feature: string, index: number) => (
-              <View key={index} style={styles.featureItemCompact}>
-                <MaterialCommunityIcons
-                  name="check"
-                  size={18}
-                  color="#28a745"
-                />
-                <Text style={styles.featureTextCompact}>{feature}</Text>
-              </View>
-            ))}
-        </View>
-        <View style={styles.cardDivider} />
-        <TouchableOpacity
-          style={[
-            styles.planButton,
-            styles.planButtonFull,
-            isCurrent && styles.currentPlanButton,
-            isUpgradeTier && styles.upgradeButton,
-            isDowngradeTier && styles.downgradeButton,
-            !isCurrent &&
-              !isUpgradeTier &&
-              !isDowngradeTier &&
-              styles.contactButton,
-            paymentProcessing && styles.processingButton,
-            planActionLoading === plan.id && styles.processingButton,
-          ]}
-          onPress={onPress}
-          disabled={
-            isCurrent || paymentProcessing || planActionLoading === plan.id
-          }
-        >
-          {paymentProcessing || planActionLoading === plan.id ? (
-            <View style={styles.processingButtonContent}>
-              <ActivityIndicator size="small" color="#fff" />
-              <Text style={styles.processingButtonText}>Processing...</Text>
-            </View>
-          ) : (
-            <Text
-              style={[
-                styles.planButtonText,
-                isCurrent && styles.currentPlanButtonText,
-              ]}
-            >
-              {isCurrent
-                ? 'Current Plan'
-                : isUpgradeTier
-                ? 'Upgrade Now'
-                : isDowngradeTier
-                ? 'Downgrade'
-                : 'Choose Plan'}
+    ({
+      plan,
+      isCurrent,
+      isUpgradeTier,
+      isDowngradeTier,
+      successPlanId,
+      onPress,
+    }: any) => {
+      const planIdentifier =
+        plan?.id != null ? String(plan.id) : plan?.name || '';
+      const matchesSuccess =
+        !!successMessage &&
+        !!successPlanId &&
+        (successPlanId === planIdentifier ||
+          successPlanId === (plan?.name || ''));
+      return (
+        <View style={[styles.slide, getPlanCardStyle(plan.name)]}>
+          <View style={styles.planIconContainer}>
+            <MaterialCommunityIcons
+              name={getPlanIcon(plan.name)}
+              size={28}
+              color={getPlanColor(plan.name)}
+            />
+          </View>
+          <Text style={styles.planSummaryName}>{plan.name}</Text>
+          <Text style={styles.planSubtitle}>{getPlanFeature(plan.name)}</Text>
+          <View style={styles.priceContainer}>
+            <Text style={styles.planSummaryPrice}>
+              ₹{plan.price.toLocaleString('en-IN')}
             </Text>
+            <Text style={styles.planSummaryPeriod}>/{plan.period}</Text>
+          </View>
+          <View style={styles.featuresListCompact}>
+            {(plan.features || [])
+              .slice(0, 4)
+              .map((feature: string, index: number) => (
+                <View key={index} style={styles.featureItemCompact}>
+                  <MaterialCommunityIcons
+                    name="check"
+                    size={18}
+                    color="#28a745"
+                  />
+                  <Text style={styles.featureTextCompact}>{feature}</Text>
+                </View>
+              ))}
+          </View>
+          <View style={styles.cardDivider} />
+          <TouchableOpacity
+            style={[
+              styles.planButton,
+              styles.planButtonFull,
+              isCurrent && styles.currentPlanButton,
+              isUpgradeTier && styles.upgradeButton,
+              isDowngradeTier && styles.downgradeButton,
+              !isCurrent &&
+                !isUpgradeTier &&
+                !isDowngradeTier &&
+                styles.contactButton,
+              paymentProcessing && styles.processingButton,
+              planActionLoading === plan.id && styles.processingButton,
+            ]}
+            onPress={onPress}
+            disabled={
+              isCurrent || paymentProcessing || planActionLoading === plan.id
+            }
+          >
+            {paymentProcessing || planActionLoading === plan.id ? (
+              <View style={styles.processingButtonContent}>
+                <ActivityIndicator size="small" color="#fff" />
+                <Text style={styles.processingButtonText}>Processing...</Text>
+              </View>
+            ) : (
+              <Text
+                style={[
+                  styles.planButtonText,
+                  isCurrent && styles.currentPlanButtonText,
+                ]}
+              >
+                {isCurrent
+                  ? 'Current Plan'
+                  : isUpgradeTier
+                  ? 'Upgrade Now'
+                  : isDowngradeTier
+                  ? 'Downgrade'
+                  : 'Choose Plan'}
+              </Text>
+            )}
+          </TouchableOpacity>
+          {false && paymentError && (
+            <View style={styles.errorContainer}>
+              <MaterialCommunityIcons
+                name="alert-circle"
+                size={20}
+                color="#dc3545"
+              />
+              <Text style={styles.errorText}>{paymentError}</Text>
+            </View>
           )}
-        </TouchableOpacity>
-        {false && paymentError && (
-          <View style={styles.errorContainer}>
-            <MaterialCommunityIcons
-              name="alert-circle"
-              size={20}
-              color="#dc3545"
-            />
-            <Text style={styles.errorText}>{paymentError}</Text>
-          </View>
-        )}
-        {successMessage && (
-          <View style={styles.successContainer}>
-            <MaterialCommunityIcons
-              name="check-circle"
-              size={20}
-              color="#28a745"
-            />
-            <Text style={styles.successText}>{successMessage}</Text>
-          </View>
-        )}
-      </View>
-    ),
+          {successMessage && matchesSuccess && (
+            <View style={styles.successContainer}>
+              <MaterialCommunityIcons
+                name="check-circle"
+                size={20}
+                color="#28a745"
+              />
+              <Text style={styles.successText}>{successMessage}</Text>
+            </View>
+          )}
+        </View>
+      );
+    },
   );
 
   const getScrollPosition = (index: number) => index * (CARD_WIDTH + CARD_GAP);
@@ -536,6 +555,7 @@ const PlansCarousel: React.FC<{
               isCurrent={isCurrent}
               isUpgradeTier={isUpgradeTier}
               isDowngradeTier={isDowngradeTier}
+              successPlanId={successPlanId}
               onPress={() => {
                 if (plan?.id) setSelectedPlanId(plan.id);
                 const action = isCurrent
@@ -674,6 +694,7 @@ const SubscriptionPlanScreen: React.FC = () => {
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
+  const [successPlanId, setSuccessPlanId] = useState<string | null>(null);
   const [paymentProcessing, setPaymentProcessing] = useState(false);
 
   // New state for API data
@@ -685,6 +706,9 @@ const SubscriptionPlanScreen: React.FC = () => {
   const [billingHistory, setBillingHistory] = useState<BillingHistoryItem[]>(
     [],
   );
+  const [visibleHistoryCount, setVisibleHistoryCount] =
+    useState(HISTORY_PAGE_SIZE);
+  const [historyPaginating, setHistoryPaginating] = useState(false);
   const [apiLoading, setApiLoading] = useState(false);
   const [userPermissions, setUserPermissions] = useState<string[] | null>(null);
   const [nextBillingDateApi, setNextBillingDateApi] = useState<string | null>(
@@ -698,6 +722,28 @@ const SubscriptionPlanScreen: React.FC = () => {
   const [planActionLoading, setPlanActionLoading] = useState<string | null>(
     null,
   );
+
+  const nonPendingBillingHistory = useMemo(() => {
+    return billingHistory
+      .filter(x => (x.status || '').toLowerCase() !== 'pending')
+      .slice()
+      .sort(
+        (a, b) =>
+          new Date(b.billingDate).getTime() - new Date(a.billingDate).getTime(),
+      );
+  }, [billingHistory]);
+
+  const paginatedBillingHistory = useMemo(
+    () => nonPendingBillingHistory.slice(0, visibleHistoryCount),
+    [nonPendingBillingHistory, visibleHistoryCount],
+  );
+
+  const hasMoreBillingHistory =
+    visibleHistoryCount < nonPendingBillingHistory.length;
+
+  useEffect(() => {
+    setVisibleHistoryCount(HISTORY_PAGE_SIZE);
+  }, [billingHistory]);
 
   // Payment details state
   const [showPaymentDetails, setShowPaymentDetails] = useState(false);
@@ -1333,6 +1379,7 @@ const SubscriptionPlanScreen: React.FC = () => {
     async (plan: PlanDisplayData) => {
       if (!isMountedRef.current || !plan?.name) return;
 
+      setSuccessPlanId(plan?.id != null ? String(plan.id) : plan.name || null);
       setSuccessMessage(
         `Payment completed! Your plan has been successfully upgraded to ${plan.name}!`,
       );
@@ -1647,6 +1694,85 @@ const SubscriptionPlanScreen: React.FC = () => {
       return `₹${Number(value || 0).toFixed(2)}`;
     }
   };
+
+  const handleLoadMoreHistory = () => {
+    if (!hasMoreBillingHistory || historyPaginating) {
+      return;
+    }
+    setHistoryPaginating(true);
+    setTimeout(() => {
+      setVisibleHistoryCount(prev =>
+        Math.min(prev + HISTORY_PAGE_SIZE, nonPendingBillingHistory.length),
+      );
+      setHistoryPaginating(false);
+    }, 200);
+  };
+
+  const renderBillingHistoryItem = ({
+    item: invoice,
+    index,
+  }: {
+    item: BillingHistoryItem;
+    index: number;
+  }) => (
+    <View style={styles.billingHistoryItem}>
+      <View style={styles.billingHistoryItemHeader}>
+        <Text style={styles.billingHistoryItemTitle}>
+          {invoice.invoiceNumber}
+        </Text>
+        <View
+          style={[
+            styles.billingHistoryItemStatus,
+            { backgroundColor: getStatusColor(invoice.status) },
+          ]}
+        >
+          <Text style={styles.billingHistoryItemStatusText}>
+            {invoice.status}
+          </Text>
+        </View>
+      </View>
+      <Text style={styles.billingHistoryItemPlan}>
+        {invoice.displayPlanName
+          ? `${invoice.displayPlanName} - ${invoice.billingPeriod}`
+          : `${invoice.planName} - ${invoice.billingPeriod}`}
+      </Text>
+      <View style={styles.billingHistoryItemFooter}>
+        <Text style={styles.billingHistoryItemAmount}>
+          {formatINR(
+            typeof invoice.amountRupees === 'number'
+              ? invoice.amountRupees
+              : Number(invoice.amount || 0),
+          )}
+        </Text>
+        <Text style={styles.billingHistoryItemDate}>
+          {invoice.billingDate
+            ? new Date(invoice.billingDate).toLocaleDateString()
+            : '--'}
+        </Text>
+        {index === 0 && (
+          <TouchableOpacity
+            style={styles.viewPaymentButton}
+            onPress={() => {
+              const derivedId =
+                (invoice as any).paymentId ||
+                (invoice as any).lookupId ||
+                (invoice as any).razorpayPaymentId ||
+                (invoice as any).razorpay_payment_id ||
+                (invoice as any).razorpayOrderId ||
+                (invoice as any).razorpay_order_id ||
+                invoice.invoiceNumber;
+              if (derivedId) {
+                fetchPaymentDetails(String(derivedId));
+              }
+            }}
+          >
+            <MaterialCommunityIcons name="eye" size={14} color="#4f8cff" />
+            <Text style={styles.viewPaymentButtonText}>Details</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    </View>
+  );
 
   // Get the currently selected plan for detailed view with better null safety
   const getSelectedPlan = () => {
@@ -3663,6 +3789,9 @@ const SubscriptionPlanScreen: React.FC = () => {
               const success = await contextUpgradePlan(plan.id);
               if (success) {
                 if (isMountedRef.current) {
+                  setSuccessPlanId(
+                    plan.id != null ? String(plan.id) : plan.name || null,
+                  );
                   setSuccessMessage(
                     `Successfully upgraded to ${plan.name} plan!`,
                   );
@@ -3787,6 +3916,9 @@ const SubscriptionPlanScreen: React.FC = () => {
         try {
           const success = await contextUpgradePlan(plan.id);
           if (success) {
+            setSuccessPlanId(
+              plan.id != null ? String(plan.id) : plan.name || null,
+            );
             setSuccessMessage(`Successfully upgraded to ${plan.name} plan!`);
             setShowSuccessModal(true);
 
@@ -3984,6 +4116,9 @@ const SubscriptionPlanScreen: React.FC = () => {
 
           if (!requiresPayment) {
             console.log('✅ Upgrade completed on backend without payment');
+            setSuccessPlanId(
+              plan.id != null ? String(plan.id) : plan.name || null,
+            );
             setSuccessMessage(
               `Your plan has been upgraded to ${plan.name} successfully!`,
             );
@@ -5083,9 +5218,16 @@ const SubscriptionPlanScreen: React.FC = () => {
               '📡 Fallback: POST /subscriptions/upgrade (downgrade pathway)',
             );
             // Use unified API
-            const res = await unifiedApi.post('/subscriptions/upgrade', {
+            const downgradePayload = {
               planId: numericPlanId,
-            });
+              action: 'downgrade',
+              targetPlanName: plan.name || null,
+              previousPlanName: currentSubscription?.planName || null,
+            };
+            const res = await unifiedApi.post(
+              '/subscriptions/upgrade',
+              downgradePayload,
+            );
             console.log('📡 Downgrade (upgrade endpoint) response:', res);
 
             // Check if response indicates success
@@ -5093,6 +5235,8 @@ const SubscriptionPlanScreen: React.FC = () => {
             const responseData = (res as any)?.data ?? res;
             success = !!(
               responseData?.success ||
+              responseData?.downgrade === true ||
+              responseData?.subscription ||
               responseData?.id ||
               responseData?.subscriptionId ||
               (responseData &&
@@ -5153,7 +5297,10 @@ const SubscriptionPlanScreen: React.FC = () => {
 
       // Only show success if operation actually succeeded
       if (success) {
-        setSuccessMessage(`Successfully downgraded to ${plan.name} plan!`);
+        setSuccessPlanId(String(numericPlanId));
+        setSuccessMessage(
+          `Successfully downgraded to ${plan.name} plan!\nNote: Amounts already paid are not refunded.`,
+        );
         setShowSuccessModal(true);
 
         // Show plan update notification for downgrade
@@ -5248,6 +5395,7 @@ const SubscriptionPlanScreen: React.FC = () => {
 
         setPaymentError(finalErrorMessage);
         setSuccessMessage(''); // Clear success message if error occurs
+        setSuccessPlanId(null);
         setShowSuccessModal(false); // Hide success modal if error occurs
 
         showAlert({
@@ -5275,6 +5423,7 @@ const SubscriptionPlanScreen: React.FC = () => {
 
       setPaymentError(finalErrorMessage);
       setSuccessMessage(''); // Clear success message if error occurs
+      setSuccessPlanId(null);
       setShowSuccessModal(false); // Hide success modal if error occurs
 
       showAlert({
@@ -5878,113 +6027,9 @@ const SubscriptionPlanScreen: React.FC = () => {
         <View style={styles.billingHistorySection}>
           <View style={styles.billingHistoryHeader}>
             <Text style={styles.billingHistoryTitle}>Billing History</Text>
-            {false && (
-              <TouchableOpacity
-                style={styles.refreshHistoryButton}
-                onPress={refreshBillingData}
-              >
-                <Text style={styles.refreshHistoryText}>Refresh</Text>
-              </TouchableOpacity>
-            )}
           </View>
 
-          {(() => {
-            const historyItems = billingHistory
-              .filter(x => (x.status || '').toLowerCase() !== 'pending')
-              .slice()
-              .sort(
-                (a, b) =>
-                  new Date(b.billingDate).getTime() -
-                  new Date(a.billingDate).getTime(),
-              );
-            if (historyItems.length === 0) return null as any;
-            const content = (
-              <View style={styles.billingHistoryList}>
-                {historyItems.map((invoice, index) => (
-                  <View key={invoice.id} style={styles.billingHistoryItem}>
-                    <View style={styles.billingHistoryItemHeader}>
-                      <Text style={styles.billingHistoryItemTitle}>
-                        {invoice.invoiceNumber}
-                      </Text>
-                      <View
-                        style={[
-                          styles.billingHistoryItemStatus,
-                          { backgroundColor: getStatusColor(invoice.status) },
-                        ]}
-                      >
-                        <Text style={styles.billingHistoryItemStatusText}>
-                          {invoice.status}
-                        </Text>
-                      </View>
-                    </View>
-                    <Text style={styles.billingHistoryItemPlan}>
-                      {invoice.displayPlanName
-                        ? `${invoice.displayPlanName} - ${invoice.billingPeriod}`
-                        : `${invoice.planName} - ${invoice.billingPeriod}`}
-                    </Text>
-                    <View style={styles.billingHistoryItemFooter}>
-                      <Text style={styles.billingHistoryItemAmount}>
-                        {formatINR(
-                          typeof invoice.amountRupees === 'number'
-                            ? invoice.amountRupees
-                            : Number(invoice.amount || 0),
-                        )}
-                      </Text>
-                      <Text style={styles.billingHistoryItemDate}>
-                        {new Date(invoice.billingDate).toLocaleDateString()}
-                      </Text>
-
-                      {/* View Payment Details Button (only for newest subscription payment) */}
-                      {index === 0 && (
-                        <TouchableOpacity
-                          style={styles.viewPaymentButton}
-                          onPress={() => {
-                            // Derive a reliable key for fetching details
-                            const derivedId =
-                              (invoice as any).paymentId ||
-                              (invoice as any).lookupId ||
-                              (invoice as any).razorpayPaymentId ||
-                              (invoice as any).razorpay_payment_id ||
-                              (invoice as any).razorpayOrderId ||
-                              (invoice as any).razorpay_order_id ||
-                              invoice.invoiceNumber;
-                            if (derivedId) {
-                              fetchPaymentDetails(String(derivedId));
-                            }
-                          }}
-                        >
-                          <MaterialCommunityIcons
-                            name="eye"
-                            size={14}
-                            color="#4f8cff"
-                          />
-                          <Text style={styles.viewPaymentButtonText}>
-                            Details
-                          </Text>
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                  </View>
-                ))}
-              </View>
-            );
-            if (historyItems.length > 3) {
-              return (
-                <ScrollView
-                  style={styles.billingHistoryScroll}
-                  contentContainerStyle={{ paddingBottom: 2 }}
-                  nestedScrollEnabled
-                  showsVerticalScrollIndicator
-                >
-                  {content}
-                </ScrollView>
-              ) as any;
-            }
-            return content as any;
-          })()}
-          {billingHistory.filter(
-            x => (x.status || '').toLowerCase() !== 'pending',
-          ).length === 0 ? (
+          {nonPendingBillingHistory.length === 0 ? (
             <View style={styles.noHistoryContainer}>
               <MaterialCommunityIcons
                 name="file-document-outline"
@@ -5998,7 +6043,24 @@ const SubscriptionPlanScreen: React.FC = () => {
                 Your invoices will appear here once generated.
               </Text>
             </View>
-          ) : null}
+          ) : (
+            <FlatList
+              data={paginatedBillingHistory}
+              renderItem={renderBillingHistoryItem}
+              keyExtractor={item => String(item.id)}
+              contentContainerStyle={styles.billingHistoryList}
+              showsVerticalScrollIndicator={false}
+              onEndReached={handleLoadMoreHistory}
+              onEndReachedThreshold={0.5}
+              ListFooterComponent={
+                historyPaginating ? (
+                  <View style={styles.historyLoadingMore}>
+                    <ActivityIndicator size="small" color="#4f8cff" />
+                  </View>
+                ) : null
+              }
+            />
+          )}
         </View>
 
         {/* Plans Slider (Carousel) */}
@@ -6025,6 +6087,7 @@ const SubscriptionPlanScreen: React.FC = () => {
               planActionLoading={planActionLoading}
               paymentError={suppressPaymentError ? null : paymentError}
               successMessage={successMessage}
+              successPlanId={successPlanId}
               onPlanPress={(plan: any) => handlePlanAction(plan)}
               setSelectedPlanId={(id: string) => setSelectedPlanId(id)}
               getPlanIcon={getPlanIcon}
@@ -7143,6 +7206,10 @@ const styles = StyleSheet.create({
   // Billing History List Styles
   billingHistoryList: {
     gap: 8,
+  },
+  historyLoadingMore: {
+    paddingVertical: 12,
+    alignItems: 'center',
   },
   billingHistoryItem: {
     backgroundColor: '#FFFFFF',

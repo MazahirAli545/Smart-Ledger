@@ -75,6 +75,8 @@ interface FolderProp {
   folder?: { id?: number; title?: string; icon?: string };
 }
 
+const PAYMENT_LIST_PAGE_SIZE = 25;
+
 const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   const { showAlert } = useAlert();
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
@@ -159,6 +161,10 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   const [apiPayments, setApiPayments] = useState<any[]>([]);
   const [loadingApi, setLoadingApi] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [visiblePaymentCount, setVisiblePaymentCount] = useState(
+    PAYMENT_LIST_PAGE_SIZE,
+  );
+  const [isPaymentPaginating, setIsPaymentPaginating] = useState(false);
   // 1. Add editingItem state
   const [editingItem, setEditingItem] = useState<any>(null);
   // FIX: Add the missing state variable and its setter function
@@ -2863,6 +2869,22 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     [apiPayments, searchFilter],
   );
 
+  const orderedPayments = useMemo(
+    () => [...filteredPayments].reverse(),
+    [filteredPayments],
+  );
+
+  const paginatedPayments = useMemo(
+    () => orderedPayments.slice(0, visiblePaymentCount),
+    [orderedPayments, visiblePaymentCount],
+  );
+
+  const hasMorePayments = visiblePaymentCount < orderedPayments.length;
+
+  useEffect(() => {
+    setVisiblePaymentCount(PAYMENT_LIST_PAGE_SIZE);
+  }, [filteredPayments]);
+
   // Map API status to badge color and label
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -3179,6 +3201,30 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     ),
     [],
   );
+
+  const handleLoadMorePayments = () => {
+    if (!hasMorePayments || isPaymentPaginating) {
+      return;
+    }
+    setIsPaymentPaginating(true);
+    setTimeout(() => {
+      setVisiblePaymentCount(prev =>
+        Math.min(prev + PAYMENT_LIST_PAGE_SIZE, orderedPayments.length),
+      );
+      setIsPaymentPaginating(false);
+    }, 200);
+  };
+
+  const renderPaymentListFooter = () => {
+    if (!isPaymentPaginating) {
+      return null;
+    }
+    return (
+      <View style={styles.listFooterLoader}>
+        <ActivityIndicator size="small" color="#4f8cff" />
+      </View>
+    );
+  };
 
   if (showCreateForm) {
     return (
@@ -5444,11 +5490,14 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           </Text>
         ) : (
           <FlatList
-            data={[...filteredPayments].reverse()}
+            data={paginatedPayments}
             renderItem={renderPaymentItem}
             keyExtractor={item => String(item.id)}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={{ paddingBottom: 100 }}
+            onEndReached={handleLoadMorePayments}
+            onEndReachedThreshold={0.5}
+            ListFooterComponent={renderPaymentListFooter}
           />
         )}
       </View>
@@ -5677,6 +5726,10 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
   listContainer: {
     flex: 1,
     padding: scale(16),
+  },
+  listFooterLoader: {
+    paddingVertical: scale(16),
+    alignItems: 'center',
   },
   addInvoiceButton: {
     position: 'absolute',

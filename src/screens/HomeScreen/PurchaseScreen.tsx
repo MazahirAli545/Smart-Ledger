@@ -1,4 +1,10 @@
-﻿import React, { useState, useRef, useEffect, useCallback } from 'react';
+﻿import React, {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  useMemo,
+} from 'react';
 import {
   View,
   Text,
@@ -117,6 +123,8 @@ const GST_OPTIONS = [0, 5, 12, 18, 28];
 interface FolderProp {
   folder?: { id?: number; title?: string; icon?: string };
 }
+
+const PURCHASE_LIST_PAGE_SIZE = 25;
 
 const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
   const folderName = folder?.title || 'Purchase';
@@ -240,6 +248,10 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
   const [loadingApi, setLoadingApi] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [visiblePurchaseCount, setVisiblePurchaseCount] = useState(
+    PURCHASE_LIST_PAGE_SIZE,
+  );
+  const [isPurchasePaginating, setIsPurchasePaginating] = useState(false);
   const [editingItem, setEditingItem] = useState<any>(null);
   const [description, setDescription] = useState('');
   const [focusedItemId, setFocusedItemId] = useState<string | null>(null);
@@ -1257,6 +1269,30 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
             <Text style={styles.syncButtonText}>Sync</Text>
           </TouchableOpacity>
         )}
+      </View>
+    );
+  };
+
+  const handleLoadMorePurchases = () => {
+    if (!hasMorePurchases || isPurchasePaginating) {
+      return;
+    }
+    setIsPurchasePaginating(true);
+    setTimeout(() => {
+      setVisiblePurchaseCount(prev =>
+        Math.min(prev + PURCHASE_LIST_PAGE_SIZE, orderedPurchases.length),
+      );
+      setIsPurchasePaginating(false);
+    }, 200);
+  };
+
+  const renderPurchaseFooter = () => {
+    if (!isPurchasePaginating) {
+      return null;
+    }
+    return (
+      <View style={styles.listFooterLoader}>
+        <ActivityIndicator size="small" color="#4f8cff" />
       </View>
     );
   };
@@ -3658,6 +3694,22 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
   // Update filtered purchases after all functions are defined
   const enhancedFilteredPurchases = getFilteredPurchases();
 
+  const orderedPurchases = useMemo(
+    () => [...enhancedFilteredPurchases].reverse(),
+    [enhancedFilteredPurchases],
+  );
+
+  const paginatedPurchases = useMemo(
+    () => orderedPurchases.slice(0, visiblePurchaseCount),
+    [orderedPurchases, visiblePurchaseCount],
+  );
+
+  const hasMorePurchases = visiblePurchaseCount < orderedPurchases.length;
+
+  useEffect(() => {
+    setVisiblePurchaseCount(PURCHASE_LIST_PAGE_SIZE);
+  }, [enhancedFilteredPurchases]);
+
   // Calculate filter badge count
   useEffect(() => {
     let count = 0;
@@ -5672,10 +5724,10 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
         {!loadingApi && !apiError && enhancedFilteredPurchases.length > 0 && (
           <FlatList
             key={`purchase-list-${refreshKey}-${forceUpdate}`}
-            data={[...enhancedFilteredPurchases].reverse()}
+            data={paginatedPurchases}
             renderItem={renderPurchaseItem}
             keyExtractor={item => `purchase-${item.id}-${refreshKey}`}
-            extraData={refreshKey + forceUpdate}
+            extraData={`${refreshKey}-${forceUpdate}-${visiblePurchaseCount}`}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={{ paddingBottom: 100 }}
             refreshControl={
@@ -5695,6 +5747,9 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
                 tintColor="#4f8cff"
               />
             }
+            onEndReached={handleLoadMorePurchases}
+            onEndReachedThreshold={0.5}
+            ListFooterComponent={renderPurchaseFooter}
           />
         )}
       </View>
@@ -6533,6 +6588,10 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
   listContainer: {
     flex: 1,
     padding: scale(16),
+  },
+  listFooterLoader: {
+    paddingVertical: scale(16),
+    alignItems: 'center',
   },
   addInvoiceButton: {
     position: 'absolute',

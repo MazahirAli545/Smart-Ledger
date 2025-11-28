@@ -39,7 +39,7 @@ import { useStatusBarWithGradient } from '../../hooks/useStatusBar';
 import { getStatusBarHeight } from 'react-native-status-bar-height';
 import {
   HEADER_CONTENT_HEIGHT,
-  getGradientHeaderStyle,
+  getSolidHeaderStyle,
 } from '../../utils/headerLayout';
 
 const { width } = Dimensions.get('window');
@@ -95,7 +95,7 @@ const ProfileScreen = () => {
   const navigation = useNavigation();
   const { showAlert } = useAlert();
 
-  // Configure StatusBar for gradient header
+  // Configure StatusBar for header
   const { statusBarSpacer } = useStatusBarWithGradient(
     'ProfileScreen',
     GRADIENT,
@@ -622,34 +622,29 @@ const ProfileScreen = () => {
 
   return (
     <View style={styles.container}>
-      {/* Seamless Header with Status Bar Integration */}
-      <LinearGradient
-        colors={GRADIENT}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 0 }}
+      {/* Header with Status Bar Integration - Matching other screens */}
+      <View
         style={[
           styles.header,
-          getGradientHeaderStyle(
-            preciseStatusBarHeight || statusBarSpacer.height,
-          ),
+          getSolidHeaderStyle(preciseStatusBarHeight || statusBarSpacer.height),
         ]}
       >
-        <View style={[styles.headerTop, { height: HEADER_CONTENT_HEIGHT }]}>
-          <TouchableOpacity
-            style={styles.backButton}
-            onPress={() => navigation.goBack()}
-          >
-            <MaterialCommunityIcons name="arrow-left" size={24} color="#fff" />
+        <View style={{ height: HEADER_CONTENT_HEIGHT }} />
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={() => navigation.goBack()}
+        >
+          <MaterialCommunityIcons name="arrow-left" size={24} color="#fff" />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>Profile</Text>
+        {!editMode && (
+          <TouchableOpacity style={styles.editButton} onPress={handleEdit}>
+            <MaterialCommunityIcons name="pencil" size={20} color="#fff" />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>Profile</Text>
-          {!editMode && (
-            <TouchableOpacity style={styles.editButton} onPress={handleEdit}>
-              <MaterialCommunityIcons name="pencil" size={20} color="#fff" />
-            </TouchableOpacity>
-          )}
-        </View>
+        )}
+      </View>
 
-        {/* Profile Header Section */}
+      <View style={styles.profileHeaderCard}>
         <View style={styles.profileHeader}>
           <View style={styles.profileImageContainer}>
             <DummyProfileImage size={68} />
@@ -662,21 +657,21 @@ const ProfileScreen = () => {
             </View>
           </View>
           <View style={styles.profileInfo}>
-            <Text style={styles.profileName}>
+            <Text style={styles.profileName} numberOfLines={1}>
               {user?.ownerName || 'User Name'}
             </Text>
-            <Text style={styles.profileBusiness}>
+            <Text style={styles.profileBusiness} numberOfLines={1}>
               {user?.businessName || 'Business Name'}
             </Text>
             <View style={styles.profileBadge}>
               <MaterialCommunityIcons name="crown" size={14} color="#FF7043" />
-              <Text style={styles.profileBadgeText}>
+              <Text style={styles.profileBadgeText} numberOfLines={1}>
                 {user?.planType || 'Free Member'}
               </Text>
             </View>
           </View>
         </View>
-      </LinearGradient>
+      </View>
 
       <SafeAreaView style={styles.scrollContainer} edges={['bottom']}>
         <KeyboardAwareScrollView
@@ -1179,8 +1174,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#f6fafc',
   },
   header: {
-    borderBottomLeftRadius: 32,
-    borderBottomRightRadius: 32,
+    backgroundColor: '#4f8cff',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.1,
@@ -1193,12 +1191,19 @@ const styles = StyleSheet.create({
   scrollContainer: {
     flex: 1,
   },
-  headerTop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 24,
-    paddingTop: 12,
+  profileHeaderCard: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    paddingHorizontal: 20,
+    marginHorizontal: 20,
+    paddingVertical: 16,
+    marginBottom: 20,
+    shadowColor: '#000',
+    shadowOpacity: 0.05,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 3,
+    marginTop: 10,
   },
   backButton: {
     padding: 8,
@@ -1258,7 +1263,7 @@ const styles = StyleSheet.create({
   profileHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 4,
+    paddingHorizontal: 0,
   },
   profileImageContainer: {
     position: 'relative',
@@ -1305,50 +1310,46 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   profileName: {
-    color: '#fff',
-    fontSize: 20,
+    color: '#222',
+    fontSize: 18,
     marginBottom: 6,
-    textShadowColor: 'rgba(0,0,0,0.1)',
-    textShadowOffset: { width: 0, height: 1 },
+    fontWeight: '700',
     fontFamily: 'Roboto-Medium',
-
-    textShadowRadius: 2,
   },
   profileBusiness: {
-    color: 'rgba(255,255,255,0.95)',
-    fontSize: 15,
+    color: '#666',
+    fontSize: 14,
     marginBottom: 8,
-
     fontFamily: 'Roboto-Medium',
   },
 
   profileBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.25)',
-    paddingHorizontal: 10,
+    backgroundColor: '#fff3e0',
+    paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 16,
     alignSelf: 'flex-start',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
+    borderWidth: 1,
+    borderColor: '#ffe0b2',
   },
   profileBadgeText: {
-    color: '#fff',
+    color: '#FF7043',
     fontSize: 13,
     marginLeft: 6,
-
+    fontWeight: '600',
     fontFamily: 'Roboto-Medium',
+    textTransform: 'capitalize',
   },
 
   scrollView: {
     flex: 1,
   },
   content: {
-    padding: 20,
+    paddingTop: 0,
+    paddingHorizontal: 20,
+    paddingBottom: 20,
   },
   successMessage: {
     flexDirection: 'row',

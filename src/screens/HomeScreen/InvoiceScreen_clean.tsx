@@ -1,4 +1,10 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  useMemo,
+} from 'react';
 import {
   View,
   Text,
@@ -85,6 +91,8 @@ interface InvoiceItem {
   amount: number;
   gstPct?: number;
 }
+
+const INVOICE_LIST_PAGE_SIZE = 25;
 
 const GST_OPTIONS = [0, 5, 12, 18, 28];
 
@@ -774,6 +782,10 @@ const InvoiceScreen: React.FC = () => {
   const [apiInvoices, setApiInvoices] = useState<Invoice[]>([]);
   const [loadingApi, setLoadingApi] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [visibleInvoiceCount, setVisibleInvoiceCount] = useState(
+    INVOICE_LIST_PAGE_SIZE,
+  );
+  const [isInvoicePaginating, setIsInvoicePaginating] = useState(false);
 
   // Get context values before defining functions that use them
   const { customers, add, fetchAll } = useCustomerContext();
@@ -3253,6 +3265,30 @@ const InvoiceScreen: React.FC = () => {
     </View>
   );
 
+  const handleLoadMoreInvoices = () => {
+    if (!hasMoreInvoices || isInvoicePaginating) {
+      return;
+    }
+    setIsInvoicePaginating(true);
+    setTimeout(() => {
+      setVisibleInvoiceCount(prev =>
+        Math.min(prev + INVOICE_LIST_PAGE_SIZE, orderedInvoices.length),
+      );
+      setIsInvoicePaginating(false);
+    }, 200);
+  };
+
+  const renderInvoiceFooter = () => {
+    if (!isInvoicePaginating) {
+      return null;
+    }
+    return (
+      <View style={styles.listFooterLoader}>
+        <ActivityIndicator size="small" color="#4f8cff" />
+      </View>
+    );
+  };
+
   const handleSync = async (item: any) => {
     if (!item || !item.id) return;
     try {
@@ -3455,6 +3491,22 @@ const InvoiceScreen: React.FC = () => {
       matchesDescription
     );
   });
+
+  const orderedInvoices = useMemo(
+    () => [...filteredInvoices].reverse(),
+    [filteredInvoices],
+  );
+
+  const paginatedInvoices = useMemo(
+    () => orderedInvoices.slice(0, visibleInvoiceCount),
+    [orderedInvoices, visibleInvoiceCount],
+  );
+
+  const hasMoreInvoices = visibleInvoiceCount < orderedInvoices.length;
+
+  useEffect(() => {
+    setVisibleInvoiceCount(INVOICE_LIST_PAGE_SIZE);
+  }, [filteredInvoices]);
 
   // Helper for pluralizing folder name
   const pluralize = (name: string) => {
@@ -5219,10 +5271,13 @@ const InvoiceScreen: React.FC = () => {
           </Text>
         ) : (
           <FlatList
-            data={[...filteredInvoices].reverse()}
+            data={paginatedInvoices}
             keyExtractor={item => item.id}
             renderItem={renderInvoiceItem}
             contentContainerStyle={{ paddingBottom: 100 }}
+            onEndReached={handleLoadMoreInvoices}
+            onEndReachedThreshold={0.5}
+            ListFooterComponent={renderInvoiceFooter}
           />
         )}
       </View>
@@ -5933,6 +5988,10 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
   listContainer: {
     flex: 1,
     padding: scale(16),
+  },
+  listFooterLoader: {
+    paddingVertical: scale(16),
+    alignItems: 'center',
   },
   addInvoiceButton: {
     position: 'absolute',

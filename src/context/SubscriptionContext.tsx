@@ -475,6 +475,22 @@ export const SubscriptionProvider: React.FC<{ children: ReactNode }> = ({
     }
   };
 
+  const buildDowngradePayload = (planId: string | number) => {
+    const normalizedPlanId = Number(planId);
+    const targetPlanMeta =
+      availablePlans.find(plan => {
+        const candidateId = Number((plan as any)?.id ?? (plan as any)?.planId);
+        return candidateId === normalizedPlanId;
+      }) ?? null;
+
+    return {
+      planId: normalizedPlanId,
+      action: 'downgrade',
+      targetPlanName: targetPlanMeta?.name ?? null,
+      previousPlanName: currentSubscription?.planName ?? null,
+    };
+  };
+
   const downgradePlan = async (planId: string): Promise<boolean> => {
     setLoading(true);
     setError(null);
@@ -485,9 +501,10 @@ export const SubscriptionProvider: React.FC<{ children: ReactNode }> = ({
       // Backend handles downgrade via the same upgrade endpoint
       // If the selected plan is cheaper, it switches immediately without payment
       // unifiedApi.post() returns response.data directly
-      const response = await unifiedApi.post('/subscriptions/upgrade', {
-        planId: parseInt(planId, 10),
-      });
+      const response = await unifiedApi.post(
+        '/subscriptions/upgrade',
+        buildDowngradePayload(planId),
+      );
 
       console.log(
         'Downgrade request sent (upgrade endpoint):',
@@ -501,6 +518,8 @@ export const SubscriptionProvider: React.FC<{ children: ReactNode }> = ({
       const responseData = (response as any)?.data ?? response;
       const isSuccess = !!(
         responseData?.success ||
+        responseData?.downgrade === true ||
+        responseData?.subscription ||
         responseData?.id ||
         responseData?.subscriptionId ||
         (responseData &&

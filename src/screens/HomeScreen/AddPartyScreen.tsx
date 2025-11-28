@@ -445,6 +445,18 @@ const AddPartyScreen: React.FC = () => {
     }
   }, [isEditMode, customerData?.voucherType]);
 
+  // Show message about API timing logs on screen load
+  useEffect(() => {
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('📊 [API TIMING] AddPartyScreen Loaded');
+    console.log(
+      '⏱️  API call timings will appear in the console when you submit the form',
+    );
+    console.log('🔍 Look for logs marked with [API CALL] and [TIMING]');
+    console.log('📋 A summary of all API timings will be shown at the end');
+    console.log('═══════════════════════════════════════════════════════════');
+  }, []);
+
   // Consolidated effect to prefill customer/supplier details on edit
   useEffect(() => {
     if (!isEditMode || !customerData) return;
@@ -592,10 +604,27 @@ const AddPartyScreen: React.FC = () => {
 
     if (!phoneNumber.trim()) {
       newErrors.phoneNumber = 'Phone number is required';
-    } else if (phoneNumber.trim().length < 10) {
-      newErrors.phoneNumber = 'Phone number must be at least 10 digits';
-    } else if (!/^\d+$/.test(phoneNumber.trim())) {
-      newErrors.phoneNumber = 'Phone number must contain only digits';
+    } else {
+      const phoneDigits = phoneNumber.trim().replace(/\D/g, '');
+      if (phoneDigits.length < 10) {
+        newErrors.phoneNumber = 'Phone number must be at least 10 digits';
+      } else {
+        // Normalize phone number (handle 91 prefix or leading 0)
+        const normalizedPhone =
+          phoneDigits.length === 12 && phoneDigits.startsWith('91')
+            ? phoneDigits.substring(2)
+            : phoneDigits.length === 11 && phoneDigits.startsWith('0')
+            ? phoneDigits.substring(1)
+            : phoneDigits;
+
+        if (normalizedPhone.length !== 10) {
+          newErrors.phoneNumber = 'Phone number must be exactly 10 digits';
+        } else if (!/^[6-9]/.test(normalizedPhone)) {
+          newErrors.phoneNumber = 'Phone number must start with 6, 7, 8, or 9';
+        } else if (!/^\d+$/.test(phoneNumber.trim())) {
+          newErrors.phoneNumber = 'Phone number must contain only digits';
+        }
+      }
     }
 
     if (!address.trim()) {
@@ -613,12 +642,39 @@ const AddPartyScreen: React.FC = () => {
     }
 
     setErrors(newErrors);
+
+    // If there's a phone number error, scroll to it
+    if (newErrors.phoneNumber) {
+      setTimeout(() => {
+        scrollToInputCenter(phoneNumberRef);
+      }, 100);
+    }
+
     return Object.keys(newErrors).length === 0;
   };
 
   const handleAddParty = async () => {
+    const overallStartTime = Date.now();
     setErrors({});
-    console.log('🔍 Starting party creation/update process...');
+
+    // Track all API call timings for final summary
+    const apiTimings: Array<{
+      name: string;
+      duration: number;
+      status: 'success' | 'failed' | 'skipped';
+    }> = [];
+
+    // Enhanced logging with console group for better visibility
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('🚀 [API TIMING] AddPartyScreen - API CALL TIMING LOGS');
+    console.log('📊 Watch this console for detailed API call timings!');
+    console.log('⏱️  All API call durations will be shown below:');
+    console.log('═══════════════════════════════════════════════════════════');
+    console.group('🚀 [API] AddPartyScreen - Starting Party Creation/Update');
+    console.log(
+      '🔍 [TIMING] Starting party creation/update process at',
+      new Date().toISOString(),
+    );
     console.log('📋 Current form state:', {
       partyName,
       phoneNumber,
@@ -629,42 +685,22 @@ const AddPartyScreen: React.FC = () => {
     });
     // unifiedApi handles base URL internally
 
+    const validationStartTime = Date.now();
     if (!validateForm()) {
       console.log('❌ Form validation failed');
       return;
     }
+    console.log(
+      '⏱️ [TIMING] Form validation took',
+      Date.now() - validationStartTime,
+      'ms',
+    );
     console.log('✅ Form validation passed');
     try {
-      // Guard: if monthly transaction limit reached, show modal and skip all API calls
-      try {
-        const accessTokenGuard = await AsyncStorage.getItem('accessToken');
-        if (accessTokenGuard) {
-          // Use unified API for transaction limits
-          const limitsData = (await unifiedApi.getTransactionLimits()) as {
-            canCreate?: boolean;
-          };
-          if (limitsData && limitsData.canCreate === false) {
-            try {
-              await forceShowPopup();
-            } catch {}
-            return;
-          }
-        }
-      } catch {}
-
+      // OPTIMIZATION: Show loading immediately for better UX
       setLoading(true);
 
-      // Check transaction limit before API call
-      try {
-        await forceCheckTransactionLimit();
-      } catch (limitError) {
-        console.warn('Transaction limit check failed:', limitError);
-        // Don't block the user if limit check fails
-        setSubscriptionError(
-          'Failed to fetch subscription data. You can still proceed.',
-        );
-      }
-
+      // OPTIMIZATION: Get access token first (needed for everything)
       const accessToken = await AsyncStorage.getItem('accessToken');
       if (!accessToken) {
         showCustomAlert(
@@ -672,66 +708,230 @@ const AddPartyScreen: React.FC = () => {
           'Authentication required. Please login again.',
           'error',
         );
+        setLoading(false);
         return;
       }
 
-      // RBAC: Check permissions but don't block if we can't determine them
-      try {
-        const perms = await ensurePermissions(accessToken);
-        const requiredPerm =
-          partyType === 'supplier' ? 'supplier:create' : 'customer:create';
-
-        // Only block if we have permissions loaded and the required one is missing
-        if (
-          Array.isArray(perms) &&
-          perms.length > 0 &&
-          !hasPermission(perms, requiredPerm)
-        ) {
-          const msg = `You don't have permission to add a ${partyType}. Required: ${requiredPerm}.`;
-          setRbacBlockedMsg(msg);
-          showCustomAlert('Create Error', msg, 'error');
-          return; // Prevent API call explicitly forbidden by RBAC
+      // OPTIMIZATION: Start limit check in background (completely non-blocking)
+      // Don't wait for it - proceed with POST call immediately
+      // Backend will enforce limits, we just show popup if cached data shows limit reached
+      (async () => {
+        try {
+          const limitCheckStartTime = Date.now();
+          // Use unified API for transaction limits (cached for 2 minutes)
+          const limitsData = (await unifiedApi.getTransactionLimits()) as {
+            canCreate?: boolean;
+          };
+          const limitCheckDuration = Date.now() - limitCheckStartTime;
+          console.log(
+            '⏱️ [TIMING] Transaction limit check (background) took',
+            limitCheckDuration,
+            'ms',
+          );
+          if (limitsData && limitsData.canCreate === false) {
+            try {
+              await forceShowPopup();
+            } catch {}
+          }
+        } catch (err) {
+          console.warn('Transaction limit check error (non-blocking):', err);
         }
+      })();
 
-        // If perms are empty or unavailable, proceed with API call; backend will decide
-        console.log('✅ Permission check passed, proceeding with API call');
-      } catch (permErr) {
-        console.warn('Permission check error:', permErr);
-        // Don't block user if permission check fails - let backend handle it
+      // OPTIMIZATION: Fast permission check - use cache only, don't block
+      const requiredPerm =
+        partyType === 'supplier' ? 'supplier:create' : 'customer:create';
+
+      // Fast path: Check cached permissions first (no API call)
+      if (
+        Array.isArray(userPermissions) &&
+        userPermissions.length > 0 &&
+        !hasPermission(userPermissions, requiredPerm)
+      ) {
+        const msg = `You don't have permission to add a ${partyType}. Required: ${requiredPerm}.`;
+        setRbacBlockedMsg(msg);
+        showCustomAlert('Create Error', msg, 'error');
+        setLoading(false);
+        return; // Prevent API call explicitly forbidden by RBAC
+      }
+
+      // OPTIMIZATION: Run permission check in background if not cached (non-blocking)
+      if (!Array.isArray(userPermissions) || userPermissions.length === 0) {
+        ensurePermissions(accessToken)
+          .then(perms => {
+            if (
+              Array.isArray(perms) &&
+              perms.length > 0 &&
+              !hasPermission(perms, requiredPerm)
+            ) {
+              console.warn(
+                '⚠️ Permission check failed after API call started - backend will handle',
+              );
+            }
+          })
+          .catch(permErr => {
+            console.warn('Permission check error (non-blocking):', permErr);
+          });
         console.log(
-          '⚠️ Proceeding with API call despite permission check failure',
+          '⚠️ Permissions not cached, proceeding - backend will authorize',
+        );
+      } else {
+        console.log(
+          '✅ Permission check passed (from cache), proceeding with API call',
         );
       }
-
-      console.log('🔑 Access Token exists:', !!accessToken);
-      console.log(
-        '🔑 Access Token preview:',
-        accessToken ? `${accessToken.substring(0, 20)}...` : 'None',
-      );
       if (isEditMode) {
         console.log('🔄 Edit mode detected, calling handleUpdateParty');
-        await handleUpdateParty(accessToken);
+        const updateStartTime = Date.now();
+        await handleUpdateParty(accessToken, apiTimings);
+        const updateDuration = Date.now() - updateStartTime;
+        apiTimings.push({
+          name: 'handleUpdateParty (total)',
+          duration: updateDuration,
+          status: 'success',
+        });
+        console.log(
+          '⏱️ [TIMING] handleUpdateParty completed in',
+          updateDuration,
+          'ms',
+        );
       } else {
         console.log('🆕 Create mode detected, calling handleCreateParty');
-        await handleCreateParty(accessToken);
+        const createStartTime = Date.now();
+        await handleCreateParty(accessToken, apiTimings);
+        const createDuration = Date.now() - createStartTime;
+        apiTimings.push({
+          name: 'handleCreateParty (total)',
+          duration: createDuration,
+          status: 'success',
+        });
+        console.log(
+          '⏱️ [TIMING] handleCreateParty completed in',
+          createDuration,
+          'ms',
+        );
       }
+      const overallDuration = Date.now() - overallStartTime;
+      console.groupEnd();
+      console.log(
+        '═══════════════════════════════════════════════════════════',
+      );
+      console.log('📊 [API TIMING SUMMARY] - ALL API CALLS');
+      console.log(
+        '═══════════════════════════════════════════════════════════',
+      );
+
+      // Display all API call timings
+      if (apiTimings.length > 0) {
+        console.log('📋 API Call Timings:');
+        apiTimings.forEach((timing, index) => {
+          const statusIcon =
+            timing.status === 'success'
+              ? '✅'
+              : timing.status === 'failed'
+              ? '❌'
+              : '⏭️';
+          const slowWarning = timing.duration > 2000 ? ' ⚠️ SLOW!' : '';
+          console.log(
+            `  ${index + 1}. ${statusIcon} ${timing.name}: ${
+              timing.duration
+            }ms${slowWarning}`,
+          );
+        });
+        console.log('');
+      }
+
+      console.log(
+        `⏱️  [TOTAL DURATION] Complete operation: ${overallDuration}ms`,
+      );
+      if (overallDuration > 5000) {
+        console.warn('⚠️  [WARNING] Operation took longer than 5 seconds!');
+      } else if (overallDuration > 3000) {
+        console.warn('⚠️  [WARNING] Operation took longer than 3 seconds');
+      } else {
+        console.log('✅ [PERF] Operation completed within acceptable time');
+      }
+      console.log('✅ [SUCCESS] Party operation completed successfully');
+      console.log(
+        '═══════════════════════════════════════════════════════════',
+      );
     } catch (error: any) {
-      console.error('Error handling party:', error);
-      // Duplicate phone handling (backend returns 400 with specific message)
+      const overallDuration = Date.now() - overallStartTime;
+      console.error(
+        '⏱️ [TIMING] handleAddParty FAILED after',
+        overallDuration,
+        'ms',
+      );
+      console.error('❌ [ERROR] Error handling party:', error);
+      console.error('❌ [ERROR] Error message:', error?.message);
+      console.error('❌ [ERROR] Error response:', error?.response?.data);
+      console.error('❌ [ERROR] Error status:', error?.response?.status);
+      console.groupEnd();
+
+      // Handle phone number specific errors (duplicate, invalid format, etc.)
       try {
+        // Check for custom phone error flag first
+        if ((error as any)?.isPhoneError) {
+          const phoneErrorMsg =
+            (error as any)?.phoneErrorMsg ||
+            error?.message ||
+            'Invalid phone number format.';
+          setErrors(prev => ({
+            ...prev,
+            phoneNumber: phoneErrorMsg,
+          }));
+
+          // Scroll to phone number field to show the error
+          setTimeout(() => {
+            scrollToInputCenter(phoneNumberRef);
+          }, 100);
+
+          showCustomAlert(
+            'Invalid Phone Number',
+            phoneErrorMsg +
+              ' Please enter a valid 10-digit Indian mobile number.',
+            'error',
+          );
+          return;
+        }
+
+        // Get error message from all possible locations
         const backendMsg =
-          error?.response?.data?.message || error?.response?.data?.error;
+          error?.response?.data?.message ||
+          error?.response?.data?.error ||
+          error?.message ||
+          (Array.isArray(error?.response?.data?.message)
+            ? error.response.data.message.join(', ')
+            : '') ||
+          '';
+        const errorMsgStr = String(backendMsg || '').toLowerCase();
+
+        console.log('🔍 [ERROR DEBUG] Checking phone errors:', {
+          status: error?.response?.status,
+          backendMsg,
+          errorMsg: error?.message,
+          responseData: error?.response?.data,
+        });
+
+        // Check for duplicate phone number (400 or 500 status)
         if (
-          error?.response?.status === 400 &&
+          (error?.response?.status === 400 ||
+            error?.response?.status === 500) &&
           backendMsg &&
-          String(backendMsg)
-            .toLowerCase()
-            .includes('phone number already exists')
+          (errorMsgStr.includes('phone number already exists') ||
+            errorMsgStr.includes('already exists') ||
+            errorMsgStr.includes('duplicate'))
         ) {
           setErrors(prev => ({
             ...prev,
             phoneNumber: 'This phone number is already used by another party.',
           }));
+
+          // Scroll to phone number field to show the error
+          setTimeout(() => {
+            scrollToInputCenter(phoneNumberRef);
+          }, 100);
+
           showCustomAlert(
             'Duplicate Phone Number',
             'A party with this phone number already exists. Please use a different number.',
@@ -739,7 +939,60 @@ const AddPartyScreen: React.FC = () => {
           );
           return;
         }
-      } catch {}
+
+        // Check for invalid phone number format errors (400 or 500 status - sanitization errors can be 500)
+        if (
+          (error?.response?.status === 400 ||
+            error?.response?.status === 500) &&
+          backendMsg &&
+          (errorMsgStr.includes('invalid phone') ||
+            errorMsgStr.includes('phone must be') ||
+            errorMsgStr.includes('phone number format') ||
+            errorMsgStr.includes('must start with 6, 7, 8, or 9') ||
+            errorMsgStr.includes('expected 10 digits') ||
+            errorMsgStr.includes('indian mobile number') ||
+            (Array.isArray(error.response?.data?.message) &&
+              error.response.data.message.some((msg: any) =>
+                String(msg || '')
+                  .toLowerCase()
+                  .includes('phone'),
+              )))
+        ) {
+          // Extract specific error message or use default
+          let phoneErrorMsg = 'Invalid phone number format.';
+          if (errorMsgStr.includes('must start with 6, 7, 8, or 9')) {
+            phoneErrorMsg = 'Phone number must start with 6, 7, 8, or 9.';
+          } else if (errorMsgStr.includes('expected 10 digits')) {
+            phoneErrorMsg = 'Phone number must be exactly 10 digits.';
+          } else if (errorMsgStr.includes('phone must be 10-13 digits')) {
+            phoneErrorMsg = 'Phone number must be 10-13 digits.';
+          } else if (backendMsg) {
+            // Use the backend message if available
+            phoneErrorMsg = String(backendMsg);
+          }
+
+          setErrors(prev => ({
+            ...prev,
+            phoneNumber: phoneErrorMsg,
+          }));
+
+          // Scroll to phone number field to show the error
+          setTimeout(() => {
+            scrollToInputCenter(phoneNumberRef);
+          }, 100);
+
+          showCustomAlert(
+            'Invalid Phone Number',
+            phoneErrorMsg +
+              ' Please enter a valid 10-digit Indian mobile number.',
+            'error',
+          );
+          return;
+        }
+      } catch (phoneError) {
+        console.warn('Error parsing phone number error:', phoneError);
+      }
+
       let errorMessage = isEditMode
         ? 'Failed to update party. Please try again.'
         : 'Failed to add party. Please try again.';
@@ -748,6 +1001,31 @@ const AddPartyScreen: React.FC = () => {
         if (error.response?.data?.message) {
           const message = error.response.data.message;
           if (Array.isArray(message)) {
+            // Check if any message is about phone number
+            const phoneError = message.find((msg: any) =>
+              String(msg || '')
+                .toLowerCase()
+                .includes('phone'),
+            );
+            if (phoneError) {
+              setErrors(prev => ({
+                ...prev,
+                phoneNumber: String(phoneError),
+              }));
+
+              // Scroll to phone number field to show the error
+              setTimeout(() => {
+                scrollToInputCenter(phoneNumberRef);
+              }, 100);
+
+              showCustomAlert(
+                'Invalid Phone Number',
+                String(phoneError) +
+                  ' Please enter a valid 10-digit Indian mobile number.',
+                'error',
+              );
+              return;
+            }
             errorMessage = message.join(', ');
           } else if (typeof message === 'object') {
             errorMessage = JSON.stringify(message);
@@ -790,8 +1068,20 @@ const AddPartyScreen: React.FC = () => {
     }
   };
 
-  const handleCreateParty = async (accessToken: string) => {
-    console.log('🚀 handleCreateParty function entered');
+  const handleCreateParty = async (
+    accessToken: string,
+    apiTimings?: Array<{
+      name: string;
+      duration: number;
+      status: 'success' | 'failed' | 'skipped';
+    }>,
+  ) => {
+    const startTime = Date.now();
+    console.group('📤 [API] Creating Party - POST /customers');
+    console.log(
+      '🚀 [TIMING] handleCreateParty function entered at',
+      new Date().toISOString(),
+    );
     try {
       // Normalize phone to digits only for backend compatibility
       const phoneNormalized = phoneNumber.trim().replace(/\D/g, '');
@@ -799,6 +1089,7 @@ const AddPartyScreen: React.FC = () => {
       const isValidGstin = (value: string) =>
         /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(value);
 
+      const payloadStartTime = Date.now();
       const basicPayload = {
         partyName: partyName.trim(),
         // Redundant fields to satisfy backend DTO and any normalization logic
@@ -844,16 +1135,32 @@ const AddPartyScreen: React.FC = () => {
         basicPayload.partyType = raw === 'supplier' ? 'Supplier' : 'Customer';
       }
 
-      // Include user's primary role id for backend auditing/mapping
+      // OPTIMIZATION: Add role ID with timeout to avoid blocking POST call
+      // If role ID fetch takes > 200ms, proceed without it (backend can handle)
+      const roleIdStartTime = Date.now();
       try {
         const { addRoleIdToBody } = await import('../../utils/roleHelper');
-        await addRoleIdToBody(basicPayload);
+        // Race between role ID fetch and timeout
+        await Promise.race([
+          addRoleIdToBody(basicPayload),
+          new Promise(resolve => setTimeout(resolve, 200)),
+        ]);
+        console.log(
+          '⏱️ [TIMING] Role ID added in',
+          Date.now() - roleIdStartTime,
+          'ms',
+        );
       } catch (e) {
         console.warn(
           '⚠️ AddPartyScreen: Failed to add role ID to create payload:',
           e,
         );
       }
+      console.log(
+        '⏱️ [TIMING] Payload preparation took',
+        Date.now() - payloadStartTime,
+        'ms',
+      );
 
       console.log('➕ Creating basic party record with payload:', basicPayload);
       // Use supplier-specific endpoint if creating a supplier
@@ -862,16 +1169,120 @@ const AddPartyScreen: React.FC = () => {
       console.log('🔗 API Endpoint (primary):', primaryCreateUrl);
 
       let createResponse;
+      const createStartTime = Date.now();
       try {
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('📤 [API CALL] POST', primaryCreateUrl);
+        console.log('⏱️ [TIMING] Starting at', new Date().toISOString());
+        console.log(
+          '📦 Payload size:',
+          JSON.stringify(basicPayload).length,
+          'bytes',
+        );
+        // OPTIMIZATION: Disable retries for faster response - backend should handle errors
+        // Retries add exponential backoff delays (1s, 2s) which slow down the UI
         createResponse = (await unifiedApi.post(
           primaryCreateUrl,
           basicPayload,
+          {
+            retryOnTimeout: false, // Disable retries for faster response
+            maxRetries: 0, // No retries
+            logRequest: true, // Enable request logging
+          },
         )) as {
           data: any;
           status: number;
           headers: Headers;
         };
+        const createDuration = Date.now() - createStartTime;
+        if (apiTimings) {
+          apiTimings.push({
+            name: `POST ${primaryCreateUrl}`,
+            duration: createDuration,
+            status: 'success',
+          });
+        }
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('✅ [API CALL] POST', primaryCreateUrl, 'COMPLETED');
+        console.log(
+          '⏱️ [TIMING] Duration:',
+          createDuration,
+          'ms',
+          createDuration > 2000 ? '⚠️ SLOW!' : '✅ OK',
+        );
+        console.log(
+          '📊 [PERF] Create customer API call duration:',
+          createDuration,
+          'ms',
+        );
+        console.log('📥 Response status:', createResponse.status);
       } catch (err: any) {
+        const createDuration = Date.now() - createStartTime;
+        if (apiTimings) {
+          apiTimings.push({
+            name: `POST ${primaryCreateUrl}`,
+            duration: createDuration,
+            status: 'failed',
+          });
+        }
+        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.error('❌ [API CALL] POST', primaryCreateUrl, 'FAILED');
+        console.error('⏱️ [TIMING] Failed after', createDuration, 'ms');
+        console.error('❌ Error:', err?.message || err);
+        console.error('❌ Error response:', err?.response?.data);
+        console.error('❌ Error status:', err?.response?.status);
+        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+        // Check for phone number errors before throwing
+        const errorMsg =
+          err?.message ||
+          err?.response?.data?.message ||
+          err?.response?.data?.error ||
+          '';
+        const errorMsgStr = String(errorMsg).toLowerCase();
+
+        // Check for phone validation errors (even in 500 errors from sanitization)
+        // Also check error.response.data for nested error messages
+        const nestedErrorMsg =
+          err?.response?.data?.error || err?.response?.data?.message || '';
+        const allErrorText = (errorMsg + ' ' + nestedErrorMsg).toLowerCase();
+
+        if (
+          errorMsgStr.includes('invalid phone') ||
+          errorMsgStr.includes('phone number format') ||
+          errorMsgStr.includes('must start with 6, 7, 8, or 9') ||
+          errorMsgStr.includes('expected 10 digits') ||
+          errorMsgStr.includes('phone must be') ||
+          allErrorText.includes('invalid phone') ||
+          allErrorText.includes('phone number format') ||
+          allErrorText.includes('must start with 6, 7, 8, or 9') ||
+          allErrorText.includes('expected 10 digits') ||
+          allErrorText.includes('phone must be')
+        ) {
+          let phoneErrorMsg = 'Invalid phone number format.';
+          const sourceMsg = errorMsg || nestedErrorMsg || '';
+          if (sourceMsg.includes('must start with 6, 7, 8, or 9')) {
+            phoneErrorMsg = 'Phone number must start with 6, 7, 8, or 9.';
+          } else if (sourceMsg.includes('expected 10 digits')) {
+            phoneErrorMsg = 'Phone number must be exactly 10 digits.';
+          } else if (sourceMsg.includes('phone must be 10-13 digits')) {
+            phoneErrorMsg = 'Phone number must be 10-13 digits.';
+          } else if (sourceMsg) {
+            phoneErrorMsg = String(sourceMsg);
+          }
+
+          console.error(
+            '📱 [PHONE ERROR] Detected phone validation error:',
+            phoneErrorMsg,
+          );
+
+          // Throw a custom error that will be caught by the outer handler
+          const phoneError = new Error(phoneErrorMsg);
+          (phoneError as any).isPhoneError = true;
+          (phoneError as any).phoneErrorMsg = phoneErrorMsg;
+          throw phoneError;
+        }
+
         throw err;
       }
 
@@ -885,60 +1296,11 @@ const AddPartyScreen: React.FC = () => {
         throw new Error('Failed to get customer ID from creation response');
       }
 
-      const updatePayload = {
-        customerId: customerId,
-        partyName: partyName.trim(),
-        partyType: partyType === 'supplier' ? 'Supplier' : 'Customer',
-        phoneNumber: phoneNormalized,
-        address: address.trim(),
-        addressLine1: address.trim(),
-        gstNumber: gstin.trim() || null,
-        gst: gstin.trim() || null,
-        gstin: gstin.trim() || null,
-        // voucherType intentionally omitted to prevent backend-side voucher creation
-        // openingBalance removed - backend doesn't accept it
-      };
-
-      // Include user's primary role id for backend auditing/mapping
-      try {
-        const { addRoleIdToBody } = await import('../../utils/roleHelper');
-        await addRoleIdToBody(updatePayload);
-      } catch (e) {
-        console.warn(
-          '⚠️ AddPartyScreen: Failed to add role ID to update payload:',
-          e,
-        );
-      }
-
-      console.log('📝 Updating party info with payload:', updatePayload);
-      // Use unified API - already migrated above
-
-      // Use unified API for update
-      let updateResponse: any;
-      try {
-        updateResponse = await unifiedApi.updateCustomer(
-          customerId,
-          updatePayload,
-        );
-      } catch (updateErr: any) {
-        // If this optional enrichment endpoint is missing, proceed without blocking
-        const status = updateErr?.response?.status;
-        if (status === 404 || status === 405) {
-          console.warn(
-            'ℹ️ Optional endpoint /customers/add-info not available; continuing without it.',
-          );
-        } else {
-          throw updateErr;
-        }
-      }
-
-      if (updateResponse && updateResponse.data) {
-        console.log('✅ Customer info updated:', updateResponse.data);
-      } else {
-        console.log(
-          'ℹ️ Skipped optional /customers/add-info step or no data returned',
-        );
-      }
+      // OPTIMIZATION: Removed redundant PATCH call - all data is already sent in POST
+      // This eliminates an extra API call that was adding 1-2 seconds of delay
+      console.log(
+        '✅ Customer created successfully - skipping redundant update call',
+      );
 
       console.log('📍 Reached opening balance check section');
       // Create opening balance voucher if amount is entered (positive or negative)
@@ -966,15 +1328,37 @@ const AddPartyScreen: React.FC = () => {
           openingBalance,
         );
         console.log('📞 Calling createOpeningBalanceVoucher...');
+        const voucherStartTime = Date.now();
         try {
           // Only create ONE voucher of the type selected in the UI
-          await createOpeningBalanceVoucher(accessToken, customerId);
+          await createOpeningBalanceVoucher(
+            accessToken,
+            customerId,
+            apiTimings,
+          );
+          const voucherDuration = Date.now() - voucherStartTime;
+          console.log(
+            '⏱️ [TIMING] Voucher creation completed in',
+            voucherDuration,
+            'ms',
+          );
           console.log('✅ createOpeningBalanceVoucher completed successfully');
 
-          // Add a delay to ensure voucher is processed and available in API
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          console.log('⏳ Waited for voucher processing...');
+          // OPTIMIZATION: Remove unnecessary 2-second delay
+          // The backend should handle processing synchronously
+          // If async processing is needed, use webhooks or polling instead of fixed delay
+          // await new Promise(resolve => setTimeout(resolve, 2000));
+          // console.log('⏳ Waited for voucher processing...');
+          console.log(
+            '⏱️ [TIMING] Skipped unnecessary 2-second delay (optimization)',
+          );
         } catch (voucherError) {
+          const voucherDuration = Date.now() - voucherStartTime;
+          console.error(
+            '⏱️ [TIMING] Voucher creation FAILED after',
+            voucherDuration,
+            'ms',
+          );
           console.error('❌ Voucher creation failed:', voucherError);
           // Don't fail the entire party creation if voucher creation fails
         }
@@ -1027,43 +1411,47 @@ const AddPartyScreen: React.FC = () => {
       );
       profileUpdateManager.emitProfileUpdate();
 
-      // Force refresh customer data after voucher creation
+      // OPTIMIZATION: Reduce excessive refresh calls
+      // Single refresh should be sufficient - backend should handle data consistency
       if (shouldCreateVoucher) {
         console.log(
-          '🔄 AddPartyScreen: Force refreshing customer data after voucher creation...',
+          '🔄 AddPartyScreen: Refreshing customer data after voucher creation...',
         );
-
-        // Immediate refresh
+        // Immediate refresh only
         profileUpdateManager.emitProfileUpdate();
-
-        // Additional refresh after 2 seconds
-        setTimeout(() => {
-          console.log('🔄 AddPartyScreen: 2-second refresh...');
-          profileUpdateManager.emitProfileUpdate();
-        }, 2000);
-
-        // Additional refresh after 5 seconds to catch any delayed voucher processing
-        setTimeout(() => {
-          console.log(
-            '🔄 AddPartyScreen: Final refresh after voucher creation...',
-          );
-          profileUpdateManager.emitProfileUpdate();
-        }, 5000);
-
-        // Final refresh after 10 seconds to ensure voucher is fully processed
-        setTimeout(() => {
-          console.log('🔄 AddPartyScreen: Ultra-delayed refresh...');
-          profileUpdateManager.emitProfileUpdate();
-        }, 10000);
+        console.log(
+          '⏱️ [TIMING] Skipped excessive refresh delays (optimization)',
+        );
       }
 
       // Directly navigate to list without showing success popup
+      const totalDuration = Date.now() - startTime;
+      console.log(
+        '⏱️ [TIMING] Total handleCreateParty duration:',
+        totalDuration,
+        'ms',
+      );
+      console.log(
+        '📊 [PERF] Complete party creation took:',
+        totalDuration,
+        'ms',
+      );
+      console.log('✅ [SUCCESS] Party creation completed successfully');
+      console.groupEnd();
+
       navigation.navigate('Customer', {
         selectedTab: partyType,
         shouldRefresh: true,
       });
     } catch (error: any) {
-      console.error('Error creating party:', error);
+      const totalDuration = Date.now() - startTime;
+      console.error(
+        '⏱️ [TIMING] handleCreateParty FAILED after',
+        totalDuration,
+        'ms',
+      );
+      console.error('❌ [ERROR] Error creating party:', error);
+      console.groupEnd();
 
       // Handle permission error specifically
       if (
@@ -1088,10 +1476,25 @@ const AddPartyScreen: React.FC = () => {
   const createOpeningBalanceVoucher = async (
     accessToken: string,
     customerId: string,
+    apiTimings?: Array<{
+      name: string;
+      duration: number;
+      status: 'success' | 'failed' | 'skipped';
+    }>,
   ) => {
-    console.log('🚀 Starting opening balance voucher creation...');
+    const voucherStartTime = Date.now();
+    console.log(
+      '🚀 [TIMING] Starting opening balance voucher creation at',
+      new Date().toISOString(),
+    );
     try {
+      const userIdStartTime = Date.now();
       const userId = await getUserIdFromToken();
+      console.log(
+        '⏱️ [TIMING] getUserIdFromToken took',
+        Date.now() - userIdStartTime,
+        'ms',
+      );
       console.log('👤 User ID for voucher creation:', userId);
       if (!userId) {
         console.warn('User ID not found for voucher creation');
@@ -1123,11 +1526,18 @@ const AddPartyScreen: React.FC = () => {
       }
 
       // Idempotency: avoid duplicate opening balance vouchers (rapid double taps)
+      const duplicateCheckStartTime = Date.now();
       const recentlyExists = await hasRecentOpeningBalanceVoucher(
         accessToken,
         customerIdNumber,
         Math.abs(amount),
         voucherTypeForVoucher,
+      );
+      const duplicateCheckDuration = Date.now() - duplicateCheckStartTime;
+      console.log(
+        '⏱️ [TIMING] Duplicate check took',
+        duplicateCheckDuration,
+        'ms',
       );
       if (recentlyExists) {
         console.log('ℹ️ Duplicate opening balance detected; skipping voucher.');
@@ -1136,6 +1546,7 @@ const AddPartyScreen: React.FC = () => {
 
       // Generate document number for opening balance voucher (starts at 001 for new users)
       let openingBalanceNumber = '';
+      const docNumberStartTime = Date.now();
       try {
         if (voucherTypeForVoucher === 'debit') {
           // Payment - use billNumber
@@ -1150,7 +1561,17 @@ const AddPartyScreen: React.FC = () => {
             true,
           ); // Store - transaction being saved
         }
+        console.log(
+          '⏱️ [TIMING] Document number generation took',
+          Date.now() - docNumberStartTime,
+          'ms',
+        );
       } catch (error) {
+        console.error(
+          '⏱️ [TIMING] Document number generation FAILED after',
+          Date.now() - docNumberStartTime,
+          'ms',
+        );
         console.error(
           'Error generating opening balance document number:',
           error,
@@ -1218,23 +1639,70 @@ const AddPartyScreen: React.FC = () => {
       console.log('📤 Sending POST request to vouchers API...');
 
       let voucherResponse;
+      const postStartTime = Date.now();
       try {
-        voucherResponse = (await unifiedApi.post(
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log(
+          '📤 [API CALL] POST',
           voucherUrl,
-          voucherPayload,
-        )) as {
+          '(Opening Balance Voucher)',
+        );
+        console.log('⏱️ [TIMING] Starting at', new Date().toISOString());
+        console.log('💰 Amount:', voucherPayload.amount);
+        // OPTIMIZATION: Disable retries for faster response
+        voucherResponse = (await unifiedApi.post(voucherUrl, voucherPayload, {
+          retryOnTimeout: false, // Disable retries for faster response
+          maxRetries: 0, // No retries
+          logRequest: true, // Enable request logging
+        })) as {
           data: any;
           status: number;
           headers: Headers;
         };
+        const postDuration = Date.now() - postStartTime;
+        if (apiTimings) {
+          apiTimings.push({
+            name: `POST ${voucherUrl} (Opening Balance)`,
+            duration: postDuration,
+            status: 'success',
+          });
+        }
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('✅ [API CALL] POST', voucherUrl, 'COMPLETED');
+        console.log(
+          '⏱️ [TIMING] Duration:',
+          postDuration,
+          'ms',
+          postDuration > 2000 ? '⚠️ SLOW!' : '✅ OK',
+        );
+        console.log(
+          '📊 [PERF] Create voucher API call duration:',
+          postDuration,
+          'ms',
+        );
+        console.log('📥 Response status:', voucherResponse.status);
       } catch (postErr: any) {
+        const postDuration = Date.now() - postStartTime;
+        if (apiTimings) {
+          apiTimings.push({
+            name: `POST ${voucherUrl} (Opening Balance)`,
+            duration: postDuration,
+            status: 'failed',
+          });
+        }
+        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.error('❌ [API CALL] POST', voucherUrl, 'FAILED');
+        console.error('⏱️ [TIMING] Failed after', postDuration, 'ms');
+        console.error('❌ Error:', postErr?.message || postErr);
         // unifiedApi throws errors for non-2xx responses
         if (postErr?.status === 404 || postErr?.response?.status === 404) {
           console.warn(
             'ℹ️ /transactions POST not available; skipping opening balance creation',
           );
+          console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
           return;
         }
+        console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
         throw postErr;
       }
       // unifiedApi returns { data, status, headers } structure
@@ -1260,17 +1728,32 @@ const AddPartyScreen: React.FC = () => {
         voucherResponse.data?.type,
       );
       console.log('🔍 DEBUG: Expected type was:', voucherTypeForVoucher);
+      const totalVoucherDuration = Date.now() - voucherStartTime;
+      console.log(
+        '⏱️ [TIMING] Total voucher creation took',
+        totalVoucherDuration,
+        'ms',
+      );
+      console.log(
+        '📊 [PERF] Complete voucher creation duration:',
+        totalVoucherDuration,
+        'ms',
+      );
       console.log('🎉 Voucher creation completed successfully!');
 
-      // Check transaction limit after successful voucher creation
-      try {
-        console.log('🔍 Checking transaction limit after voucher creation...');
-        await forceCheckTransactionLimit();
-      } catch (limitError) {
+      // OPTIMIZATION: Move transaction limit check to background (non-blocking)
+      // This check doesn't need to block the success flow
+      forceCheckTransactionLimit().catch(limitError => {
         console.error('❌ Error checking transaction limit:', limitError);
         // Don't fail the party creation if limit check fails
-      }
+      });
     } catch (error: any) {
+      const totalVoucherDuration = Date.now() - voucherStartTime;
+      console.error(
+        '⏱️ [TIMING] Voucher creation FAILED after',
+        totalVoucherDuration,
+        'ms',
+      );
       console.error(
         '❌ CRITICAL ERROR: Opening balance voucher creation failed:',
         {
@@ -1309,13 +1792,26 @@ const AddPartyScreen: React.FC = () => {
     amount: number,
     type: 'debit' | 'credit',
   ): Promise<boolean> => {
+    const checkStartTime = Date.now();
     try {
       const url = `/transactions?customer_id=${customerId}&limit=5`;
-      const resp = (await unifiedApi.get(url)) as {
+      console.log(
+        '⏱️ [TIMING] Starting duplicate check GET at',
+        new Date().toISOString(),
+      );
+      const resp = (await unifiedApi.get(url, {
+        cache: false, // Don't cache this check
+      })) as {
         data: any;
         status: number;
         headers: Headers;
       };
+      const checkDuration = Date.now() - checkStartTime;
+      console.log(
+        '⏱️ [TIMING] Duplicate check GET completed in',
+        checkDuration,
+        'ms',
+      );
       // unifiedApi returns { data, status, headers } structure
       const responseData = resp.data || resp;
       const rows = Array.isArray(responseData?.data)
@@ -1337,6 +1833,12 @@ const AddPartyScreen: React.FC = () => {
         return close && sameDesc && sameAmt && sameType && sameCustomer;
       });
     } catch (e) {
+      const checkDuration = Date.now() - checkStartTime;
+      console.warn(
+        '⏱️ [TIMING] Duplicate check FAILED after',
+        checkDuration,
+        'ms',
+      );
       console.warn('Opening balance idempotency check failed:', e);
       return false;
     }
@@ -1351,6 +1853,117 @@ const AddPartyScreen: React.FC = () => {
     if (errorInfo.isForbidden) {
       showCustomAlert('Access Denied', errorInfo.message, 'error');
       return;
+    }
+
+    // Handle phone number specific errors first
+    try {
+      // Check for custom phone error flag first
+      if ((error as any)?.isPhoneError) {
+        const phoneErrorMsg =
+          (error as any)?.phoneErrorMsg ||
+          error?.message ||
+          'Invalid phone number format.';
+        setErrors(prev => ({
+          ...prev,
+          phoneNumber: phoneErrorMsg,
+        }));
+
+        // Scroll to phone number field to show the error
+        setTimeout(() => {
+          scrollToInputCenter(phoneNumberRef);
+        }, 100);
+
+        showCustomAlert(
+          'Invalid Phone Number',
+          phoneErrorMsg +
+            ' Please enter a valid 10-digit Indian mobile number.',
+          'error',
+        );
+        return;
+      }
+
+      const backendMsg =
+        error?.response?.data?.message ||
+        error?.response?.data?.error ||
+        error?.message ||
+        '';
+      const errorMsgStr = String(backendMsg || '').toLowerCase();
+
+      // Check for duplicate phone number
+      if (
+        error?.response?.status === 400 &&
+        backendMsg &&
+        (errorMsgStr.includes('phone number already exists') ||
+          errorMsgStr.includes('already exists'))
+      ) {
+        setErrors(prev => ({
+          ...prev,
+          phoneNumber: 'This phone number is already used by another party.',
+        }));
+
+        // Scroll to phone number field to show the error
+        setTimeout(() => {
+          scrollToInputCenter(phoneNumberRef);
+        }, 100);
+
+        showCustomAlert(
+          'Duplicate Phone Number',
+          'A party with this phone number already exists. Please use a different number.',
+          'error',
+        );
+        return;
+      }
+
+      // Check for invalid phone number format errors
+      if (
+        error?.response?.status === 400 &&
+        backendMsg &&
+        (errorMsgStr.includes('invalid phone') ||
+          errorMsgStr.includes('phone must be') ||
+          errorMsgStr.includes('phone number format') ||
+          errorMsgStr.includes('must start with 6, 7, 8, or 9') ||
+          errorMsgStr.includes('expected 10 digits') ||
+          (Array.isArray(error.response?.data?.message) &&
+            error.response.data.message.some((msg: any) =>
+              String(msg || '')
+                .toLowerCase()
+                .includes('phone'),
+            )))
+      ) {
+        let phoneErrorMsg = 'Invalid phone number format.';
+        if (errorMsgStr.includes('must start with 6, 7, 8, or 9')) {
+          phoneErrorMsg = 'Phone number must start with 6, 7, 8, or 9.';
+        } else if (errorMsgStr.includes('expected 10 digits')) {
+          phoneErrorMsg = 'Phone number must be exactly 10 digits.';
+        } else if (errorMsgStr.includes('phone must be 10-13 digits')) {
+          phoneErrorMsg = 'Phone number must be 10-13 digits.';
+        } else if (backendMsg) {
+          phoneErrorMsg = String(backendMsg);
+        }
+
+        setErrors(prev => ({
+          ...prev,
+          phoneNumber: phoneErrorMsg,
+        }));
+
+        // Scroll to phone number field to show the error
+        setTimeout(() => {
+          scrollToInputCenter(phoneNumberRef);
+        }, 100);
+
+        showCustomAlert(
+          'Invalid Phone Number',
+          phoneErrorMsg +
+            ' Please enter a valid 10-digit Indian mobile number.',
+          'error',
+        );
+        return;
+      }
+    } catch (phoneError) {
+      console.warn(
+        'Error parsing phone number error in handleCreateError:',
+        phoneError,
+      );
     }
 
     let errorMessage =
@@ -1403,7 +2016,14 @@ const AddPartyScreen: React.FC = () => {
     showCustomAlert('Create Error', errorMessage, 'error');
   };
 
-  const handleUpdateParty = async (accessToken: string) => {
+  const handleUpdateParty = async (
+    accessToken: string,
+    apiTimings?: Array<{
+      name: string;
+      duration: number;
+      status: 'success' | 'failed' | 'skipped';
+    }>,
+  ) => {
     try {
       const userId = await getUserIdFromToken();
       if (!userId) {

@@ -171,7 +171,15 @@ const PaymentDetailsDisplay: React.FC<PaymentDetailsDisplayProps> = ({
   };
 
   // Helper function to capitalize first letter
-  const capitalize = (str: string) => {
+  const formatMethodLabel = (str: string) => {
+    if (!str) return '';
+    const normalized = str.trim().toLowerCase();
+    if (normalized === 'upi') return 'UPI';
+    if (normalized === 'emi') return 'EMI';
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  };
+
+  const capitalizeWord = (str: string) => {
     if (!str) return '';
     return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
   };
@@ -221,7 +229,7 @@ const PaymentDetailsDisplay: React.FC<PaymentDetailsDisplayProps> = ({
 
           <View style={styles.methodCard}>
             <Text style={styles.methodText}>
-              {capitalize(paymentData.method || 'Unknown')}
+              {formatMethodLabel(paymentData.method || 'Unknown')}
             </Text>
 
             {/* Debug information for unknown method */}
@@ -263,7 +271,7 @@ const PaymentDetailsDisplay: React.FC<PaymentDetailsDisplayProps> = ({
                   <View style={styles.detailItem}>
                     <Text style={styles.detailLabel}>Type</Text>
                     <Text style={styles.detailValue}>
-                      {capitalize(paymentData.card_type)}
+                      {capitalizeWord(paymentData.card_type)}
                     </Text>
                   </View>
                 )}

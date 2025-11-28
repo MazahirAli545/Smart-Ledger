@@ -76,6 +76,10 @@ const PARENT_FONT_SIZE = 18;
 const CHILD_FONT_SIZE = 16;
 const LIGHT_PARENT_COLOR = '#333';
 const LIGHT_CHILD_COLOR = '#5a8fff';
+const PARENT_ICON_SIZE = 26;
+const CHILD_ICON_SIZE = 24;
+const PARENT_ICON_COLOR = '#1a1a1a';
+const CHILD_ICON_COLOR = '#4f8cff';
 
 // Utility to build a tree from a flat menu array
 function buildMenuTree(flatMenus: MenuItem[]) {
@@ -238,6 +242,24 @@ function getMockMenuData(): MenuItem[] {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       url: '/link-ca',
+      isVisible: true,
+      menuType: 'main',
+      planType: 'premium',
+      createdBy: 1,
+      updatedBy: 1,
+      isCustom: false,
+    },
+    {
+      id: 10,
+      title: 'Tally',
+      route: '/tally',
+      icon: 'tally',
+      parentId: null,
+      orderNo: 9,
+      isActive: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      url: '/tally',
       isVisible: true,
       menuType: 'main',
       planType: 'premium',
@@ -735,8 +757,8 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
   // Helper to render icon
   const renderIcon = (
     iconName?: string,
-    color: string = '#4f8cff',
-    size: number = 22,
+    color: string = CHILD_ICON_COLOR,
+    size: number = CHILD_ICON_SIZE,
     isParent: boolean = true,
     title?: string,
   ) => {
@@ -833,8 +855,8 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
                 cache: 'default',
               }}
               style={{
-                width: isParent ? 23 : 21,
-                height: isParent ? 23 : 21,
+                width: isParent ? PARENT_ICON_SIZE : CHILD_ICON_SIZE,
+                height: isParent ? PARENT_ICON_SIZE : CHILD_ICON_SIZE,
                 marginRight: isParent ? 20 : 18,
                 resizeMode: 'contain',
                 opacity: isImageLoading ? 0.5 : 1,
@@ -902,6 +924,7 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
         'folder-plus': 'folder-plus',
         'bar-chart-2': 'chart-bar',
         link: 'link',
+        tally: 'chart-timeline-variant',
         // Add mappings for folder types
         sell: 'trending-up',
         payment: 'credit-card-outline',
@@ -945,6 +968,7 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
         'folder-plus',
         'bar-chart-2',
         'link',
+        'tally',
         // Add folder type icons
         'sell',
         'payment',
@@ -1034,6 +1058,10 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
       fallbackIcon = 'chart-bar';
       console.log(`🔧 Forcing Report icon to: ${fallbackIcon}`);
     }
+    if (title && title.toLowerCase() === 'tally') {
+      fallbackIcon = 'chart-timeline-variant';
+      console.log(`🔧 Forcing Tally icon to: ${fallbackIcon}`);
+    }
 
     if (__DEV__) {
       if (!iconName || iconName.trim() === '') {
@@ -1089,6 +1117,7 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
       if (lowerTitle === 'add new folder') return 'folder-plus';
       if (lowerTitle === 'report') return 'chart-bar';
       if (lowerTitle === 'link to ca') return 'link';
+      if (lowerTitle === 'tally') return 'chart-timeline-variant';
 
       // Fallback patterns
       if (lowerTitle.includes('dashboard')) return 'view-dashboard';
@@ -1145,6 +1174,7 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
       if (lowerTitle === 'gst summary') return 'calculator';
       if (lowerTitle === 'cash flow') return 'cash-multiple';
       if (lowerTitle === 'daily ledger') return 'book-open-variant';
+      if (lowerTitle === 'tally') return 'chart-timeline-variant';
 
       // For custom child folders, try to use more specific icons
       if (
@@ -1196,12 +1226,13 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
     // Show Premium badge for premium features
     const isPremiumFeature = planType === 'premium';
     const hasAccess = userPlan === 'professional' || userPlan === 'enterprise';
-    const isReportOrLinkCA =
+    const isReportOrLinkCAOrTally =
       menu?.title?.toLowerCase() === 'report' ||
-      menu?.title?.toLowerCase() === 'link to ca';
+      menu?.title?.toLowerCase() === 'link to ca' ||
+      menu?.title?.toLowerCase() === 'tally';
 
     // For Report and Link to CA: Hide PREMIUM badge for Professional/Enterprise users
-    if (isPremiumFeature && isReportOrLinkCA) {
+    if (isPremiumFeature && isReportOrLinkCAOrTally) {
       // Hide badge for Professional/Enterprise users
       if (hasAccess) {
         return null;
@@ -1327,6 +1358,7 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
         const isParent = level === 0;
         const isExpanded = expanded[menu.id];
         const menuPlan = menu.planType || 'free';
+        const titleLower = (menu.title || '').toLowerCase();
         // User-created custom folders should always be accessible to the user who created them
         // Enable Report and Link to CA for all users - they will show premium badges but be accessible
         // Disable other Premium features unless user has Professional or Enterprise plan
@@ -1335,8 +1367,9 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
           : menuPlan === 'premium' &&
             userPlan !== 'professional' &&
             userPlan !== 'enterprise' &&
-            menu.title?.toLowerCase() !== 'report' &&
-            menu.title?.toLowerCase() !== 'link to ca'
+            titleLower !== 'report' &&
+            titleLower !== 'link to ca' &&
+            titleLower !== 'tally'
           ? false
           : isPlanAccessible(userPlan, menuPlan);
 
@@ -1396,6 +1429,8 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
                     );
                     targetScreen = 'FolderScreen';
                     targetParams = { folder: menu };
+                  } else if (titleLower === 'tally') {
+                    targetScreen = 'Tally';
                   } else {
                     // Handle system menus based on orderNo
                     switch (orderNo) {
@@ -1422,6 +1457,9 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
                         break;
                       case 8: // Link to CA
                         targetScreen = 'LinkToCA';
+                        break;
+                      case 9: // Tally
+                        targetScreen = 'Tally';
                         break;
                       default:
                         // Dynamic folder: pass the menu object as folder param
@@ -1469,16 +1507,18 @@ const CustomDrawerContent: React.FC<DrawerContentComponentProps> = props => {
               <View style={styles.menuLeft}>
                 {/* Render the icon on the left side */}
                 {(() => {
-                  const textColor = !isAccessible
+                  const iconColor = !isAccessible
                     ? '#9aa1aa'
                     : isParent
-                    ? '#1a1a1a'
-                    : '#4a4a4a';
-                  const textSize = isParent ? 19 : 17;
+                    ? PARENT_ICON_COLOR
+                    : CHILD_ICON_COLOR;
+                  const iconSize = isParent
+                    ? PARENT_ICON_SIZE
+                    : CHILD_ICON_SIZE;
                   return renderIcon(
                     menu.icon,
-                    textColor,
-                    textSize,
+                    iconColor,
+                    iconSize,
                     isParent,
                     menu.title,
                   );
@@ -1920,13 +1960,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 16,
-    paddingHorizontal: 20,
+    paddingVertical: 20,
+    paddingHorizontal: 12,
     marginTop: 0,
     marginBottom: 8,
     borderWidth: 0,
     borderColor: 'transparent',
-    minHeight: 56,
+    minHeight: 60,
     backgroundColor: 'transparent',
   },
   parentMenuRow: {
@@ -1941,12 +1981,12 @@ const styles = StyleSheet.create({
   childMenuRow: {
     backgroundColor: 'transparent',
     marginLeft: 28,
-    paddingVertical: 14,
-    paddingHorizontal: 20,
+    paddingVertical: 16,
+    paddingHorizontal: 12,
     borderRadius: 0,
     marginBottom: 6,
     borderColor: 'transparent',
-    minHeight: 48,
+    minHeight: 50,
   },
   inaccessibleMenuRow: {
     opacity: 1,

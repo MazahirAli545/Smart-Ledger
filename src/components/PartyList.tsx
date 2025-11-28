@@ -5,6 +5,7 @@ import {
   FlatList,
   TouchableOpacity,
   StyleSheet,
+  ActivityIndicator,
 } from 'react-native';
 
 export interface PartyItem {
@@ -21,6 +22,9 @@ interface PartyListProps {
   emptyTitle: string;
   emptySubtitle: string;
   onPressItem: (item: PartyItem) => void;
+  onEndReached?: () => void;
+  isLoadingMore?: boolean;
+  hasMore?: boolean;
 }
 
 const PartyList: React.FC<PartyListProps> = ({
@@ -28,6 +32,9 @@ const PartyList: React.FC<PartyListProps> = ({
   emptyTitle,
   emptySubtitle,
   onPressItem,
+  onEndReached,
+  isLoadingMore = false,
+  hasMore = true,
 }) => {
   if (!Array.isArray(items)) items = [];
 
@@ -93,6 +100,20 @@ const PartyList: React.FC<PartyListProps> = ({
           <Text style={styles.emptySubtitle}>{emptySubtitle}</Text>
         </View>
       )}
+      ListFooterComponent={() => {
+        if (!items.length) return null;
+        if (isLoadingMore) {
+          return (
+            <View style={styles.footerContainer}>
+              <ActivityIndicator size="small" color="#4f8cff" />
+              <Text style={styles.footerText}>Loading more...</Text>
+            </View>
+          );
+        }
+        return null;
+      }}
+      onEndReached={onEndReached}
+      onEndReachedThreshold={0.4}
       showsVerticalScrollIndicator={false}
     />
   );
@@ -190,6 +211,17 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#64748b',
 
+    fontFamily: 'Roboto-Medium',
+  },
+  footerContainer: {
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  footerText: {
+    fontSize: 12,
+    color: '#6b7280',
+    marginTop: 4,
     fontFamily: 'Roboto-Medium',
   },
 });

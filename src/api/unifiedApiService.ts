@@ -9,8 +9,14 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { jwtDecode } from 'jwt-decode';
 import { BASE_URL } from './index';
 import { getUserIdFromToken } from '../utils/storage';
+import {
+  generateIdempotencyKey,
+  generateUniqueIdempotencyKey,
+  shouldUseIdempotency,
+} from '../utils/idempotency';
 
 // ========================================
 // TYPES & INTERFACES
@@ -30,6 +36,12 @@ interface RequestOptions {
   cache?: boolean;
   cacheTTL?: number; // Time to live in milliseconds
   skipAuth?: boolean;
+  // Enhanced POST options
+  useIdempotency?: boolean; // Auto-generate idempotency key for POST/PUT/PATCH
+  idempotencyKey?: string; // Custom idempotency key
+  retryOnTimeout?: boolean; // Allow retry for idempotent POSTs on timeout/5xx
+  maxRetries?: number; // Max retries for idempotent requests (default: 1)
+  logRequest?: boolean; // Enable request logging for debugging
 }
 
 interface ApiResponse<T> {
@@ -151,12 +163,57 @@ class RequestDeduplicationService {
 class UnifiedApiService {
   private cache = new ApiCacheService();
   private deduplicator = new RequestDeduplicationService();
+  private requestLog: Array<{
+    requestId: string;
+    endpoint: string;
+    method: string;
+    timestamp: number;
+    duration?: number;
+    status?: number;
+    error?: string;
+  }> = [];
+  private maxLogSize = 100; // Keep last 100 requests for debugging
+  private cachedUserId: number | null | undefined = undefined; // Cache userId to avoid repeated token decoding
+  private userIdCacheTime: number = 0;
+  private userIdCacheTTL = 5 * 60 * 1000; // Cache userId for 5 minutes
 
   /**
    * Get authentication token
    */
   private async getAuthToken(): Promise<string | null> {
     return await AsyncStorage.getItem('accessToken');
+  }
+
+  /**
+   * Extract userId from token (synchronous, no I/O)
+   * Caches result to avoid repeated decoding
+   */
+  private extractUserIdFromToken(token: string): number | null {
+    // Check cache first
+    const now = Date.now();
+    if (
+      this.cachedUserId !== undefined &&
+      now - this.userIdCacheTime < this.userIdCacheTTL
+    ) {
+      return this.cachedUserId;
+    }
+
+    try {
+      // Use jwt-decode for synchronous decoding (no async I/O needed)
+      const decoded: any = jwtDecode(token);
+      const userId = decoded.id || decoded.user_id || decoded.sub || null;
+
+      // Cache the result
+      this.cachedUserId = userId;
+      this.userIdCacheTime = now;
+
+      return userId;
+    } catch (e) {
+      console.warn('Failed to decode token for userId:', e);
+      this.cachedUserId = null;
+      this.userIdCacheTime = now;
+      return null;
+    }
   }
 
   /**
@@ -226,6 +283,7 @@ class UnifiedApiService {
 
   /**
    * Make API request with caching, deduplication, timeout, retry, and error handling
+   * Enhanced with idempotency support and better logging
    */
   async request<T>(
     endpoint: string,
@@ -239,13 +297,69 @@ class UnifiedApiService {
       cache = true,
       cacheTTL,
       skipAuth = false,
+      useIdempotency = true,
+      idempotencyKey,
+      retryOnTimeout = false,
+      maxRetries = 1,
+      logRequest = false,
     } = options;
+
+    // Generate request ID for tracking
+    const requestId = `req-${Date.now()}-${Math.random()
+      .toString(36)
+      .substring(2, 9)}`;
+    const startTime = Date.now();
 
     // Build full URL
     const url = endpoint.startsWith('http')
       ? endpoint
       : `${BASE_URL}${endpoint}`;
     const cacheKey = this.buildCacheKey(url, options);
+
+    // Get auth token early (we need it anyway, and can extract userId from it)
+    let authToken: string | null = null;
+    if (!skipAuth) {
+      authToken = await this.getAuthToken();
+      if (!authToken) {
+        throw new Error('Authentication token not found');
+      }
+    }
+
+    // Generate idempotency key for POST/PUT/PATCH if enabled (OPTIMIZED: no extra async call)
+    let finalIdempotencyKey: string | undefined;
+    if (
+      (method === 'POST' || method === 'PUT' || method === 'PATCH') &&
+      useIdempotency &&
+      shouldUseIdempotency(endpoint)
+    ) {
+      if (idempotencyKey) {
+        finalIdempotencyKey = idempotencyKey;
+      } else {
+        // Auto-generate idempotency key (OPTIMIZED: extract userId from token we already have)
+        try {
+          const userId = authToken
+            ? this.extractUserIdFromToken(authToken)
+            : null;
+          finalIdempotencyKey = generateIdempotencyKey(
+            endpoint,
+            body,
+            userId || undefined,
+          );
+        } catch {
+          // Fallback to unique key if generation fails
+          finalIdempotencyKey = generateUniqueIdempotencyKey();
+        }
+      }
+    }
+
+    // Log request if enabled (synchronous for timing accuracy)
+    if (logRequest) {
+      console.log(`📤 [${requestId}] ${method} ${endpoint}`, {
+        hasBody: !!body,
+        idempotencyKey: finalIdempotencyKey,
+        timestamp: new Date().toISOString(),
+      });
+    }
 
     // Check cache for GET requests
     if (method === 'GET' && cache) {
@@ -259,23 +373,16 @@ class UnifiedApiService {
       }
     }
 
-    // Get auth token
-    let authToken: string | null = null;
-    if (!skipAuth) {
-      authToken = await this.getAuthToken();
-      if (!authToken) {
-        throw new Error('Authentication token not found');
-      }
-    }
+    // Auth token already fetched above for idempotency key generation
 
     // Determine timeout based on method and endpoint
     // GET requests: 15s (longer for data fetching)
-    // POST/PUT/PATCH: 20s (longer for complex operations)
+    // POST/PUT/PATCH: 10s (optimized for faster failure on slow servers)
     // DELETE: 10s (usually quick)
     const getTimeout = () => {
       if (method === 'GET') return 15000; // 15 seconds
       if (method === 'DELETE') return 10000; // 10 seconds
-      return 20000; // 20 seconds for POST/PUT/PATCH
+      return 10000; // 10 seconds for POST/PUT/PATCH (reduced from 20s for faster feedback)
     };
 
     const timeoutMs = getTimeout();
@@ -288,6 +395,7 @@ class UnifiedApiService {
         Connection: 'keep-alive', // Enable HTTP keep-alive
         'Keep-Alive': 'timeout=60, max=1000', // Keep connection alive
         ...(authToken && { Authorization: `Bearer ${authToken}` }),
+        ...(finalIdempotencyKey && { 'Idempotency-Key': finalIdempotencyKey }),
         ...headers,
       },
       ...(signal && { signal }),
@@ -295,80 +403,188 @@ class UnifiedApiService {
     };
 
     // Make request with deduplication, timeout, and retry
-    // 🎯 SAFETY: Only retry GET requests to prevent duplicate POST/PUT/DELETE operations
+    // 🎯 SAFETY: Only retry GET requests or idempotent POST/PUT/PATCH
     const response = await this.deduplicator.deduplicate(cacheKey, async () => {
       const makeRequest = async () => {
-        // Race between fetch and timeout
-        const fetchPromise = fetch(url, requestOptions);
-        const timeoutPromise = this.createTimeoutPromise(timeoutMs);
+        try {
+          // Race between fetch and timeout
+          const fetchPromise = fetch(url, requestOptions);
+          const timeoutPromise = this.createTimeoutPromise(timeoutMs);
 
-        const res = await Promise.race([fetchPromise, timeoutPromise]);
+          const res = await Promise.race([fetchPromise, timeoutPromise]);
 
-        if (!res.ok) {
-          let errorMessage = `Request failed with status ${res.status}`;
-          try {
-            const errorData = await res.json();
-            errorMessage = errorData.message || errorData.error || errorMessage;
-          } catch {
-            // If JSON parsing fails, use status text
-            errorMessage = res.statusText || errorMessage;
+          if (!res.ok) {
+            let errorMessage = `Request failed with status ${res.status}`;
+            try {
+              const errorData = await res.json();
+              errorMessage =
+                errorData.message || errorData.error || errorMessage;
+            } catch {
+              // If JSON parsing fails, use status text
+              errorMessage = res.statusText || errorMessage;
+            }
+
+            // Handle specific status codes with custom error class
+            if (res.status === 401) {
+              throw new ApiError(
+                'Authentication failed - Please login again',
+                401,
+              );
+            } else if (res.status === 403) {
+              // For 403, include more helpful message from backend if available
+              const backendMessage = errorMessage.includes('Request failed')
+                ? 'Access forbidden - Please check your permissions'
+                : errorMessage;
+              throw new ApiError(backendMessage, 403);
+            } else if (res.status === 408 || res.status === 504) {
+              // Timeout errors - retry these if idempotent
+              throw new ApiError(
+                'Request timeout - Please try again',
+                res.status,
+              );
+            } else if (res.status >= 500) {
+              // Server errors - retry these if idempotent
+              throw new ApiError(
+                'Server error - Please try again later',
+                res.status,
+              );
+            }
+
+            throw new ApiError(errorMessage, res.status);
           }
 
-          // Handle specific status codes with custom error class
-          if (res.status === 401) {
-            throw new ApiError(
-              'Authentication failed - Please login again',
-              401,
-            );
-          } else if (res.status === 403) {
-            // For 403, include more helpful message from backend if available
-            const backendMessage = errorMessage.includes('Request failed')
-              ? 'Access forbidden - Please check your permissions'
-              : errorMessage;
-            throw new ApiError(backendMessage, 403);
-          } else if (res.status === 408 || res.status === 504) {
-            // Timeout errors - retry these
-            throw new ApiError(
-              'Request timeout - Please try again',
-              res.status,
-            );
-          } else if (res.status >= 500) {
-            // Server errors - retry these
-            throw new ApiError(
-              'Server error - Please try again later',
-              res.status,
+          const data = await res.json();
+
+          // Cache GET requests with longer TTL for stable data
+          if (method === 'GET' && cache) {
+            // Use provided TTL or default based on endpoint type
+            const effectiveTTL = cacheTTL || this.getDefaultCacheTTL(endpoint);
+            this.cache.set(cacheKey, data, effectiveTTL);
+          }
+
+          return {
+            data,
+            status: res.status,
+            headers: res.headers,
+          };
+        } catch (error: any) {
+          // Log error (synchronous for timing accuracy)
+          const duration = Date.now() - startTime;
+          const errorMessage = error?.message || 'Unknown error';
+          const errorStatus = error?.status || 0;
+
+          if (logRequest) {
+            console.error(
+              `❌ [${requestId}] ${method} ${endpoint} - ${duration}ms`,
+              {
+                error: errorMessage,
+                status: errorStatus,
+                timestamp: new Date().toISOString(),
+              },
             );
           }
 
-          throw new ApiError(errorMessage, res.status);
+          // Track error in log (non-blocking for performance)
+          setTimeout(() => {
+            this.addRequestLog({
+              requestId,
+              endpoint,
+              method,
+              timestamp: startTime,
+              duration,
+              status: errorStatus,
+              error: errorMessage,
+            });
+          }, 0);
+
+          throw error;
         }
-
-        const data = await res.json();
-
-        // Cache GET requests with longer TTL for stable data
-        if (method === 'GET' && cache) {
-          // Use provided TTL or default based on endpoint type
-          const effectiveTTL = cacheTTL || this.getDefaultCacheTTL(endpoint);
-          this.cache.set(cacheKey, data, effectiveTTL);
-        }
-
-        return {
-          data,
-          status: res.status,
-          headers: res.headers,
-        };
       };
 
-      // Only retry GET requests to prevent duplicate operations
+      // Retry logic: GET always retries, POST/PUT/PATCH can retry if idempotent
+      const isIdempotentMutation =
+        (method === 'POST' || method === 'PUT' || method === 'PATCH') &&
+        finalIdempotencyKey &&
+        retryOnTimeout;
+
       if (method === 'GET') {
-        return this.retryRequest(makeRequest);
+        return this.retryRequest(makeRequest, 3); // GET: 3 retries
+      } else if (isIdempotentMutation) {
+        // Idempotent POST/PUT/PATCH: Safe to retry on timeout/5xx
+        return this.retryRequest(makeRequest, maxRetries, 1000);
       } else {
-        // POST/PUT/PATCH/DELETE: Single attempt only (no retry to prevent duplicates)
+        // Non-idempotent mutations: Single attempt only
         return makeRequest();
       }
     });
 
+    // Log successful request (synchronous for timing accuracy)
+    const duration = Date.now() - startTime;
+    if (logRequest) {
+      console.log(
+        `✅ [${requestId}] ${method} ${endpoint} - ${duration}ms`,
+        duration > 2000 ? '⚠️ SLOW!' : '✅ OK',
+        {
+          status: response.status,
+          timestamp: new Date().toISOString(),
+        },
+      );
+    }
+
+    // Track request in log (non-blocking for performance)
+    setTimeout(() => {
+      this.addRequestLog({
+        requestId,
+        endpoint,
+        method,
+        timestamp: startTime,
+        duration,
+        status: response.status,
+      });
+    }, 0);
+
     return response;
+  }
+
+  /**
+   * Add request to log (with size limit)
+   */
+  private addRequestLog(entry: {
+    requestId: string;
+    endpoint: string;
+    method: string;
+    timestamp: number;
+    duration?: number;
+    status?: number;
+    error?: string;
+  }): void {
+    this.requestLog.push(entry);
+    // Keep only last N requests
+    if (this.requestLog.length > this.maxLogSize) {
+      this.requestLog.shift();
+    }
+  }
+
+  /**
+   * Get recent request logs (for debugging)
+   */
+  getRequestLogs(limit: number = 20): Array<{
+    requestId: string;
+    endpoint: string;
+    method: string;
+    timestamp: number;
+    duration?: number;
+    status?: number;
+    error?: string;
+  }> {
+    return this.requestLog.slice(-limit);
+  }
+
+  /**
+   * Clear request logs
+   */
+  clearRequestLogs(): void {
+    this.requestLog = [];
   }
 
   /**
@@ -418,6 +634,27 @@ class UnifiedApiService {
 
   /**
    * POST request
+   * Enhanced with idempotency support and optional retry for idempotent requests
+   *
+   * @example
+   * // Basic POST (idempotency auto-enabled)
+   * await unifiedApi.post('/transactions', { amount: 100 });
+   *
+   * // POST with custom idempotency key
+   * await unifiedApi.post('/transactions', { amount: 100 }, {
+   *   idempotencyKey: 'custom-key-123'
+   * });
+   *
+   * // POST with retry on timeout (safe for idempotent endpoints)
+   * await unifiedApi.post('/transactions', { amount: 100 }, {
+   *   retryOnTimeout: true,
+   *   maxRetries: 2
+   * });
+   *
+   * // POST without idempotency (for non-idempotent endpoints)
+   * await unifiedApi.post('/auth/send-otp', { phone: '123' }, {
+   *   useIdempotency: false
+   * });
    */
   async post<T>(
     endpoint: string,
@@ -855,7 +1092,7 @@ class AppApiService extends UnifiedApiService {
     }
 
     return this.get(`/transactions/limits?${params.toString()}`, {
-      cacheTTL: 60 * 1000, // 1 minute
+      cacheTTL: 2 * 60 * 1000, // 2 minutes (increased for better performance)
     });
   }
 

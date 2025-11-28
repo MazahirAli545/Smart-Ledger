@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -42,6 +42,7 @@ import {
 import { useSubscription } from '../../context/SubscriptionContext';
 
 const { width } = Dimensions.get('window');
+const TRANSACTION_PAGE_SIZE = 25;
 
 const CustomerDetailScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<AppStackParamList>>();
@@ -67,6 +68,11 @@ const CustomerDetailScreen: React.FC = () => {
   const [recentTransactions, setRecentTransactions] = useState<any[]>([]);
   const [loadingTransactions, setLoadingTransactions] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [visibleTransactionCount, setVisibleTransactionCount] = useState(
+    TRANSACTION_PAGE_SIZE,
+  );
+  const [isPaginatingTransactions, setIsPaginatingTransactions] =
+    useState(false);
 
   // Add state for selected bottom action
   const [selectedAction, setSelectedAction] = useState<
@@ -144,6 +150,13 @@ const CustomerDetailScreen: React.FC = () => {
   const [balanceType, setBalanceType] = useState<'receipt' | 'payment'>(
     'payment',
   );
+
+  const paginatedTransactions = useMemo(
+    () => recentTransactions.slice(0, visibleTransactionCount),
+    [recentTransactions, visibleTransactionCount],
+  );
+  const hasMoreTransactions =
+    visibleTransactionCount < recentTransactions.length;
 
   // Fetch transactions for this customer
   const fetchTransactions = useCallback(async () => {
@@ -306,6 +319,7 @@ const CustomerDetailScreen: React.FC = () => {
       });
 
       setRecentTransactions(sortedEntries);
+      setVisibleTransactionCount(TRANSACTION_PAGE_SIZE);
     } catch (e: any) {
       console.error('Error fetching transactions:', e);
       setApiError(e.message || 'Error fetching transactions');
@@ -941,6 +955,23 @@ const CustomerDetailScreen: React.FC = () => {
     return null;
   };
 
+  const handleLoadMoreTransactions = () => {
+    if (
+      !hasMoreTransactions ||
+      isPaginatingTransactions ||
+      loadingTransactions
+    ) {
+      return;
+    }
+    setIsPaginatingTransactions(true);
+    setTimeout(() => {
+      setVisibleTransactionCount(prev =>
+        Math.min(prev + TRANSACTION_PAGE_SIZE, recentTransactions.length),
+      );
+      setIsPaginatingTransactions(false);
+    }, 200);
+  };
+
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
       {/* Header */}
@@ -1125,19 +1156,25 @@ const CustomerDetailScreen: React.FC = () => {
               </Text>
             </View>
           ) : (
-            <ScrollView
-              style={styles.transactionsScrollView}
-              contentContainerStyle={styles.transactionsScrollContent}
+            <FlatList
+              data={paginatedTransactions}
+              renderItem={renderTransactionItem}
+              keyExtractor={item => String(item.id)}
               showsVerticalScrollIndicator={false}
-              bounces={true}
-            >
-              {recentTransactions.map((item, index) => (
-                <View key={String(item.id)}>
-                  {renderTransactionItem({ item })}
+              contentContainerStyle={styles.transactionsScrollContent}
+              onEndReached={handleLoadMoreTransactions}
+              onEndReachedThreshold={0.4}
+              ListFooterComponent={
+                <View>
+                  {renderOpeningBalanceCard()}
+                  {isPaginatingTransactions && (
+                    <View style={styles.loadingMoreContainer}>
+                      <ActivityIndicator size="small" color="#4f8cff" />
+                    </View>
+                  )}
                 </View>
-              ))}
-              {renderOpeningBalanceCard()}
-            </ScrollView>
+              }
+            />
           )}
         </View>
       </View>
@@ -1647,6 +1684,10 @@ const styles = StyleSheet.create({
   },
   transactionsScrollContent: {
     paddingBottom: 80,
+  },
+  loadingMoreContainer: {
+    paddingVertical: 16,
+    alignItems: 'center',
   },
   balanceCard: {
     backgroundColor: uiColors.bgCard,

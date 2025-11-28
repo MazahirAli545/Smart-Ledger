@@ -1,4 +1,10 @@
-﻿import React, { useState, useRef, useEffect, useCallback } from 'react';
+﻿import React, {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  useMemo,
+} from 'react';
 import {
   View,
   Text,
@@ -73,6 +79,8 @@ interface Props {
 // Global scale helper for UI scaling rule - increase all dimensions by 2 units
 const SCALE = 0.75; // Base scale to match reference screens
 const scale = (value: number) => Math.round(value * SCALE);
+
+const RECEIPT_LIST_PAGE_SIZE = 25;
 
 const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
   container: {
@@ -271,6 +279,10 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
   listContainer: {
     flex: 1,
     padding: scale(16),
+  },
+  listFooterLoader: {
+    paddingVertical: scale(16),
+    alignItems: 'center',
   },
   addInvoiceButton: {
     position: 'absolute',
@@ -734,6 +746,10 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
   const [apiReceipts, setApiReceipts] = useState<any[]>([]);
   const [loadingApi, setLoadingApi] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [visibleReceiptCount, setVisibleReceiptCount] = useState(
+    RECEIPT_LIST_PAGE_SIZE,
+  );
+  const [isReceiptPaginating, setIsReceiptPaginating] = useState(false);
   // 1. Add editingItem state
   const [editingItem, setEditingItem] = useState<any>(null);
   const [syncYN, setSyncYN] = useState('N');
@@ -1659,6 +1675,22 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
       matchesDescription
     );
   });
+
+  const orderedReceipts = useMemo(
+    () => [...filteredReceipts].reverse(),
+    [filteredReceipts],
+  );
+
+  const paginatedReceipts = useMemo(
+    () => orderedReceipts.slice(0, visibleReceiptCount),
+    [orderedReceipts, visibleReceiptCount],
+  );
+
+  const hasMoreReceipts = visibleReceiptCount < orderedReceipts.length;
+
+  useEffect(() => {
+    setVisibleReceiptCount(RECEIPT_LIST_PAGE_SIZE);
+  }, [filteredReceipts]);
 
   // Enhanced isFieldInvalid helper with specific validation
   const isFieldInvalid = (field: string, fieldType?: string) => {
@@ -2913,6 +2945,30 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
       )}
     </View>
   );
+
+  const handleLoadMoreReceipts = () => {
+    if (!hasMoreReceipts || isReceiptPaginating) {
+      return;
+    }
+    setIsReceiptPaginating(true);
+    setTimeout(() => {
+      setVisibleReceiptCount(prev =>
+        Math.min(prev + RECEIPT_LIST_PAGE_SIZE, orderedReceipts.length),
+      );
+      setIsReceiptPaginating(false);
+    }, 200);
+  };
+
+  const renderReceiptFooter = () => {
+    if (!isReceiptPaginating) {
+      return null;
+    }
+    return (
+      <View style={styles.listFooterLoader}>
+        <ActivityIndicator size="small" color="#4f8cff" />
+      </View>
+    );
+  };
 
   // Fetch receipts from API with customer data enrichment
   const fetchReceipts = async () => {
@@ -5382,11 +5438,14 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
           </Text>
         ) : (
           <FlatList
-            data={[...filteredReceipts].reverse()}
+            data={paginatedReceipts}
             renderItem={renderReceiptItem}
             keyExtractor={item => String(item.id)}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={{ paddingBottom: 100 }}
+            onEndReached={handleLoadMoreReceipts}
+            onEndReachedThreshold={0.5}
+            ListFooterComponent={renderReceiptFooter}
           />
         )}
       </View>
