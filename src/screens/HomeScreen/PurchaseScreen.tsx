@@ -247,6 +247,10 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
   const [forceUpdate, setForceUpdate] = useState(0); // Additional force update state
   const [loadingApi, setLoadingApi] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const isFetchingPurchasesRef = useRef(false); // Prevent concurrent fetches
+  const didInitialLoadRef = useRef(false); // Track if initial load has completed
+  const justCompletedOperationRef = useRef(false); // Track if we just completed POST/UPDATE
+  const lastOperationTimeRef = useRef<number>(0); // Track timestamp of last operation
   const [apiError, setApiError] = useState<string | null>(null);
   const [visiblePurchaseCount, setVisiblePurchaseCount] = useState(
     PURCHASE_LIST_PAGE_SIZE,
@@ -310,19 +314,188 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
       }
       // Use unified API for delete
       const numericId = typeof id === 'string' ? Number(id) : id;
-      await unifiedApi.deleteTransaction(numericId);
-      await fetchPurchases();
+      const purchaseId = numericId;
+
+      // Validate ID before attempting delete
+      if (!numericId || isNaN(numericId) || numericId <= 0) {
+        setError('Invalid transaction ID. Please try again.');
+        setShowModal(true);
+        return;
+      }
+
+      console.log('🗑️ PurchaseScreen: Deleting purchase with ID:', numericId);
+
+      // Optimistic UI update: remove item immediately
+      setApiPurchases(prev => {
+        const filtered = (prev || []).filter(
+          p => String(p.id) !== String(id) && Number(p.id) !== purchaseId,
+        );
+        console.log('🔄 [DELETE] Optimistic update - removed item:', {
+          deletedId: id,
+          remainingCount: filtered.length,
+          previousCount: prev?.length || 0,
+        });
+        return filtered;
+      });
+
+      // Update refresh key immediately to force FlatList re-render
+      setRefreshKey(prev => prev + 1);
+
+      // Invalidate cache to ensure fresh data
+      unifiedApi.invalidateCachePattern('.*/transactions.*');
+
+      // Use unified API for delete
+      // DELETE operations often return 204 No Content (empty response)
+      try {
+        const deleteResponse = (await unifiedApi.deleteTransaction(
+          numericId,
+        )) as {
+          data: any;
+          status: number;
+          headers: Headers;
+        };
+        console.log('✅ [DELETE] Purchase deleted successfully:', {
+          status: deleteResponse?.status,
+          hasData: !!deleteResponse?.data,
+        });
+      } catch (deleteError: any) {
+        // Check if it's a JSON parse error from empty response (204 No Content)
+        // This is actually a success case for DELETE operations
+        const isJsonParseError =
+          deleteError?.message?.includes('JSON Parse error') ||
+          deleteError?.message?.includes('Unexpected end of input') ||
+          deleteError?.message?.includes('JSON') ||
+          deleteError?.name === 'SyntaxError' ||
+          (deleteError?.message &&
+            typeof deleteError.message === 'string' &&
+            deleteError.message.includes('parse'));
+
+        const is204Success =
+          deleteError?.response?.status === 204 ||
+          deleteError?.status === 204 ||
+          deleteError?.statusCode === 204;
+
+        // Handle 204 No Content and JSON parse errors as success
+        if (is204Success || isJsonParseError) {
+          console.log(
+            '✅ PurchaseScreen: Delete successful (204 No Content or JSON parse error)',
+          );
+          // Don't re-throw - treat as success
+        } else {
+          // For other errors, re-throw to be caught by outer catch
+          throw deleteError;
+        }
+      }
+
+      // Small delay to ensure server has processed the delete
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Refresh from server to ensure consistency (but optimistic update already removed it from UI)
+      try {
+        await fetchPurchases();
+      } catch (refreshError) {
+        console.warn(
+          '⚠️ [DELETE] Error refreshing purchases, but item already removed optimistically:',
+          refreshError,
+        );
+      }
+
       setShowCreateForm(false);
       setEditingItem(null);
+      // Update refresh key again after server refresh
+      setRefreshKey(prev => prev + 1);
+      console.log('✅ Purchase deleted successfully');
     } catch (e: any) {
-      setError(e.message || 'Failed to delete purchase.');
+      console.error('❌ Error deleting purchase:', e);
+
+      // Check if it's a JSON parse error from empty response (204 No Content)
+      // This is actually a success case for DELETE operations
+      const isJsonParseError =
+        e?.message?.includes('JSON Parse error') ||
+        e?.message?.includes('Unexpected end of input') ||
+        e?.message?.includes('JSON') ||
+        e?.name === 'SyntaxError' ||
+        (e?.message &&
+          typeof e.message === 'string' &&
+          e.message.includes('parse'));
+
+      const is204Success =
+        e?.response?.status === 204 || e?.status === 204 || isJsonParseError;
+
+      if (is204Success) {
+        console.log(
+          '✅ PurchaseScreen: Delete successful (204 No Content or JSON parse error)',
+        );
+        // Item already removed optimistically, just refresh to sync
+        try {
+          await fetchPurchases();
+          setRefreshKey(prev => prev + 1);
+        } catch (refreshError) {
+          console.warn(
+            '⚠️ [DELETE] Error refreshing after 204, but item already removed:',
+            refreshError,
+          );
+        }
+        setShowCreateForm(false);
+        setEditingItem(null);
+        return;
+      }
+
+      // Extract error message from various possible formats
+      let errorMessage = 'Failed to delete purchase.';
+
+      if (e?.response?.data?.message) {
+        errorMessage = e.response.data.message;
+      } else if (e?.response?.data?.error) {
+        errorMessage = e.response.data.error;
+      } else if (e?.message) {
+        errorMessage = e.message;
+      } else if (typeof e === 'string') {
+        errorMessage = e;
+      }
+
+      // Handle specific error cases
+      const errorMsgLower = errorMessage.toLowerCase();
+      if (
+        errorMsgLower.includes('not found') ||
+        errorMsgLower.includes('transaction not found') ||
+        errorMsgLower.includes('does not exist')
+      ) {
+        errorMessage =
+          'Transaction not found. It may have already been deleted.';
+      } else if (
+        errorMsgLower.includes('permission') ||
+        errorMsgLower.includes('forbidden') ||
+        errorMsgLower.includes('unauthorized')
+      ) {
+        errorMessage = 'You do not have permission to delete this transaction.';
+      } else if (
+        errorMsgLower.includes('network') ||
+        errorMsgLower.includes('fetch')
+      ) {
+        errorMessage =
+          'Network error. Please check your connection and try again.';
+      }
+
+      setError(errorMessage);
       setShowModal(true);
     }
   };
 
-  const fetchPurchasesFn = async (page = 1) => {
-    console.log('🔄 fetchPurchases called');
-    setLoadingApi(true);
+  const fetchPurchasesFn = async (page = 1, showLoading = true) => {
+    // Prevent concurrent fetches
+    if (isFetchingPurchasesRef.current) {
+      console.log(
+        '⚠️ PurchaseScreen: fetchPurchasesFn already in progress, skipping...',
+      );
+      return;
+    }
+
+    console.log('🔄 fetchPurchases called', { showLoading });
+    isFetchingPurchasesRef.current = true;
+    if (showLoading) {
+      setLoadingApi(true);
+    }
     setApiError(null);
     try {
       // Parallel API calls with caching - optimized!
@@ -585,6 +758,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
               partyType: 'supplier',
               items: mergedItems,
               gstPct: typeof gstFallback === 'number' ? gstFallback : undefined,
+              _lastUpdated: Date.now(),
               _debug: {
                 matched: !!party,
                 matchedPartyId: party?.id,
@@ -639,6 +813,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                 ...d,
                 items: normalizedItems,
                 gstPct: normalizedGst,
+                _lastUpdated: Date.now(),
               };
             } catch {}
 
@@ -658,11 +833,19 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
                     : typeof parsed?.gstPct === 'number'
                     ? parsed.gstPct
                     : undefined;
-                return { ...v, items: normalizedItems, gstPct: normalizedGst };
+                return {
+                  ...v,
+                  items: normalizedItems,
+                  gstPct: normalizedGst,
+                  _lastUpdated: Date.now(),
+                };
               }
             } catch {}
           }
-          return v;
+          return {
+            ...v,
+            _lastUpdated: v._lastUpdated || Date.now(),
+          };
         }),
       );
 
@@ -725,6 +908,7 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
       setApiError(e.message || 'Error fetching purchases');
     } finally {
       setLoadingApi(false);
+      isFetchingPurchasesRef.current = false;
     }
   };
 
@@ -734,7 +918,15 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
   }, []); // Empty deps - fetchPurchasesFn will always have access to latest state through closure
 
   useEffect(() => {
-    fetchPurchases();
+    (async () => {
+      try {
+        await fetchPurchasesFn();
+      } catch (e) {
+        console.error('Error in initial fetch:', e);
+      } finally {
+        didInitialLoadRef.current = true;
+      }
+    })();
     const initializePurchaseNumber = async () => {
       try {
         // Preview only - don't store until transaction is saved
@@ -748,33 +940,6 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
     };
     initializePurchaseNumber();
   }, []);
-
-  // Refresh data when screen comes into focus (e.g., after editing)
-  useFocusEffect(
-    useCallback(() => {
-      console.log('🔍 PurchaseScreen: useFocusEffect triggered', {
-        showCreateForm,
-        editingItemId: editingItem?.id,
-      });
-
-      // Don't refresh while editing
-      if (showCreateForm || editingItem) {
-        console.log('🔍 PurchaseScreen: Skipping refresh - in edit mode');
-        return;
-      }
-
-      console.log('🔍 PurchaseScreen: Screen focused, refreshing purchases...');
-
-      // Small delay to ensure form has fully closed before refreshing
-      setTimeout(() => {
-        fetchPurchases();
-      }, 100);
-
-      return () => {
-        console.log('🔍 PurchaseScreen: Screen unfocused');
-      };
-    }, [showCreateForm, editingItem, fetchPurchases]),
-  );
 
   const handleEditItem = async (item: any) => {
     if (!item) {
@@ -1240,7 +1405,11 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
             </Text>
             <StatusBadge status={item.status} />
           </View>
-          <Text style={styles.customerName}>
+          <Text
+            style={styles.customerName}
+            numberOfLines={1}
+            ellipsizeMode="tail"
+          >
             {item.partyName || 'Unknown Supplier'}
           </Text>
           <View style={styles.invoiceDetails}>
@@ -1528,6 +1697,14 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
     return !!(val && String(val).trim().length > 0);
   };
 
+  // Normalize phone for UI display: prefer last 10 digits when available.
+  const normalizePhoneForUI = useCallback((val?: string) => {
+    if (!val) return '';
+    const digits = String(val).replace(/\D/g, '');
+    if (digits.length >= 10) return digits.slice(-10);
+    return '';
+  }, []);
+
   // Function to directly patch supplier record (similar to PaymentScreen)
   const persistSupplierDirectPatch = useCallback(
     async (
@@ -1578,6 +1755,321 @@ const PurchaseScreen: React.FC<FolderProp> = ({ folder }) => {
   } = useSupplierContext();
   const { appendVoucher } = useVouchers();
   const { forceCheckTransactionLimit, forceShowPopup } = useTransactionLimit();
+
+  // Listen for profile update events (e.g., when supplier is updated in AddPartyScreen)
+  useEffect(() => {
+    const handleProfileUpdate = async () => {
+      // Skip if we just completed an operation (it already refreshed)
+      // Also check if operation happened recently (within last 5 seconds)
+      const timeSinceLastOperation = Date.now() - lastOperationTimeRef.current;
+      if (justCompletedOperationRef.current || timeSinceLastOperation < 5000) {
+        console.log(
+          '⚠️ PurchaseScreen: Skipping profile update - just completed operation',
+          {
+            flag: justCompletedOperationRef.current,
+            timeSinceLastOperation,
+          },
+        );
+        return;
+      }
+
+      // Prevent concurrent profile updates
+      if (isFetchingPurchasesRef.current) {
+        console.log(
+          '⚠️ PurchaseScreen: Already fetching, skipping profile update',
+        );
+        return;
+      }
+
+      console.log(
+        '═══════════════════════════════════════════════════════════',
+      );
+      console.log(
+        '📢 PurchaseScreen: Profile update event received, refreshing suppliers...',
+      );
+      console.log(
+        '═══════════════════════════════════════════════════════════',
+      );
+      try {
+        // Invalidate cache to ensure fresh supplier data
+        unifiedApi.invalidateCachePattern('.*/customers.*');
+        unifiedApi.invalidateCachePattern('.*/customers/suppliers.*');
+        unifiedApi.invalidateCachePattern('.*/transactions.*');
+
+        // Step 1: Fetch fresh suppliers via unifiedApi (bypasses cache after invalidation)
+        console.log(
+          '🔄 PurchaseScreen: Fetching fresh suppliers via unifiedApi...',
+        );
+        const suppliersResponse = (await unifiedApi.getSuppliers('')) as any;
+        const refreshedSuppliers = Array.isArray(suppliersResponse)
+          ? suppliersResponse
+          : Array.isArray(suppliersResponse?.data)
+          ? suppliersResponse.data
+          : [];
+
+        console.log(
+          '✅ PurchaseScreen: Fetched',
+          refreshedSuppliers.length,
+          'fresh suppliers',
+        );
+
+        // Step 2: Update supplier context FIRST so fetchPurchasesFn() uses updated data
+        try {
+          await fetchSuppliersCtx('');
+          console.log('✅ PurchaseScreen: Supplier context updated');
+          // Small delay to ensure context state has propagated
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } catch (e) {
+          console.warn(
+            '⚠️ PurchaseScreen: Error updating supplier context:',
+            e,
+          );
+        }
+
+        // Step 3: ALWAYS refresh purchases from server after supplier update
+        // This ensures we get the latest purchase data with updated supplier names from the backend
+        console.log(
+          '🔄 PurchaseScreen: Refreshing purchases from server to get latest supplier data...',
+        );
+
+        // Invalidate transactions cache to force fresh fetch
+        unifiedApi.invalidateCachePattern('.*/transactions.*');
+
+        // Fetch fresh purchases using the function directly (not the memoized callback)
+        // Don't show loading indicator - silent refresh after profile update
+        await fetchPurchasesFn(1, false);
+        // Update refresh key to force FlatList re-render
+        setRefreshKey(prev => prev + 1);
+
+        console.log(
+          '✅ PurchaseScreen: Suppliers and purchases refreshed after profile update',
+        );
+      } catch (error) {
+        console.error(
+          '❌ PurchaseScreen: Error refreshing suppliers on profile update:',
+          error,
+        );
+      }
+    };
+
+    profileUpdateManager.onProfileUpdate(handleProfileUpdate);
+    console.log('📢 PurchaseScreen: Registered profile update listener');
+
+    return () => {
+      profileUpdateManager.offProfileUpdate(handleProfileUpdate);
+      console.log('📢 PurchaseScreen: Unregistered profile update listener');
+    };
+  }, [fetchSuppliersCtx]);
+
+  // Refresh data when screen comes into focus (e.g., after editing)
+  useFocusEffect(
+    useCallback(() => {
+      // CRITICAL: Check flag FIRST, synchronously, before any async operations
+      const shouldSkipRefresh =
+        justCompletedOperationRef.current ||
+        Date.now() - lastOperationTimeRef.current < 5000;
+
+      console.log('🔍 PurchaseScreen: useFocusEffect triggered', {
+        showCreateForm,
+        editingItemId: editingItem?.id,
+        didInitialLoad: didInitialLoadRef.current,
+        justCompletedOperation: justCompletedOperationRef.current,
+        lastOperationTime: lastOperationTimeRef.current,
+        timeSinceLastOperation: Date.now() - lastOperationTimeRef.current,
+        shouldSkipRefresh,
+      });
+
+      // Skip initial load - it's handled by useEffect
+      if (!didInitialLoadRef.current) {
+        console.log(
+          '🔍 PurchaseScreen: Skipping focus refresh - initial load not complete',
+        );
+        return;
+      }
+
+      // Skip if we just completed a POST/UPDATE operation (it already refreshed)
+      // Check this FIRST before any other conditions
+      if (shouldSkipRefresh) {
+        console.log(
+          '🔍 PurchaseScreen: Skipping focus refresh - just completed operation',
+          {
+            flag: justCompletedOperationRef.current,
+            timeSinceLastOperation: Date.now() - lastOperationTimeRef.current,
+          },
+        );
+        return;
+      }
+
+      // Don't refresh while editing or if form is still open
+      if (showCreateForm || editingItem) {
+        console.log('🔍 PurchaseScreen: Skipping refresh - in edit mode');
+        return;
+      }
+
+      // Prevent concurrent fetches
+      if (isFetchingPurchasesRef.current) {
+        console.log(
+          '⚠️ PurchaseScreen: Already fetching, skipping focus refresh',
+        );
+        return;
+      }
+
+      console.log('🔍 PurchaseScreen: Screen focused, refreshing purchases...');
+
+      // Invalidate cache to ensure fresh data
+      unifiedApi.invalidateCachePattern('.*/customers.*');
+      unifiedApi.invalidateCachePattern('.*/customers/suppliers.*');
+      unifiedApi.invalidateCachePattern('.*/transactions.*');
+
+      // Refresh suppliers first to get latest names
+      fetchSuppliersCtx('')
+        .then(() => {
+          // Small delay to ensure form has fully closed before refreshing
+          // Don't show loading indicator - silent refresh on focus
+          setTimeout(() => {
+            fetchPurchasesFn(1, false);
+          }, 100);
+        })
+        .catch(() => {
+          // Even if supplier refresh fails, still refresh purchases
+          // Don't show loading indicator - silent refresh on focus
+          setTimeout(() => {
+            fetchPurchasesFn(1, false);
+          }, 100);
+        });
+
+      return () => {
+        console.log('🔍 PurchaseScreen: Screen unfocused');
+      };
+    }, [showCreateForm, editingItem, fetchSuppliersCtx]),
+  );
+
+  // When supplier context updates, sync phone/address into the form promptly
+  useEffect(() => {
+    try {
+      if (!selectedSupplier) return;
+      const currentSuppliersAny: any[] = (suppliers as any[]) || [];
+      const latest = currentSuppliersAny.find(
+        (s: any) => s.id === (selectedSupplier as any)?.id,
+      );
+      if (!latest) {
+        // If no selectedSupplier match, try resolve by typed name
+        const typedName = (supplier || '').trim().toLowerCase();
+        if (typedName) {
+          const byName = currentSuppliersAny.find(
+            (s: any) =>
+              ((s.name || s.partyName || '') as string).trim().toLowerCase() ===
+              typedName,
+          );
+          if (byName) {
+            setSelectedSupplier(byName as any);
+          }
+        }
+        return;
+      }
+      // If editing and the input still shows the old transaction partyName,
+      // replace it with the latest supplier name from context so the field reflects updates
+      try {
+        const latestDisplayName =
+          (latest as any).name || (latest as any).partyName || '';
+        if (
+          editingItem &&
+          latestDisplayName &&
+          String(supplier || '')
+            .trim()
+            .toLowerCase() ===
+            String(editingItem?.partyName || '')
+              .trim()
+              .toLowerCase() &&
+          latestDisplayName.trim().toLowerCase() !==
+            String(editingItem?.partyName || '')
+              .trim()
+              .toLowerCase()
+        ) {
+          setSupplier(latestDisplayName);
+        }
+      } catch {}
+      const latestPhone =
+        (latest as any).phoneNumber ||
+        (latest as any).phone ||
+        (latest as any).phone_number ||
+        '';
+      const latestAddress =
+        (latest as any).address ||
+        (latest as any).addressLine1 ||
+        (latest as any).address_line1 ||
+        (latest as any).address1 ||
+        '';
+
+      // Always update phone and address when supplier data changes
+      if (isValidPhoneValue(latestPhone)) {
+        setSupplierPhone(normalizePhoneForUI(String(latestPhone)));
+      }
+      if (isValidAddressValue(latestAddress)) {
+        setSupplierAddress(String(latestAddress));
+      }
+    } catch {}
+  }, [suppliers, selectedSupplier, supplier, editingItem, normalizePhoneForUI]);
+
+  // Immediate sync when selectedSupplier changes
+  useEffect(() => {
+    try {
+      if (!selectedSupplier) return;
+      const currentSuppliersAny: any[] = (suppliers as any[]) || [];
+      const latest = currentSuppliersAny.find(
+        (s: any) => s.id === (selectedSupplier as any)?.id,
+      );
+      if (!latest) return;
+
+      const latestPhone =
+        (latest as any).phoneNumber ||
+        (latest as any).phone ||
+        (latest as any).phone_number ||
+        '';
+      const latestAddress =
+        (latest as any).address ||
+        (latest as any).addressLine1 ||
+        (latest as any).address_line1 ||
+        (latest as any).address1 ||
+        '';
+
+      // Ensure the input field shows the latest supplier name during edit
+      try {
+        const latestDisplayName =
+          (latest as any).name || (latest as any).partyName || '';
+        if (
+          editingItem &&
+          latestDisplayName &&
+          String(supplier || '')
+            .trim()
+            .toLowerCase() ===
+            String(editingItem?.partyName || '')
+              .trim()
+              .toLowerCase() &&
+          latestDisplayName.trim().toLowerCase() !==
+            String(editingItem?.partyName || '')
+              .trim()
+              .toLowerCase()
+        ) {
+          setSupplier(latestDisplayName);
+        }
+      } catch {}
+
+      // Immediately update phone and address when supplier is selected
+      if (isValidPhoneValue(latestPhone)) {
+        setSupplierPhone(normalizePhoneForUI(String(latestPhone)));
+      }
+      if (isValidAddressValue(latestAddress)) {
+        setSupplierAddress(String(latestAddress));
+      }
+    } catch {}
+  }, [
+    selectedSupplier?.id,
+    suppliers,
+    supplier,
+    editingItem,
+    normalizePhoneForUI,
+  ]);
 
   const scrollRef = useRef<KeyboardAwareScrollView>(null);
   const purchaseNumberRef = useRef<TextInput>(null);
@@ -2797,35 +3289,49 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
                 .trim();
               // When editing, compare against original values from editingItem
               // When creating, compare against existing supplier values
+              // Check name update - compare against both name and partyName fields (case-insensitive)
               const originalName = editingItem
                 ? editingItem.partyName || editingItem.supplierName || ''
-                : (existingSupplier as any).partyName ||
-                  (existingSupplier as any).name ||
+                : (existingSupplier as any).name?.trim() ||
+                  (existingSupplier as any).partyName?.trim() ||
                   '';
+              const needsNameUpdate =
+                supplierInputName.trim().toLowerCase() !==
+                originalName.toLowerCase();
 
+              // Check phone update - normalize both for comparison
               const originalPhone = editingItem
                 ? editingItem.partyPhone || editingItem.supplierPhone || ''
                 : (existingSupplier as any).phoneNumber ||
                   (existingSupplier as any).phone ||
                   (existingSupplier as any).phone_number ||
                   '';
+              // Normalize phone for comparison (extract last 10 digits)
+              const normalizePhoneForComparison = (val?: string) => {
+                if (!val) return '';
+                const digits = String(val).replace(/\D/g, '');
+                if (digits.length >= 10) return digits.slice(-10);
+                return digits;
+              };
+              const normalizedOriginalPhone =
+                normalizePhoneForComparison(originalPhone);
+              const normalizedSupplierPhone =
+                normalizePhoneForComparison(supplierPhone);
+              const needsPhoneUpdate =
+                isValidPhoneValue(supplierPhone) &&
+                normalizedSupplierPhone !== normalizedOriginalPhone;
 
+              // Check address update - compare against all possible address fields
               const originalAddress = editingItem
                 ? editingItem.partyAddress || editingItem.supplierAddress || ''
                 : (existingSupplier as any).address ||
                   (existingSupplier as any).addressLine1 ||
                   (existingSupplier as any).address_line1 ||
+                  (existingSupplier as any).address1 ||
                   '';
-
-              const needsNameUpdate =
-                supplierInputName.trim() !== originalName.trim();
-              const needsPhoneUpdate =
-                isValidPhoneValue(supplierPhone) &&
-                supplierPhone.trim().replace(/\D/g, '') !==
-                  (originalPhone || '').trim().replace(/\D/g, '');
               const needsAddressUpdate =
                 isValidAddressValue(supplierAddress) &&
-                supplierAddress.trim() !== (originalAddress || '').trim();
+                supplierAddress.trim() !== originalAddress.trim();
 
               console.log('🔍 PurchaseScreen: Checking supplier update:', {
                 existingSupplier: !!existingSupplier,
@@ -2959,6 +3465,11 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
         throw new Error(errorInfo.message || 'Failed to save purchase.');
       }
 
+      // Mark that we just completed an operation to prevent duplicate refreshes
+      // Set this IMMEDIATELY after operation succeeds, before any other operations
+      justCompletedOperationRef.current = true;
+      lastOperationTimeRef.current = Date.now(); // Track when operation completed
+
       // Read response once - responseData is already set for both POST and PUT
       const serverResponse = responseData;
       console.log('🔍 PurchaseScreen: Server response:', serverResponse);
@@ -3010,21 +3521,38 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
       await new Promise(resolve => setTimeout(resolve, 200));
 
       // Call fetchPurchasesFn directly (not the memoized wrapper) to ensure fresh data
-      await fetchPurchasesFn();
+      // Don't show loading indicator - silent refresh after POST/UPDATE
+      await fetchPurchasesFn(1, false);
+
+      // Update refresh key to force FlatList re-render
+      setRefreshKey(prev => prev + 1);
 
       // Remember if this was an update before clearing editingItem
       const wasEdit = !!editingItem;
 
-      // Close the form first
+      // Close the form - the flag is already set, so useFocusEffect will skip refresh
       setEditingItem(null);
       setShowCreateForm(false);
       resetForm();
+
+      // Add a small delay to ensure state updates are processed
+      // This helps ensure the flag check happens before any focus events
+      await new Promise(resolve => setTimeout(resolve, 50));
 
       // Emit profile update event to refresh CustomerScreen
       console.log(
         '📢 PurchaseScreen: Emitting profile update event after transaction save',
       );
       profileUpdateManager.emitProfileUpdate();
+
+      // Reset the flag after a delay to allow focus effect to skip refresh
+      // Use a longer delay to ensure the screen has time to come back into focus
+      // and the useFocusEffect has had a chance to check the flag
+      setTimeout(() => {
+        justCompletedOperationRef.current = false;
+        lastOperationTimeRef.current = 0; // Reset timestamp
+        console.log('🔄 PurchaseScreen: Reset justCompletedOperationRef flag');
+      }, 6000); // 6 seconds to ensure focus event has been processed
 
       // Mark CustomerScreen's cache as stale so it will refetch when focused
       // This ensures other screens pick up the updated data
@@ -4123,6 +4651,9 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
                       getFieldError('supplierPhone') && {
                         borderColor: 'red',
                       },
+                    editingItem && {
+                      backgroundColor: '#f5f5f5',
+                    },
                   ]}
                   value={supplierPhone}
                   onChangeText={text => {
@@ -4140,6 +4671,7 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
                   placeholderTextColor="#666666"
                   keyboardType="phone-pad"
                   maxLength={10}
+                  editable={!editingItem}
                 />
                 {getFieldError('supplierPhone') ? (
                   <Text style={styles.errorTextField}>
@@ -5726,8 +6258,14 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
             key={`purchase-list-${refreshKey}-${forceUpdate}`}
             data={paginatedPurchases}
             renderItem={renderPurchaseItem}
-            keyExtractor={item => `purchase-${item.id}-${refreshKey}`}
-            extraData={`${refreshKey}-${forceUpdate}-${visiblePurchaseCount}`}
+            keyExtractor={item =>
+              `purchase-${item.id}-${item.partyName || ''}-${
+                item._lastUpdated || 0
+              }-${refreshKey}`
+            }
+            extraData={`${refreshKey}-${forceUpdate}-${visiblePurchaseCount}-${
+              apiPurchases.length
+            }-${apiPurchases[0]?._lastUpdated || 0}`}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={{ paddingBottom: 100 }}
             refreshControl={
@@ -6571,6 +7109,8 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
     color: '#333', // Card content - darker for better readability
     marginBottom: scale(8),
     fontWeight: 'normal',
+    fontFamily: 'Roboto-Medium',
+    width: '85%',
   },
   invoiceDetails: {
     flexDirection: 'row',

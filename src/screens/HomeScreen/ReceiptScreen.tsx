@@ -57,6 +57,7 @@ import { useTransactionLimit } from '../../context/TransactionLimitContext';
 import { generateNextDocumentNumber } from '../../utils/autoNumberGenerator';
 import AudioRecorderPlayer from 'react-native-audio-recorder-player';
 import { parseInvoiceVoiceText } from '../../utils/voiceParser';
+import { profileUpdateManager } from '../../utils/profileUpdateManager';
 import { getStatusBarHeight } from 'react-native-status-bar-height';
 import { getStatusBarSpacerHeight } from '../../utils/statusBarManager';
 import {
@@ -258,6 +259,8 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
     color: '#333', // Card content - darker for better readability
     marginBottom: scale(8),
     fontWeight: 'normal',
+    fontFamily: 'Roboto-Medium',
+    width: '85%',
   },
 
   invoiceDetails: {
@@ -750,6 +753,7 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
     RECEIPT_LIST_PAGE_SIZE,
   );
   const [isReceiptPaginating, setIsReceiptPaginating] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0); // Force re-render key for FlatList
   // 1. Add editingItem state
   const [editingItem, setEditingItem] = useState<any>(null);
   const [syncYN, setSyncYN] = useState('N');
@@ -2357,10 +2361,13 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
                         p.partyPhone ||
                         '',
                       _raw: { ...(p._raw || {}), ...serverItem },
+                      _lastUpdated: Date.now(),
                     }
                   : p,
               ),
             );
+            // Update refresh key to force FlatList re-render
+            setRefreshKey(prev => prev + 1);
           } else {
             // Fallback to optimistic update if no server response
             setApiReceipts(prev =>
@@ -2370,10 +2377,13 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
                       ...p,
                       ...updatedFields,
                       _raw: { ...(p._raw || {}), ...updatedFields },
+                      _lastUpdated: Date.now(),
                     }
                   : p,
               ),
             );
+            // Update refresh key to force FlatList re-render
+            setRefreshKey(prev => prev + 1);
           }
         }
       } catch {}
@@ -2409,11 +2419,14 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
                   partyAddress: cleanBody.partyAddress || p.partyAddress,
                   partyPhone: cleanBody.partyPhone || p.partyPhone,
                 },
+                _lastUpdated: Date.now(),
               };
             }
             return p;
           }),
         );
+        // Update refresh key to force FlatList re-render
+        setRefreshKey(prev => prev + 1);
       } else {
         // For new receipts, refresh from server
         await fetchReceipts();
@@ -2672,12 +2685,129 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
       const token = await AsyncStorage.getItem('accessToken');
       // Use unified API for delete
       const numericId = typeof id === 'string' ? Number(id) : id;
-      await unifiedApi.deleteTransaction(numericId);
-      await fetchReceipts();
+
+      console.log('🗑️ [DELETE] Starting receipt deletion:', id);
+
+      // Optimistic UI update - remove item immediately (before API call)
+      setApiReceipts(prev => {
+        const filtered = (prev || []).filter(
+          p => String(p.id) !== String(id) && Number(p.id) !== numericId,
+        );
+        console.log('🔄 [DELETE] Optimistic update - removed item:', {
+          deletedId: id,
+          remainingCount: filtered.length,
+          previousCount: prev?.length || 0,
+        });
+        return filtered;
+      });
+
+      // Update refresh key immediately to force FlatList re-render
+      setRefreshKey(prev => prev + 1);
+
+      // Invalidate cache to ensure fresh data
+      unifiedApi.invalidateCachePattern('.*/transactions.*');
+
+      // Use unified API for delete
+      // DELETE operations often return 204 No Content (empty response)
+      try {
+        const deleteResponse = (await unifiedApi.deleteTransaction(
+          numericId,
+        )) as {
+          data: any;
+          status: number;
+          headers: Headers;
+        };
+        console.log('✅ [DELETE] Receipt deleted successfully:', {
+          status: deleteResponse?.status,
+          hasData: !!deleteResponse?.data,
+        });
+      } catch (deleteError: any) {
+        // Check if it's a JSON parse error from empty response (204 No Content)
+        // This is actually a success case for DELETE operations
+        const isJsonParseError =
+          deleteError?.message?.includes('JSON Parse error') ||
+          deleteError?.message?.includes('Unexpected end of input') ||
+          deleteError?.message?.includes('JSON') ||
+          deleteError?.name === 'SyntaxError' ||
+          (deleteError?.message &&
+            typeof deleteError.message === 'string' &&
+            deleteError.message.includes('parse'));
+
+        const is204Success =
+          deleteError?.response?.status === 204 ||
+          deleteError?.status === 204 ||
+          deleteError?.statusCode === 204;
+
+        // Handle 204 No Content and JSON parse errors as success
+        if (is204Success || isJsonParseError) {
+          console.log(
+            '✅ ReceiptScreen: Delete successful (204 No Content or JSON parse error)',
+          );
+          // Don't re-throw - treat as success
+        } else {
+          // For other errors, re-throw to be caught by outer catch
+          throw deleteError;
+        }
+      }
+
+      // Small delay to ensure server has processed the delete
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Refresh from server to ensure consistency (but optimistic update already removed it from UI)
+      // Only refresh if we need to sync with server, otherwise the optimistic update is sufficient
+      try {
+        await fetchReceipts();
+      } catch (refreshError) {
+        console.warn(
+          '⚠️ [DELETE] Error refreshing receipts, but item already removed optimistically:',
+          refreshError,
+        );
+      }
+
       setShowCreateForm(false);
       setEditingItem(null);
+      // Update refresh key again after server refresh
+      setRefreshKey(prev => prev + 1);
     } catch (e: any) {
-      setError(e.message || 'Failed to delete receipt.');
+      console.error('❌ [DELETE] Error deleting receipt:', e);
+
+      // Check if it's a JSON parse error from empty response (204 No Content)
+      // This is actually a success case for DELETE operations
+      const isJsonParseError =
+        e?.message?.includes('JSON Parse error') ||
+        e?.message?.includes('Unexpected end of input') ||
+        e?.message?.includes('JSON') ||
+        e?.name === 'SyntaxError' ||
+        (e?.message &&
+          typeof e.message === 'string' &&
+          e.message.includes('parse'));
+
+      const is204Success =
+        e?.response?.status === 204 || e?.status === 204 || isJsonParseError;
+
+      if (is204Success) {
+        console.log(
+          '✅ ReceiptScreen: Delete successful (204 No Content or JSON parse error)',
+        );
+        // Item already removed optimistically, just refresh to sync
+        try {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          await fetchReceipts();
+          setRefreshKey(prev => prev + 1);
+        } catch (refreshError) {
+          console.warn(
+            '⚠️ [DELETE] Error refreshing after 204, but item already removed:',
+            refreshError,
+          );
+        }
+      } else {
+        // For real errors, refresh from server to restore correct state
+        console.error(
+          '❌ [DELETE] Real error occurred, restoring state from server',
+        );
+        await fetchReceipts();
+        setError(e.message || 'Failed to delete receipt.');
+      }
     }
   };
 
@@ -2779,6 +2909,8 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
       // Use unified API for sync
       await unifiedApi.updateTransaction(item.id, putBody);
       await fetchReceipts();
+      // Update refresh key to force FlatList re-render
+      setRefreshKey(prev => prev + 1);
     } catch (e: any) {
       console.error('Sync error:', e.message);
       // Optionally show error to user
@@ -2918,7 +3050,13 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
           </Text>
           <StatusBadge status={item.status} />
         </View>
-        <Text style={styles.customerName}>{item.partyName}</Text>
+        <Text
+          style={styles.customerName}
+          numberOfLines={1}
+          ellipsizeMode="tail"
+        >
+          {item.partyName}
+        </Text>
         <View style={styles.invoiceDetails}>
           <Text style={styles.invoiceDate}>{item.date?.slice(0, 10)}</Text>
           <Text style={styles.invoiceAmount}>
@@ -3193,10 +3331,15 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
             },
             // keep original response for edit-time fallback
             _raw: voucher,
+            // Add timestamp to force re-render
+            _lastUpdated: Date.now(),
           };
         });
 
-      setApiReceipts(enrichedReceipts);
+      // Force state update by creating a new array reference
+      setApiReceipts([...enrichedReceipts]);
+      // Update refresh key to force FlatList re-render
+      setRefreshKey(prev => prev + 1);
       console.log(
         '✅ Fetched receipts with customer data:',
         enrichedReceipts.length,
@@ -3240,10 +3383,240 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
     initializeReceiptNumber();
   }, []);
 
-  // Add a focus effect to refresh data when screen comes into focus
+  // Listen for profile update events (e.g., when customer is updated in AddPartyScreen)
+  useEffect(() => {
+    const handleProfileUpdate = async () => {
+      console.log(
+        '═══════════════════════════════════════════════════════════',
+      );
+      console.log(
+        '📢 ReceiptScreen: Profile update event received, refreshing customers...',
+      );
+      console.log(
+        '📢 ReceiptScreen: Current apiReceipts count:',
+        apiReceipts.length,
+      );
+      console.log(
+        '═══════════════════════════════════════════════════════════',
+      );
+      try {
+        // Invalidate cache to ensure fresh customer data
+        unifiedApi.invalidateCachePattern('.*/customers.*');
+        unifiedApi.invalidateCachePattern('.*/transactions.*');
+
+        // Step 1: Fetch fresh customers via unifiedApi (bypasses cache after invalidation)
+        console.log(
+          '🔄 ReceiptScreen: Fetching fresh customers via unifiedApi...',
+        );
+        const customersResponse = (await unifiedApi.getCustomers('')) as any;
+        const refreshedCustomers = Array.isArray(customersResponse)
+          ? customersResponse
+          : Array.isArray(customersResponse?.data)
+          ? customersResponse.data
+          : [];
+
+        console.log(
+          '✅ ReceiptScreen: Fetched',
+          refreshedCustomers.length,
+          'fresh customers',
+        );
+
+        // Step 2: Update customer context FIRST so fetchReceipts() uses updated data
+        try {
+          await fetchAll('');
+          console.log('✅ ReceiptScreen: Customer context updated');
+          // Small delay to ensure context state has propagated
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } catch (e) {
+          console.warn('⚠️ ReceiptScreen: Error updating customer context:', e);
+        }
+
+        // Step 3: ALWAYS refresh receipts from server after customer update
+        console.log(
+          '🔄 ReceiptScreen: Refreshing receipts from server to get latest customer data...',
+        );
+
+        // Invalidate transactions cache to force fresh fetch
+        unifiedApi.invalidateCachePattern('.*/transactions.*');
+
+        // Fetch fresh receipts and enrich with fresh customer data
+        try {
+          const response = (await unifiedApi.getReceipts(1, 20)) as {
+            data: any;
+            status: number;
+            headers: Headers;
+          };
+          const data = response?.data || response || {};
+          const vouchers = Array.isArray(data) ? data : data.data || [];
+
+          // Filter and enrich receipts with FRESH customer data
+          const expectedType = 'credit';
+          const enrichedReceipts = vouchers
+            .filter((v: any) => {
+              const typeMatches = String(v.type).toLowerCase() === expectedType;
+              const isReceiptLike =
+                !Array.isArray(v.items) ||
+                (Array.isArray(v.items) && v.items.length === 0);
+              const isSubscription =
+                String(v.category || '').toLowerCase() === 'subscription' ||
+                String(v.method || '').toLowerCase() === 'subscription';
+              return typeMatches && isReceiptLike && !isSubscription;
+            })
+            .map((voucher: any) => {
+              // Use FRESH customer data to enrich receipt
+              let party = null;
+
+              // Try to match by partyId first (most reliable)
+              const voucherPartyId =
+                voucher.partyId ||
+                voucher.customer_id ||
+                voucher._raw?.partyId ||
+                voucher._raw?.customer_id;
+
+              if (voucherPartyId) {
+                party = refreshedCustomers.find(
+                  (c: any) => Number(c.id) === Number(voucherPartyId),
+                );
+
+                if (party) {
+                  console.log('✅ [SERVER REFRESH] Matched receipt by ID:', {
+                    receiptId: voucher.id,
+                    voucherPartyId: voucherPartyId,
+                    customerId: party.id,
+                    customerName: party.name || party.partyName,
+                  });
+                }
+              }
+
+              // Fallback to name matching
+              if (!party && voucher.partyName) {
+                party = refreshedCustomers.find((c: any) => {
+                  const customerName = (c.name || c.partyName || '')
+                    .toLowerCase()
+                    .trim();
+                  const receiptName = (voucher.partyName || '')
+                    .toLowerCase()
+                    .trim();
+                  return customerName === receiptName && customerName !== '';
+                });
+              }
+
+              // Enrich with fresh customer data
+              if (party) {
+                const newName =
+                  party.name || party.partyName || voucher.partyName || '';
+                const newPhone =
+                  (party as any).phoneNumber ||
+                  (party as any).phone ||
+                  voucher.partyPhone ||
+                  '';
+                const newAddress =
+                  (party as any).address ||
+                  (party as any).addressLine1 ||
+                  voucher.partyAddress ||
+                  '';
+
+                console.log(
+                  '🔄 [SERVER REFRESH] Enriching receipt with fresh customer:',
+                  {
+                    receiptId: voucher.id,
+                    receiptNumber: voucher.receiptNumber || voucher.billNumber,
+                    oldName: voucher.partyName,
+                    newName: newName,
+                    matchedBy:
+                      voucher.partyId || voucher.customer_id ? 'ID' : 'Name',
+                    customerId: party.id,
+                  },
+                );
+
+                return {
+                  ...voucher,
+                  partyName: newName,
+                  partyPhone: newPhone,
+                  partyAddress: newAddress,
+                  _raw: {
+                    ...(voucher._raw || {}),
+                    partyName: newName,
+                    partyPhone: newPhone,
+                    partyAddress: newAddress,
+                  },
+                  _lastUpdated: Date.now(),
+                };
+              }
+
+              // No match found - return voucher as-is but with timestamp
+              return {
+                ...voucher,
+                _lastUpdated: Date.now(),
+              };
+            });
+
+          // Update state with enriched receipts
+          console.log(
+            `✅ ReceiptScreen: Setting ${enrichedReceipts.length} enriched receipts from server`,
+          );
+          if (enrichedReceipts.length > 0) {
+            console.log('🔄 ReceiptScreen: Sample enriched receipt:', {
+              id: enrichedReceipts[0]?.id,
+              partyName: enrichedReceipts[0]?.partyName,
+              partyId: enrichedReceipts[0]?.partyId,
+              _lastUpdated: enrichedReceipts[0]?._lastUpdated,
+            });
+          }
+
+          // Force state update by creating a new array reference
+          setApiReceipts([...enrichedReceipts]);
+          // Update refresh key to force FlatList re-render
+          setRefreshKey(prev => prev + 1);
+          console.log(
+            '🔄 ReceiptScreen: Refresh key updated to:',
+            refreshKey + 1,
+          );
+        } catch (fetchError) {
+          console.error(
+            '❌ ReceiptScreen: Error refreshing receipts from server:',
+            fetchError,
+          );
+          // Fallback to regular fetchReceipts
+          await fetchReceipts();
+          // Still update refresh key even on error
+          setRefreshKey(prev => prev + 1);
+        }
+
+        console.log(
+          '✅ ReceiptScreen: Customers and receipts refreshed after profile update',
+        );
+      } catch (error) {
+        console.error(
+          '❌ ReceiptScreen: Error refreshing customers on profile update:',
+          error,
+        );
+      }
+    };
+
+    profileUpdateManager.onProfileUpdate(handleProfileUpdate);
+    console.log('📢 ReceiptScreen: Registered profile update listener');
+
+    return () => {
+      profileUpdateManager.offProfileUpdate(handleProfileUpdate);
+      console.log('📢 ReceiptScreen: Unregistered profile update listener');
+    };
+  }, [fetchAll, fetchReceipts, apiReceipts]);
+
+  // Refresh data when screen regains focus to avoid stale customer/receipt info
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', () => {
-      console.log('🔍 ReceiptScreen: Screen focused, refreshing data...');
+      // Don't refresh while editing
+      if (showCreateForm || editingItem) {
+        console.log('🔄 ReceiptScreen: Skipping refresh - in edit mode');
+        return;
+      }
+
+      console.log('🔄 ReceiptScreen: Screen focused, refreshing data...');
+      // Invalidate cache to ensure fresh data
+      unifiedApi.invalidateCachePattern('.*/customers.*');
+      unifiedApi.invalidateCachePattern('.*/transactions.*');
+
       // Refresh customers and receipts when screen comes into focus
       fetchAll('')
         .then(() => {
@@ -3256,7 +3629,7 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
     });
 
     return unsubscribe;
-  }, [navigation]);
+  }, [navigation, showCreateForm, editingItem]);
 
   if (showCreateForm) {
     return (
@@ -5438,9 +5811,15 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
           </Text>
         ) : (
           <FlatList
+            key={`receipt-list-${refreshKey}`}
             data={paginatedReceipts}
             renderItem={renderReceiptItem}
-            keyExtractor={item => String(item.id)}
+            keyExtractor={item =>
+              `receipt-${item.id}-${refreshKey}-${item._lastUpdated || 0}`
+            }
+            extraData={`${refreshKey}-${apiReceipts.length}-${
+              apiReceipts[0]?._lastUpdated || 0
+            }`}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={{ paddingBottom: 100 }}
             onEndReached={handleLoadMoreReceipts}

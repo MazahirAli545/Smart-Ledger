@@ -34,6 +34,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { unifiedApi } from '../../api/unifiedApiService';
 import { BASE_URL } from '../../api';
 import { getUserIdFromToken } from '../../utils/storage';
+import { profileUpdateManager } from '../../utils/profileUpdateManager';
 import { Picker } from '@react-native-picker/picker';
 import CustomerSelector from '../../components/CustomerSelector';
 import { useCustomerContext } from '../../context/CustomerContext';
@@ -104,6 +105,7 @@ interface Invoice {
   date: string;
   amount: number;
   status: 'Paid' | 'Pending' | 'Overdue';
+  _lastUpdated?: number; // Optional timestamp for forced re-renders
 }
 
 const GST_PLACEHOLDER = 'Select GST %';
@@ -786,6 +788,7 @@ const InvoiceScreen: React.FC = () => {
     INVOICE_LIST_PAGE_SIZE,
   );
   const [isInvoicePaginating, setIsInvoicePaginating] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0); // Add refresh key to force re-renders
 
   // Get context values before defining functions that use them
   const { customers, add, fetchAll } = useCustomerContext();
@@ -793,8 +796,10 @@ const InvoiceScreen: React.FC = () => {
   const { forceCheckTransactionLimit, forceShowPopup } = useTransactionLimit();
 
   // Move fetchInvoices to top-level so it can be called from handleSubmit
-  const fetchInvoices = async (page = 1) => {
-    setLoadingApi(true);
+  const fetchInvoices = async (page = 1, showLoading = true) => {
+    if (showLoading) {
+      setLoadingApi(true);
+    }
     setApiError(null);
     try {
       // Use unified API with pagination - optimized!
@@ -1019,10 +1024,12 @@ const InvoiceScreen: React.FC = () => {
             typeof nameCandidate === 'string' && nameCandidate.trim()
               ? nameCandidate
               : 'Unknown Customer',
+          _lastUpdated: Date.now(), // Add timestamp for forced re-renders
         };
       });
 
       setApiInvoices(enriched as any);
+      setRefreshKey(prev => prev + 1); // Force FlatList re-render
       // Warm item cache for entries that already include items
       try {
         for (const v of enriched as any[]) {
@@ -1090,6 +1097,44 @@ const InvoiceScreen: React.FC = () => {
   useEffect(() => {
     fetchInvoices();
   }, []);
+
+  // Listen for profile update events (e.g., when customer is updated in AddPartyScreen)
+  useEffect(() => {
+    const handleProfileUpdate = async () => {
+      console.log(
+        '📢 InvoiceScreen: Profile update event received, refreshing invoices...',
+      );
+      try {
+        // Invalidate caches to ensure fresh data
+        unifiedApi.invalidateCachePattern('.*/customers.*');
+        unifiedApi.invalidateCachePattern('.*/customers/suppliers.*');
+        unifiedApi.invalidateCachePattern('.*/transactions.*');
+
+        // Fetch fresh customers first
+        await fetchAll('');
+
+        // Then refresh invoices from server to get latest customer names
+        // Don't show loading indicator - silent refresh after profile update
+        await fetchInvoices(1, false);
+        setRefreshKey(prev => prev + 1); // Force FlatList re-render
+      } catch (error) {
+        console.error(
+          '❌ InvoiceScreen: Error refreshing on profile update:',
+          error,
+        );
+        // Fallback: try to refresh anyway
+        await fetchInvoices(1, false);
+      }
+    };
+
+    profileUpdateManager.onProfileUpdate(handleProfileUpdate);
+    console.log('📢 InvoiceScreen: Registered profile update listener');
+
+    return () => {
+      profileUpdateManager.offProfileUpdate(handleProfileUpdate);
+      console.log('📢 InvoiceScreen: Unregistered profile update listener');
+    };
+  }, [fetchAll]);
 
   // States for invoice creation form
   const [customerName, setCustomerName] = useState('');
@@ -3008,7 +3053,9 @@ const InvoiceScreen: React.FC = () => {
       }
       // Success - no popup needed
       // After success, refresh list, reset editingItem, and close form
-      await fetchInvoices();
+      // Don't show loading indicator - silent refresh after POST/UPDATE
+      await fetchInvoices(1, false);
+      setRefreshKey(prev => prev + 1); // Force FlatList re-render
       setEditingItem(null);
       setShowCreateForm(false);
       resetForm();
@@ -3092,13 +3139,60 @@ const InvoiceScreen: React.FC = () => {
       if (isNaN(idNumber)) {
         throw new Error('Invalid invoice ID');
       }
-      await unifiedApi.deleteTransaction(idNumber);
-      await fetchInvoices();
+
+      // Optimistic UI update: remove item immediately
+      setApiInvoices(prev =>
+        prev.filter(
+          p =>
+            String(p.id) !== String(id) &&
+            Number(p.id) !== idNumber &&
+            (p as any).id !== idNumber,
+        ),
+      );
+      setRefreshKey(prev => prev + 1); // Force FlatList re-render immediately
+
+      // Invalidate cache to ensure fresh data
+      unifiedApi.invalidateCachePattern('.*/transactions.*');
+
+      // Small delay to allow backend to process deletion
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      try {
+        await unifiedApi.deleteTransaction(idNumber);
+        // Don't show loading indicator - silent refresh after delete
+        await fetchInvoices(1, false);
+      } catch (e: any) {
+        // Handle 204 No Content responses (which often result in JSON parse errors) as successful deletions
+        const status = (e as any)?.status || (e as any)?.response?.status;
+        const isNoContent = status === 204;
+        const isJsonParseError =
+          e?.message?.includes('JSON') ||
+          e?.message?.includes('Unexpected end') ||
+          e?.name === 'SyntaxError';
+
+        if (isNoContent || isJsonParseError) {
+          // 204 No Content or JSON parse error means successful deletion
+          console.log('✅ InvoiceScreen: Delete successful (204 No Content)');
+          // Don't show loading indicator - silent refresh after delete
+          await fetchInvoices(1, false);
+        } else {
+          // Real error - restore state by refreshing from server
+          console.error('❌ InvoiceScreen: Delete failed:', e);
+          setError(e.message || 'Failed to delete invoice.');
+          setShowModal(true);
+          // Restore state by fetching fresh data
+          await fetchInvoices(1, false);
+        }
+      }
+
       setShowCreateForm(false);
       setEditingItem(null);
     } catch (e: any) {
+      // Fallback error handling
       setError(e.message || 'Failed to delete invoice.');
       setShowModal(true);
+      // Restore state by fetching fresh data
+      await fetchInvoices(1, false);
     }
   };
 
@@ -3233,7 +3327,11 @@ const InvoiceScreen: React.FC = () => {
           </Text>
           <StatusBadge status={getStatusLabel(item.status)} />
         </View>
-        <Text style={styles.customerName}>
+        <Text
+          style={styles.customerName}
+          numberOfLines={1}
+          ellipsizeMode="tail"
+        >
           {item.partyName || item.customerName || 'N/A'}
         </Text>
         <View style={styles.invoiceDetails}>
@@ -3396,7 +3494,9 @@ const InvoiceScreen: React.FC = () => {
       // Use unified API for sync
       await unifiedApi.updateTransaction(item.id, putBody);
 
-      await fetchInvoices();
+      // Don't show loading indicator - silent refresh after sync
+      await fetchInvoices(1, false);
+      setRefreshKey(prev => prev + 1); // Force FlatList re-render
     } catch (e: any) {
       try {
         console.error('handleSync error (Sell):', e);
@@ -5271,13 +5371,23 @@ const InvoiceScreen: React.FC = () => {
           </Text>
         ) : (
           <FlatList
+            key={`invoice-list-${refreshKey}`}
             data={paginatedInvoices}
-            keyExtractor={item => item.id}
+            keyExtractor={item =>
+              `${item.id}-${item.partyName || ''}-${
+                (item as any)._lastUpdated || 0
+              }-${refreshKey}`
+            }
             renderItem={renderInvoiceItem}
             contentContainerStyle={{ paddingBottom: 100 }}
             onEndReached={handleLoadMoreInvoices}
             onEndReachedThreshold={0.5}
             ListFooterComponent={renderInvoiceFooter}
+            extraData={
+              apiInvoices.length +
+              (apiInvoices[0]?._lastUpdated || 0) +
+              refreshKey
+            }
           />
         )}
       </View>
@@ -5969,6 +6079,7 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
     marginBottom: scale(8),
     fontWeight: 'normal',
     fontFamily: 'Roboto-Medium',
+    width: '85%',
   },
   invoiceDetails: {
     flexDirection: 'row',

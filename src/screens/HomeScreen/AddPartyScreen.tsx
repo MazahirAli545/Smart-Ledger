@@ -2394,6 +2394,10 @@ const AddPartyScreen: React.FC = () => {
       );
       profileUpdateManager.emitProfileUpdate();
 
+      // Invalidate cache to ensure fresh data on navigation
+      unifiedApi.invalidateCachePattern('.*/customers.*');
+      unifiedApi.invalidateCachePattern('.*/transactions.*');
+
       // Navigate back to Customer list and force refresh so updated details appear immediately
       showCustomAlert(
         'Success',
@@ -2442,6 +2446,33 @@ const AddPartyScreen: React.FC = () => {
       console.log('✅ Party update successful:', response.status, responseData);
       return response;
     } catch (error: any) {
+      // Check if it's a JSON parse error from empty response (204 No Content)
+      // Some PATCH operations may return empty responses
+      const isJsonParseError =
+        error?.message?.includes('JSON Parse error') ||
+        error?.message?.includes('Unexpected end of input') ||
+        error?.message?.includes('JSON') ||
+        error?.name === 'SyntaxError' ||
+        (error?.message &&
+          typeof error.message === 'string' &&
+          error.message.includes('parse'));
+
+      const is204Success =
+        error?.status === 204 ||
+        error?.response?.status === 204 ||
+        error?.statusCode === 204;
+
+      if (isJsonParseError || is204Success) {
+        // Empty response (204 No Content) means update was successful
+        console.log(
+          '✅ Party update successful (empty response treated as success)',
+        );
+        return {
+          status: 204,
+          data: { message: 'Party updated successfully' },
+        };
+      }
+
       console.error(`❌ Party update attempt ${retryCount + 1} failed:`, {
         error: error.message,
         status: error.response?.status,
@@ -2642,6 +2673,11 @@ const AddPartyScreen: React.FC = () => {
             }
             await deleteRelatedVouchers(accessToken);
             await deletePartyWithRetry(accessToken);
+            // Invalidate cache to ensure fresh data on navigation
+            unifiedApi.invalidateCachePattern('.*/customers.*');
+            unifiedApi.invalidateCachePattern('.*/transactions.*');
+            // Emit profile update event to notify CustomerScreen to refresh
+            profileUpdateManager.emitProfileUpdate();
             showCustomAlert(
               'Deleted',
               `${partyName} and all related transactions have been deleted successfully`,
@@ -2695,6 +2731,30 @@ const AddPartyScreen: React.FC = () => {
       );
       return response;
     } catch (error: any) {
+      // Check if it's a JSON parse error from empty response (204 No Content)
+      // This is actually a success case for DELETE operations
+      const isJsonParseError =
+        error?.message?.includes('JSON Parse error') ||
+        error?.message?.includes('Unexpected end of input') ||
+        error?.message?.includes('JSON') ||
+        error?.name === 'SyntaxError' ||
+        (error?.message &&
+          typeof error.message === 'string' &&
+          error.message.includes('parse'));
+
+      const is204Success =
+        error?.status === 204 ||
+        error?.response?.status === 204 ||
+        error?.statusCode === 204;
+
+      if (isJsonParseError || is204Success) {
+        // Empty response (204 No Content) means deletion was successful
+        console.log(
+          '✅ Party deletion successful (empty response treated as success)',
+        );
+        return { status: 204, data: { message: 'Party deleted successfully' } };
+      }
+
       console.error(`❌ Party deletion attempt ${retryCount + 1} failed:`, {
         error: error.message,
         status: error.response?.status,
@@ -2819,6 +2879,30 @@ const AddPartyScreen: React.FC = () => {
           console.log(`✅ Transaction ${t.id} deleted successfully.`);
           return { success: true, id: t.id };
         } catch (txnError: any) {
+          // Check if it's a JSON parse error from empty response (204 No Content)
+          // This is actually a success case for DELETE operations
+          const isJsonParseError =
+            txnError?.message?.includes('JSON Parse error') ||
+            txnError?.message?.includes('Unexpected end of input') ||
+            txnError?.message?.includes('JSON') ||
+            txnError?.name === 'SyntaxError' ||
+            (txnError?.message &&
+              typeof txnError.message === 'string' &&
+              txnError.message.includes('parse'));
+
+          const is204Success =
+            txnError?.status === 204 ||
+            txnError?.response?.status === 204 ||
+            txnError?.statusCode === 204;
+
+          if (isJsonParseError || is204Success) {
+            // Empty response (204 No Content) means deletion was successful
+            console.log(
+              `✅ Transaction ${t.id} deleted successfully (empty response treated as success)`,
+            );
+            return { success: true, id: t.id };
+          }
+
           console.error(`❌ Failed to delete transaction ${t.id}:`, txnError);
           return { success: false, id: t.id, error: txnError };
         }

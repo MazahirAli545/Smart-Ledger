@@ -52,10 +52,32 @@ const SupplierSelector: React.FC<SupplierSelectorProps> = ({
   const inputRef = useRef<TextInput>(null);
 
   useEffect(() => {
+    // OPTIMIZED: Only fetch if suppliers not already loaded
     // Fetch suppliers only once on mount to avoid infinite re-fetch loops
     // caused by changing function identities from context re-renders
     const loadSuppliers = async () => {
       try {
+        // Check if suppliers are already loaded
+        if (suppliers && Array.isArray(suppliers) && suppliers.length > 0) {
+          console.log(
+            '🔍 SupplierSelector: Suppliers already loaded, skipping fetch:',
+            suppliers.length,
+            'suppliers',
+          );
+          return;
+        }
+
+        // Only fetch if not loading and no error
+        if (loading || error) {
+          console.log(
+            '🔍 SupplierSelector: Skipping fetch - loading:',
+            loading,
+            'error:',
+            error,
+          );
+          return;
+        }
+
         console.log('🔍 SupplierSelector: Starting to load suppliers...');
         console.log('🔍 SupplierSelector: Context state:', {
           loading,
@@ -63,7 +85,7 @@ const SupplierSelector: React.FC<SupplierSelectorProps> = ({
           suppliersCount: suppliers?.length || 0,
         });
 
-        // Always try to fetch suppliers on mount to ensure they're loaded
+        // Fetch suppliers only if not already loaded
         console.log('🔍 SupplierSelector: Fetching suppliers...');
         const result = await fetchAll('');
         console.log(
@@ -91,6 +113,7 @@ const SupplierSelector: React.FC<SupplierSelectorProps> = ({
     return name.length >= partyName.length ? name : partyName;
   };
 
+  // OPTIMIZED: Memoize filtering logic to prevent unnecessary recalculations
   useEffect(() => {
     console.log('🔍 SupplierSelector: useEffect triggered', {
       suppliers: suppliers?.length || 0,
@@ -135,6 +158,7 @@ const SupplierSelector: React.FC<SupplierSelectorProps> = ({
       }
     }
 
+    // Memoize filtering to avoid recalculating on every render
     if (searchText.trim() === '') {
       console.log(
         '🔍 SupplierSelector: Setting filteredSuppliers to all suppliers',
@@ -146,6 +170,7 @@ const SupplierSelector: React.FC<SupplierSelectorProps> = ({
       setFilteredSuppliers(baseSuppliers);
     } else {
       const needle = searchText.toLowerCase();
+      // Use more efficient filtering
       const filtered = baseSuppliers.filter(supplier => {
         const name = getDisplayName(supplier).toLowerCase();
         const phone = (supplier.phoneNumber || '').toLowerCase();

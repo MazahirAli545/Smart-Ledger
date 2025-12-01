@@ -1404,7 +1404,7 @@ const CustomerScreen: React.FC = () => {
     };
   }, []);
 
-  // Listen for profile update events
+  // Listen for profile update events (e.g., when customer/supplier is deleted in AddPartyScreen)
   useEffect(() => {
     const handleProfileUpdate = async () => {
       try {
@@ -1420,13 +1420,21 @@ const CustomerScreen: React.FC = () => {
         globalCustomerCache.lastUpdated = 0;
         globalCustomerCache.isRefreshing = false;
 
+        // Invalidate API cache to ensure fresh data
+        unifiedApi.invalidateCachePattern('.*/customers.*');
+        unifiedApi.invalidateCachePattern('.*/customers/suppliers.*');
+        unifiedApi.invalidateCachePattern('.*/transactions.*');
+
         // Trigger immediate refresh using handleManualRefresh which properly updates state
+        // This will refresh the customers list while preserving pagination state
         console.log(
           '🔄 CustomerScreen: Triggering manual refresh after profile update...',
         );
+
+        // Use a small delay to ensure cache invalidation is processed
         setTimeout(() => {
           handleManualRefresh();
-        }, 100); // Small delay to ensure cache is cleared
+        }, 100);
       } catch (error) {
         console.warn(
           '⚠️ CustomerScreen: Failed to refresh on profile update:',
@@ -1446,6 +1454,8 @@ const CustomerScreen: React.FC = () => {
     return () => {
       profileUpdateManager.offProfileUpdate(handleProfileUpdate);
     };
+    // Note: handleManualRefresh is stable and doesn't need to be in dependencies
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Ensure business name is always up to date when userData changes

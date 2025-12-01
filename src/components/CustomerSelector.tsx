@@ -10,6 +10,8 @@ import {
 } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useCustomerContext } from '../context/CustomerContext';
+import { profileUpdateManager } from '../utils/profileUpdateManager';
+import { unifiedApi } from '../api/unifiedApiService';
 import type { Customer } from '../api/customers';
 
 // Global scale helper aligned with other components
@@ -64,6 +66,61 @@ const CustomerSelector: React.FC<CustomerSelectorProps> = ({
     loadCustomers();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Listen for profile update events (e.g., when customer is updated in AddPartyScreen)
+  useEffect(() => {
+    const handleProfileUpdate = async () => {
+      console.log(
+        '📢 CustomerSelector: Profile update event received, refreshing customers...',
+      );
+      try {
+        // Invalidate cache to ensure fresh customer data
+        unifiedApi.invalidateCachePattern('.*/customers.*');
+
+        // Fetch fresh customers via unifiedApi (bypasses cache after invalidation)
+        console.log(
+          '🔄 CustomerSelector: Fetching fresh customers via unifiedApi...',
+        );
+        const customersResponse = (await unifiedApi.getCustomers('')) as any;
+        const refreshedCustomers = Array.isArray(customersResponse)
+          ? customersResponse
+          : Array.isArray(customersResponse?.data)
+          ? customersResponse.data
+          : [];
+
+        console.log(
+          '✅ CustomerSelector: Fetched',
+          refreshedCustomers.length,
+          'fresh customers',
+        );
+
+        // Update customer context to ensure dropdown shows latest data
+        try {
+          await fetchAll('');
+          console.log('✅ CustomerSelector: Customer context updated');
+        } catch (e) {
+          console.warn('⚠️ CustomerSelector: Error updating customer context:', e);
+        }
+
+        console.log(
+          '✅ CustomerSelector: Customers refreshed after profile update',
+        );
+      } catch (error) {
+        console.error(
+          '❌ CustomerSelector: Error refreshing customers on profile update:',
+          error,
+        );
+      }
+    };
+
+    profileUpdateManager.onProfileUpdate(handleProfileUpdate);
+    console.log('📢 CustomerSelector: Registered profile update listener');
+
+    return () => {
+      profileUpdateManager.offProfileUpdate(handleProfileUpdate);
+      console.log('📢 CustomerSelector: Unregistered profile update listener');
+    };
+  }, [fetchAll]);
 
   // Sync searchText with value prop when it changes
   useEffect(() => {

@@ -18,7 +18,6 @@ import {
   ActivityIndicator,
   PermissionsAndroid,
   Platform,
-  Alert,
   StatusBar,
   Modal as RNModal,
 } from 'react-native';
@@ -70,6 +69,7 @@ import {
 } from '../../utils/autoNumberGenerator';
 import AudioRecorderPlayer from 'react-native-audio-recorder-player';
 import { parseInvoiceVoiceText } from '../../utils/voiceParser';
+import { profileUpdateManager } from '../../utils/profileUpdateManager';
 
 interface FolderProp {
   folder?: { id?: number; title?: string; icon?: string };
@@ -131,6 +131,12 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   const [showModal, setShowModal] = useState(false);
   const [triedSubmit, setTriedSubmit] = useState(false);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [errors, setErrors] = useState<{
+    supplierPhone?: string;
+    supplierAddress?: string;
+    supplierInput?: string;
+    [key: string]: string | undefined;
+  }>({});
   const [searchText, setSearchText] = useState('');
   const [openDropdown, setOpenDropdown] = useState<
     'method' | 'category' | null
@@ -165,6 +171,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     PAYMENT_LIST_PAGE_SIZE,
   );
   const [isPaymentPaginating, setIsPaymentPaginating] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0); // Force re-render key for FlatList
   // 1. Add editingItem state
   const [editingItem, setEditingItem] = useState<any>(null);
   // FIX: Add the missing state variable and its setter function
@@ -1157,6 +1164,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   };
 
   const didInitialLoadRef = useRef(false);
+  const previousSuppliersRef = useRef<string>('');
 
   useEffect(() => {
     (async () => {
@@ -1190,17 +1198,467 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     initializePaymentNumber();
   }, []);
 
+  // Listen for profile update events (e.g., when supplier is updated in AddPartyScreen)
+  useEffect(() => {
+    const handleProfileUpdate = async () => {
+      console.log(
+        '═══════════════════════════════════════════════════════════',
+      );
+      console.log(
+        '📢 PaymentScreen: Profile update event received, refreshing suppliers...',
+      );
+      console.log(
+        '📢 PaymentScreen: Current apiPayments count:',
+        apiPayments.length,
+      );
+      console.log(
+        '═══════════════════════════════════════════════════════════',
+      );
+      try {
+        // Invalidate cache to ensure fresh supplier data
+        unifiedApi.invalidateCachePattern('.*/customers.*');
+        unifiedApi.invalidateCachePattern('.*/customers/suppliers.*');
+        unifiedApi.invalidateCachePattern('.*/transactions.*');
+        // Reset supplier hash to force update check
+        previousSuppliersRef.current = '';
+
+        // Step 1: Fetch fresh suppliers via unifiedApi (bypasses cache after invalidation)
+        console.log(
+          '🔄 PaymentScreen: Fetching fresh suppliers via unifiedApi...',
+        );
+        const suppliersResponse = (await unifiedApi.getSuppliers('')) as any;
+        const refreshedSuppliers = Array.isArray(suppliersResponse)
+          ? suppliersResponse
+          : Array.isArray(suppliersResponse?.data)
+          ? suppliersResponse.data
+          : [];
+
+        console.log(
+          '✅ PaymentScreen: Fetched',
+          refreshedSuppliers.length,
+          'fresh suppliers',
+        );
+
+        // Step 2: Update supplier context FIRST so fetchPayments() uses updated data
+        try {
+          await fetchSuppliersCtx('');
+          console.log('✅ PaymentScreen: Supplier context updated');
+          // Small delay to ensure context state has propagated
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } catch (e) {
+          console.warn('⚠️ PaymentScreen: Error updating supplier context:', e);
+        }
+
+        // Step 3: ALWAYS refresh payments from server after supplier update
+        // Skip the complex matching logic - just fetch fresh data from server
+        // This ensures we get the latest payment data with updated supplier names from the backend
+        console.log(
+          '🔄 PaymentScreen: Refreshing payments from server to get latest supplier data...',
+        );
+
+        // Invalidate transactions cache to force fresh fetch
+        unifiedApi.invalidateCachePattern('.*/transactions.*');
+
+        // Fetch fresh payments and enrich with fresh supplier data
+        try {
+          const token = await AsyncStorage.getItem('accessToken');
+          const response = (await unifiedApi.getPayments(1, 20)) as {
+            data: any;
+            status: number;
+            headers: Headers;
+          };
+          const data = response?.data || response || {};
+          const vouchers = Array.isArray(data) ? data : data.data || [];
+
+          // Filter and enrich payments with FRESH supplier data
+          const expectedType = 'debit';
+          const enrichedPayments = vouchers
+            .filter((v: any) => {
+              const typeMatches = String(v.type).toLowerCase() === expectedType;
+              const isPaymentLike =
+                !Array.isArray(v.items) ||
+                (Array.isArray(v.items) && v.items.length === 0);
+              return typeMatches && isPaymentLike;
+            })
+            .map((voucher: any) => {
+              // Use FRESH supplier data to enrich payment
+              let party = null;
+
+              // Try to match by partyId first (most reliable)
+              // Check all possible ID fields
+              const voucherPartyId =
+                voucher.partyId ||
+                voucher.customer_id ||
+                voucher._raw?.partyId ||
+                voucher._raw?.customer_id;
+
+              if (voucherPartyId) {
+                party = refreshedSuppliers.find(
+                  (s: any) => Number(s.id) === Number(voucherPartyId),
+                );
+
+                if (party) {
+                  console.log('✅ [SERVER REFRESH] Matched payment by ID:', {
+                    paymentId: voucher.id,
+                    voucherPartyId: voucherPartyId,
+                    supplierId: party.id,
+                    supplierName: party.name || party.partyName,
+                  });
+                }
+              }
+
+              // Fallback to name matching (but this might fail if name was updated)
+              if (!party && voucher.partyName) {
+                party = refreshedSuppliers.find((s: any) => {
+                  const supplierName = (s.name || s.partyName || '')
+                    .toLowerCase()
+                    .trim();
+                  const paymentName = (voucher.partyName || '')
+                    .toLowerCase()
+                    .trim();
+                  return supplierName === paymentName && supplierName !== '';
+                });
+              }
+
+              // Enrich with fresh supplier data
+              if (party) {
+                const newName =
+                  party.name || party.partyName || voucher.partyName || '';
+                const newPhone =
+                  (party as any).phoneNumber ||
+                  (party as any).phone ||
+                  voucher.partyPhone ||
+                  '';
+                const newAddress =
+                  (party as any).address ||
+                  (party as any).addressLine1 ||
+                  voucher.partyAddress ||
+                  '';
+
+                console.log(
+                  '🔄 [SERVER REFRESH] Enriching payment with fresh supplier:',
+                  {
+                    paymentId: voucher.id,
+                    paymentNumber: voucher.billNumber || voucher.paymentNumber,
+                    oldName: voucher.partyName,
+                    newName: newName,
+                    matchedBy:
+                      voucher.partyId || voucher.customer_id ? 'ID' : 'Name',
+                    supplierId: party.id,
+                  },
+                );
+
+                return {
+                  ...voucher,
+                  partyName: newName,
+                  partyPhone: newPhone,
+                  partyAddress: newAddress,
+                  _raw: {
+                    ...(voucher._raw || {}),
+                    partyName: newName,
+                    partyPhone: newPhone,
+                    partyAddress: newAddress,
+                  },
+                  _lastUpdated: Date.now(),
+                };
+              }
+
+              // No match found - return voucher as-is but with timestamp
+              return {
+                ...voucher,
+                _lastUpdated: Date.now(),
+              };
+            });
+
+          // Update state with enriched payments
+          console.log(
+            `✅ PaymentScreen: Setting ${enrichedPayments.length} enriched payments from server`,
+          );
+          if (enrichedPayments.length > 0) {
+            console.log('🔄 PaymentScreen: Sample enriched payment:', {
+              id: enrichedPayments[0]?.id,
+              partyName: enrichedPayments[0]?.partyName,
+              partyId: enrichedPayments[0]?.partyId,
+              _lastUpdated: enrichedPayments[0]?._lastUpdated,
+            });
+          }
+
+          // Force state update by creating a new array reference
+          setApiPayments([...enrichedPayments]);
+          // Update refresh key to force FlatList re-render
+          setRefreshKey(prev => prev + 1);
+          console.log(
+            '🔄 PaymentScreen: Refresh key updated to:',
+            refreshKey + 1,
+          );
+        } catch (fetchError) {
+          console.error(
+            '❌ PaymentScreen: Error refreshing payments from server:',
+            fetchError,
+          );
+          // Fallback to regular fetchPayments
+          await fetchPayments();
+          // Still update refresh key even on error
+          setRefreshKey(prev => prev + 1);
+        }
+
+        console.log(
+          '✅ PaymentScreen: Suppliers and payments refreshed after profile update',
+        );
+      } catch (error) {
+        console.error(
+          '❌ PaymentScreen: Error refreshing suppliers on profile update:',
+          error,
+        );
+      }
+    };
+
+    profileUpdateManager.onProfileUpdate(handleProfileUpdate);
+    console.log('📢 PaymentScreen: Registered profile update listener');
+
+    return () => {
+      profileUpdateManager.offProfileUpdate(handleProfileUpdate);
+      console.log('📢 PaymentScreen: Unregistered profile update listener');
+    };
+  }, [fetchSuppliersCtx]);
+
   // Refresh data when screen regains focus to avoid stale supplier/payment info
   useFocusEffect(
     useCallback(() => {
       (async () => {
         // Avoid duplicating the initial load
         if (!didInitialLoadRef.current) return;
-        await fetchPayments();
+
+        // Don't refresh while editing
+        if (showCreateForm || editingItem) {
+          console.log('🔄 PaymentScreen: Skipping refresh - in edit mode');
+          return;
+        }
+
+        console.log('🔄 PaymentScreen: Screen focused, refreshing data...');
+        // Invalidate cache to ensure fresh data
+        unifiedApi.invalidateCachePattern('.*/customers.*');
+        unifiedApi.invalidateCachePattern('.*/customers/suppliers.*');
+        unifiedApi.invalidateCachePattern('.*/transactions.*');
+
+        // Reset supplier hash to force update check
+        previousSuppliersRef.current = '';
+
+        // Refresh suppliers first to get latest names
+        const freshSuppliers = await fetchSuppliersCtx('');
+
+        // ALWAYS refresh payments from server when screen comes into focus
+        // This ensures we get the latest data even if supplier was updated while screen was in background
+        console.log(
+          '🔄 PaymentScreen: Refreshing payments from server on focus...',
+        );
+        try {
+          const response = (await unifiedApi.getPayments(1, 20)) as {
+            data: any;
+            status: number;
+            headers: Headers;
+          };
+          const data = response?.data || response || {};
+          const vouchers = Array.isArray(data) ? data : data.data || [];
+
+          // Filter and enrich payments with FRESH supplier data
+          const expectedType = 'debit';
+          const enrichedPayments = vouchers
+            .filter((v: any) => {
+              const typeMatches = String(v.type).toLowerCase() === expectedType;
+              const isPaymentLike =
+                !Array.isArray(v.items) ||
+                (Array.isArray(v.items) && v.items.length === 0);
+              return typeMatches && isPaymentLike;
+            })
+            .map((voucher: any) => {
+              // Use FRESH supplier data to enrich payment
+              let party = null;
+
+              // Try to match by partyId first (most reliable)
+              const voucherPartyId =
+                voucher.partyId ||
+                voucher.customer_id ||
+                voucher._raw?.partyId ||
+                voucher._raw?.customer_id;
+
+              if (voucherPartyId) {
+                party = freshSuppliers.find(
+                  (s: any) => Number(s.id) === Number(voucherPartyId),
+                );
+              }
+
+              // Enrich with fresh supplier data
+              if (party) {
+                const newName =
+                  party.name || party.partyName || voucher.partyName || '';
+                const newPhone =
+                  (party as any).phoneNumber ||
+                  (party as any).phone ||
+                  voucher.partyPhone ||
+                  '';
+                const newAddress =
+                  (party as any).address ||
+                  (party as any).addressLine1 ||
+                  voucher.partyAddress ||
+                  '';
+
+                return {
+                  ...voucher,
+                  partyName: newName,
+                  partyPhone: newPhone,
+                  partyAddress: newAddress,
+                  _raw: {
+                    ...(voucher._raw || {}),
+                    partyName: newName,
+                    partyPhone: newPhone,
+                    partyAddress: newAddress,
+                  },
+                  _lastUpdated: Date.now(),
+                };
+              }
+
+              return {
+                ...voucher,
+                _lastUpdated: Date.now(),
+              };
+            });
+
+          // Update state with enriched payments
+          console.log(
+            `✅ PaymentScreen: Setting ${enrichedPayments.length} enriched payments from server on focus`,
+          );
+          if (enrichedPayments.length > 0) {
+            console.log('🔄 PaymentScreen: Sample enriched payment (focus):', {
+              id: enrichedPayments[0]?.id,
+              partyName: enrichedPayments[0]?.partyName,
+              partyId: enrichedPayments[0]?.partyId,
+              _lastUpdated: enrichedPayments[0]?._lastUpdated,
+            });
+          }
+
+          // Force state update by creating a new array reference
+          setApiPayments([...enrichedPayments]);
+        } catch (fetchError) {
+          console.error(
+            '❌ PaymentScreen: Error refreshing payments on focus:',
+            fetchError,
+          );
+          // Fallback to regular fetchPayments
+          await fetchPayments();
+        }
+
+        console.log('✅ PaymentScreen: Data refreshed on focus');
       })();
       return () => {};
-    }, []),
+    }, [showCreateForm, editingItem]),
   );
+
+  // Update payment entries when suppliers are updated (e.g., name changes)
+  useEffect(() => {
+    try {
+      if (!suppliers || !Array.isArray(suppliers) || suppliers.length === 0) {
+        console.log(
+          '🔄 [SUPPLIER UPDATE] No suppliers available, skipping update',
+        );
+        return;
+      }
+
+      // Create a hash of supplier names/phones/addresses to detect changes
+      const suppliersHash = suppliers
+        .map(
+          (s: any) =>
+            `${s.id}:${s.name || s.partyName}:${s.phoneNumber || s.phone}:${
+              s.address || s.addressLine1
+            }`,
+        )
+        .join('|');
+
+      console.log('🔄 [SUPPLIER UPDATE] Checking supplier changes:', {
+        suppliersCount: suppliers.length,
+        previousHash: previousSuppliersRef.current.substring(0, 50) + '...',
+        currentHash: suppliersHash.substring(0, 50) + '...',
+        hasChanged: previousSuppliersRef.current !== suppliersHash,
+      });
+
+      // Skip if suppliers haven't actually changed (prevents unnecessary updates)
+      if (previousSuppliersRef.current === suppliersHash) {
+        console.log(
+          '🔄 [SUPPLIER UPDATE] No changes detected, skipping update',
+        );
+        return;
+      }
+
+      console.log(
+        '🔄 [SUPPLIER UPDATE] Changes detected, updating payment entries...',
+      );
+      previousSuppliersRef.current = suppliersHash;
+      const currentSuppliersAny: any[] = suppliers as any[];
+
+      // Update payment entries with latest supplier names
+      setApiPayments(prev => {
+        if (!prev || prev.length === 0) return prev;
+
+        let hasUpdates = false;
+        const updated = prev.map(payment => {
+          // Find matching supplier by partyId
+          const matchingSupplier = currentSuppliersAny.find(
+            (s: any) =>
+              s.id === payment.partyId || s.id === payment.customer_id,
+          );
+
+          if (matchingSupplier) {
+            const newName =
+              matchingSupplier.name || matchingSupplier.partyName || '';
+            const newPhone =
+              matchingSupplier.phoneNumber || matchingSupplier.phone || '';
+            const newAddress =
+              matchingSupplier.address || matchingSupplier.addressLine1 || '';
+
+            // Only update if name/phone/address actually changed
+            const nameChanged = newName && newName !== payment.partyName;
+            const phoneChanged = newPhone && newPhone !== payment.partyPhone;
+            const addressChanged =
+              newAddress && newAddress !== payment.partyAddress;
+
+            if (nameChanged || phoneChanged || addressChanged) {
+              hasUpdates = true;
+              console.log('🔄 [SUPPLIER UPDATE] Updating payment entry:', {
+                paymentId: payment.id,
+                oldName: payment.partyName,
+                newName: newName,
+                oldPhone: payment.partyPhone,
+                newPhone: newPhone,
+                oldAddress: payment.partyAddress,
+                newAddress: newAddress,
+              });
+
+              return {
+                ...payment,
+                partyName: newName || payment.partyName,
+                partyPhone: newPhone || payment.partyPhone,
+                partyAddress: newAddress || payment.partyAddress,
+                // Update _raw data as well for consistency
+                _raw: {
+                  ...(payment._raw || {}),
+                  partyName: newName || payment._raw?.partyName,
+                  partyPhone: newPhone || payment._raw?.partyPhone,
+                  partyAddress: newAddress || payment._raw?.partyAddress,
+                },
+              };
+            }
+          }
+
+          return payment;
+        });
+
+        // Only update state if there were actual changes
+        return hasUpdates ? updated : prev;
+      });
+    } catch (e) {
+      console.warn('Error updating payments from supplier changes:', e);
+    }
+  }, [suppliers]);
 
   // When supplier context updates, sync phone/address into the form promptly
   useEffect(() => {
@@ -1326,24 +1784,123 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   // 1. Add deletePayment function
   const deletePayment = async (id: string) => {
     try {
+      setLoadingSave(true);
       // Block API when transaction limit reached
       try {
         await forceCheckTransactionLimit();
       } catch {
         await forceShowPopup();
+        setLoadingSave(false);
         return;
       }
+      console.log('🗑️ [DELETE] Starting payment deletion:', id);
+      const paymentId = Number(id) || parseInt(String(id), 10);
+
+      // Optimistically remove from local state immediately (before API call)
+      setApiPayments(prev => {
+        const filtered = (prev || []).filter(
+          p => String(p.id) !== String(id) && Number(p.id) !== paymentId,
+        );
+        console.log('🔄 [DELETE] Optimistic update - removed item:', {
+          deletedId: id,
+          remainingCount: filtered.length,
+          previousCount: prev?.length || 0,
+        });
+        return filtered;
+      });
+
       // Use unified API for delete
-      await unifiedApi.deleteTransaction(Number(id) || parseInt(id, 10));
+      // DELETE operations often return 204 No Content (empty response)
+      const deleteResponse = (await unifiedApi.deleteTransaction(
+        paymentId,
+      )) as {
+        data: any;
+        status: number;
+        headers: Headers;
+      };
+      console.log('✅ [DELETE] Payment deleted successfully:', {
+        status: deleteResponse?.status,
+        hasData: !!deleteResponse?.data,
+      });
+
+      // Clear cache and refresh from server to ensure consistency
+      // Invalidate transactions cache to force fresh fetch
+      unifiedApi.invalidateCachePattern('.*/transactions.*');
+      // Add small delay to ensure server has processed the delete
+      await new Promise(resolve => setTimeout(resolve, 300));
       await fetchPayments();
+
+      // Close form and reset
       setShowCreateForm(false);
       setEditingItem(null);
-      console.log('✅ Payment deleted successfully');
+      setLoadingSave(false);
     } catch (e: any) {
-      console.error('❌ Error deleting payment:', e);
-      setError(e.message || 'Failed to delete payment.');
+      // Check if it's a JSON parse error from empty response (204 No Content)
+      // This is actually a success case for DELETE operations
+      const isJsonParseError =
+        e?.message?.includes('JSON Parse error') ||
+        e?.message?.includes('Unexpected end of input') ||
+        e?.message?.includes('JSON') ||
+        e?.name === 'SyntaxError' ||
+        (e?.message &&
+          typeof e.message === 'string' &&
+          e.message.includes('parse'));
+
+      const is204Success =
+        e?.status === 204 ||
+        e?.response?.status === 204 ||
+        e?.statusCode === 204;
+
+      if (isJsonParseError || is204Success) {
+        // Empty response (204 No Content) means deletion was successful
+        // Don't log as error - this is expected behavior for DELETE operations
+        console.log(
+          '✅ [DELETE] Payment deleted successfully (empty response treated as success)',
+        );
+
+        const paymentId = Number(id) || parseInt(String(id), 10);
+        // Optimistically remove from local state
+        setApiPayments(prev => {
+          const filtered = (prev || []).filter(
+            p => String(p.id) !== String(id) && Number(p.id) !== paymentId,
+          );
+          console.log(
+            '🔄 [DELETE] Optimistic update (JSON parse) - removed item:',
+            {
+              deletedId: id,
+              remainingCount: filtered.length,
+              previousCount: prev?.length || 0,
+            },
+          );
+          return filtered;
+        });
+
+        // Clear cache and refresh from server to ensure consistency
+        // Invalidate transactions cache to force fresh fetch
+        unifiedApi.invalidateCachePattern('.*/transactions.*');
+        // Add small delay to ensure server has processed the delete
+        await new Promise(resolve => setTimeout(resolve, 300));
+        await fetchPayments();
+
+        // Close form and reset
+        setShowCreateForm(false);
+        setEditingItem(null);
+        setLoadingSave(false);
+        return;
+      }
+
+      // Real error - log and show error message
+      console.error('❌ [DELETE] Error deleting payment:', e);
+      setLoadingSave(false);
+      const errorMessage =
+        e?.response?.data?.message ||
+        e?.message ||
+        'Failed to delete payment. Please try again.';
+      setError(errorMessage);
       setShowModal(true);
-      setTimeout(() => scrollToErrorField('api'), 100);
+
+      // Refresh list to restore state if delete failed
+      await fetchPayments();
     }
   };
 
@@ -1591,6 +2148,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     setTriedSubmit(false);
     setError(null);
     setSuccess(null);
+    setErrors({});
   };
 
   const handleAmountChange = (text: string) => {
@@ -1781,18 +2339,54 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     status: 'complete',
     syncYNOverride?: 'Y' | 'N',
   ) => {
+    const overallStartTime = Date.now();
+
+    // Track all API call timings for final summary
+    const apiTimings: Array<{
+      name: string;
+      duration: number;
+      status: 'success' | 'failed' | 'skipped';
+    }> = [];
+
+    // Enhanced logging with console group for better visibility
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('🚀 [API TIMING] PaymentScreen - API CALL TIMING LOGS');
+    console.log('📊 Watch this console for detailed API call timings!');
+    console.log('⏱️  All API call durations will be shown below:');
+    console.log('═══════════════════════════════════════════════════════════');
+    console.group('🚀 [API] PaymentScreen - Starting Payment Creation/Update');
+    console.log(
+      '🔍 [TIMING] Starting payment creation/update process at',
+      new Date().toISOString(),
+    );
+    console.log('📋 Current form state:', {
+      paymentDate,
+      supplierInput,
+      supplierPhone,
+      supplierAddress,
+      amount,
+      paymentMethod,
+      category,
+    });
+
     console.log('handleSubmit called with status:', status);
     setTriedSubmit(true);
     setError(null);
     setSuccess(null);
 
-    // Check transaction limits BEFORE making API call
+    // Check transaction limits BEFORE making API call - BLOCK on error
     try {
       console.log('🔍 Checking transaction limits before payment creation...');
       await forceCheckTransactionLimit();
     } catch (limitError) {
       console.error('❌ Error checking transaction limits:', limitError);
-      // Continue with API call if limit check fails
+      // Block transaction if limit check fails (security issue)
+      await forceShowPopup();
+      setError(
+        'Transaction limit reached. Please upgrade your plan to continue.',
+      );
+      setTimeout(() => scrollToErrorField('api'), 100);
+      return;
     }
 
     // Validate all required fields BEFORE showing loader or calling API
@@ -1878,7 +2472,14 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           isValidAddress: isValidAddressValue(supplierAddress),
         });
 
-        const newSupplier = await addSupplierCtx({
+        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        console.log('🚀 [API CALL] Creating Supplier');
+        const supplierCreateStart = Date.now();
+        console.log(
+          '⏱️ [TIMING] Supplier creation start:',
+          new Date().toISOString(),
+        );
+        const payloadSize = JSON.stringify({
           name: supplierNameToUse,
           partyName: supplierNameToUse,
           phoneNumber: isValidPhoneValue(supplierPhone)
@@ -1887,7 +2488,120 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           address: isValidAddressValue(supplierAddress)
             ? supplierAddress
             : undefined,
-        } as any);
+        }).length;
+        console.log(
+          '📦 [PAYLOAD] Supplier creation payload size:',
+          payloadSize,
+          'bytes',
+        );
+
+        let newSupplier;
+        try {
+          newSupplier = await addSupplierCtx({
+            name: supplierNameToUse,
+            partyName: supplierNameToUse,
+            phoneNumber: isValidPhoneValue(supplierPhone)
+              ? supplierPhone
+              : undefined,
+            address: isValidAddressValue(supplierAddress)
+              ? supplierAddress
+              : undefined,
+          } as any);
+
+          const supplierCreateDuration = Date.now() - supplierCreateStart;
+          apiTimings.push({
+            name: 'Supplier Creation',
+            duration: supplierCreateDuration,
+            status: 'success',
+          });
+          console.log(
+            `✅ [API CALL] Supplier creation completed in ${supplierCreateDuration}ms`,
+          );
+          if (supplierCreateDuration > 1000) {
+            console.warn(
+              `⚠️ [WARNING] Supplier creation took ${supplierCreateDuration}ms (slow)`,
+            );
+          }
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+        } catch (supplierError: any) {
+          const supplierCreateDuration = Date.now() - supplierCreateStart;
+          apiTimings.push({
+            name: 'Supplier Creation',
+            duration: supplierCreateDuration,
+            status: 'failed',
+          });
+          console.error(
+            `❌ [API CALL] Supplier creation failed after ${supplierCreateDuration}ms`,
+          );
+          console.error('❌ [ERROR] Supplier creation error:', supplierError);
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+          // Handle phone number specific errors
+          const backendMsg =
+            supplierError?.response?.data?.message ||
+            supplierError?.response?.data?.error ||
+            supplierError?.message ||
+            '';
+          const errorMsgStr = String(backendMsg).toLowerCase();
+
+          if (
+            supplierError?.response?.status === 400 ||
+            supplierError?.response?.status === 500
+          ) {
+            if (
+              errorMsgStr.includes('phone number already exists') ||
+              errorMsgStr.includes('already exists') ||
+              errorMsgStr.includes('duplicate')
+            ) {
+              setErrors(prev => ({
+                ...prev,
+                supplierPhone:
+                  'This phone number is already used by another party.',
+              }));
+              setTimeout(
+                () => scrollToErrorField('validation', 'supplierPhone'),
+                100,
+              );
+              showAlert({
+                title: 'Duplicate Phone Number',
+                message:
+                  'A party with this phone number already exists. Please use a different number.',
+                type: 'error',
+              });
+              setLoadingSave(false);
+              return;
+            } else if (
+              errorMsgStr.includes('invalid phone') ||
+              errorMsgStr.includes('phone number format') ||
+              errorMsgStr.includes('must start with 6, 7, 8, or 9') ||
+              errorMsgStr.includes('expected 10 digits')
+            ) {
+              const phoneErrorMsg =
+                backendMsg || 'Invalid phone number format.';
+              setErrors(prev => ({
+                ...prev,
+                supplierPhone: String(phoneErrorMsg),
+              }));
+              setTimeout(
+                () => scrollToErrorField('validation', 'supplierPhone'),
+                100,
+              );
+              showAlert({
+                title: 'Invalid Phone Number',
+                message:
+                  String(phoneErrorMsg) +
+                  ' Please enter a valid 10-digit Indian mobile number.',
+                type: 'error',
+              });
+              setLoadingSave(false);
+              return;
+            }
+          }
+
+          setError('Failed to create supplier. Please try again.');
+          setTimeout(() => scrollToErrorField('api', 'supplierInput'), 100);
+          return;
+        }
 
         console.log('🔍 PaymentScreen: Created supplier result:', newSupplier);
 
@@ -1911,88 +2625,206 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           }
         } catch {}
 
-        // Ensure newly created supplier also persists phone/address via explicit update
-        try {
-          if ((newSupplier as any)?.id) {
-            const updatePayload: any = {
-              name: supplierNameToUse,
-              partyName: supplierNameToUse,
-            };
-            if (isValidPhoneValue(supplierPhone)) {
-              updatePayload.phoneNumber = supplierPhone;
-              updatePayload.phone = supplierPhone; // backend alt key
-            }
-            if (isValidAddressValue(supplierAddress)) {
-              updatePayload.address = supplierAddress;
-              updatePayload.addressLine1 = supplierAddress; // backend alt key
-              updatePayload.addresses = [
-                { type: 'billing', flatBuildingNumber: supplierAddress },
-              ];
-            }
-            await updateSupplierCtx?.((newSupplier as any).id, updatePayload);
-          }
-        } catch (error) {
-          console.error('❌ Error updating supplier:', error);
-        }
+        // OPTIMIZED: Supplier already created with phone/address in initial call
+        // However, add a non-blocking safeguard update to ensure phone/address persist correctly
+        // This handles edge cases where backend might not save address on initial creation
+        if (
+          (isValidPhoneValue(supplierPhone) ||
+            isValidAddressValue(supplierAddress)) &&
+          (newSupplier as any)?.id
+        ) {
+          runInBackground(
+            (async () => {
+              const safeguardStart = Date.now();
+              try {
+                console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+                console.log('🚀 [API CALL] Safeguard Update for New Supplier');
+                console.log(
+                  '⏱️ [TIMING] Safeguard update start:',
+                  new Date().toISOString(),
+                );
+                console.log(
+                  '🔍 PaymentScreen: Safeguard update for newly created supplier:',
+                  {
+                    supplierId: (newSupplier as any).id,
+                    hasPhone: isValidPhoneValue(supplierPhone),
+                    hasAddress: isValidAddressValue(supplierAddress),
+                  },
+                );
 
-        await persistAndConfirmSupplier(
-          (newSupplier as any)?.id,
-          supplierNameToUse,
-          supplierPhone,
-          supplierAddress,
-        );
+                await persistSupplierDirectPatch(
+                  (newSupplier as any).id,
+                  undefined, // Don't update name, it's already correct
+                  isValidPhoneValue(supplierPhone) ? supplierPhone : undefined,
+                  isValidAddressValue(supplierAddress)
+                    ? supplierAddress
+                    : undefined,
+                );
+
+                const safeguardDuration = Date.now() - safeguardStart;
+                apiTimings.push({
+                  name: 'Supplier Safeguard Update',
+                  duration: safeguardDuration,
+                  status: 'success',
+                });
+                console.log(
+                  `✅ [API CALL] Safeguard supplier update completed in ${safeguardDuration}ms`,
+                );
+                console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+              } catch (safeguardError: any) {
+                const safeguardDuration = Date.now() - safeguardStart;
+                apiTimings.push({
+                  name: 'Supplier Safeguard Update',
+                  duration: safeguardDuration,
+                  status: 'failed',
+                });
+                console.warn(
+                  `⚠️ [API CALL] Safeguard supplier update failed after ${safeguardDuration}ms (non-critical)`,
+                );
+                console.warn(
+                  '⚠️ PaymentScreen: Safeguard supplier update error:',
+                  safeguardError,
+                );
+                console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+                // Non-critical, don't block transaction
+              }
+            })(),
+          );
+        }
       }
+      // OPTIMIZED: Single supplier update, only if changed, non-blocking
       // If user changed any of these fields from the selected supplier, push an update
+      // This applies to both new payments and edits
       try {
-        if (existingSupplier && !editingItem) {
+        if (existingSupplier) {
+          // Check name update - compare against both name and partyName fields
+          const existingName =
+            (existingSupplier as any).name?.trim() ||
+            (existingSupplier as any).partyName?.trim() ||
+            '';
           const needsNameUpdate =
-            supplierNameToUse.trim() !== (existingSupplier as any).name?.trim();
+            supplierNameToUse.trim().toLowerCase() !==
+            existingName.toLowerCase();
+
+          // Check phone update - normalize both for comparison
+          const existingPhone =
+            (existingSupplier as any).phoneNumber ||
+            (existingSupplier as any).phone ||
+            (existingSupplier as any).phone_number ||
+            '';
+          const normalizedExistingPhone = normalizePhoneForUI(existingPhone);
           const needsPhoneUpdate =
             isValidPhoneValue(supplierPhone) &&
-            supplierPhone !== ((existingSupplier as any).phoneNumber || '');
+            normalizePhoneForUI(supplierPhone) !== normalizedExistingPhone;
+
+          // Check address update - compare against all possible address fields
+          const existingAddress =
+            (existingSupplier as any).address ||
+            (existingSupplier as any).addressLine1 ||
+            (existingSupplier as any).address_line1 ||
+            (existingSupplier as any).address1 ||
+            '';
           const needsAddressUpdate =
             isValidAddressValue(supplierAddress) &&
-            supplierAddress !== ((existingSupplier as any).address || '');
+            supplierAddress.trim() !== existingAddress.trim();
+
+          // Only update if something actually changed
           if (needsNameUpdate || needsPhoneUpdate || needsAddressUpdate) {
-            const updatePayload: any = {
-              name: supplierNameToUse,
-              partyName: supplierNameToUse,
-            };
-            if (needsPhoneUpdate) {
-              updatePayload.phoneNumber = supplierPhone;
-              updatePayload.phone = supplierPhone;
-            }
-            if (needsAddressUpdate) {
-              updatePayload.address = supplierAddress;
-              updatePayload.addressLine1 = supplierAddress;
-              updatePayload.addresses = [
-                { type: 'billing', flatBuildingNumber: supplierAddress },
-              ];
-            }
-            await updateSupplierCtx?.(
-              (existingSupplier as any).id,
-              updatePayload,
+            // Run update in background to avoid blocking transaction creation
+            runInBackground(
+              (async () => {
+                try {
+                  console.log(
+                    '🔍 PaymentScreen: Updating existing supplier (background):',
+                    {
+                      supplierId: (existingSupplier as any).id,
+                      needsNameUpdate,
+                      needsPhoneUpdate,
+                      needsAddressUpdate,
+                      currentName: supplierNameToUse,
+                      existingName:
+                        (existingSupplier as any).name ||
+                        (existingSupplier as any).partyName,
+                      currentAddress: supplierAddress,
+                      existingAddress:
+                        (existingSupplier as any).address ||
+                        (existingSupplier as any).addressLine1,
+                    },
+                  );
+                  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+                  console.log('🚀 [API CALL] Updating Existing Supplier');
+                  const supplierUpdateStart = Date.now();
+                  console.log(
+                    '⏱️ [TIMING] Supplier update start:',
+                    new Date().toISOString(),
+                  );
+
+                  try {
+                    await persistSupplierDirectPatch(
+                      (existingSupplier as any).id,
+                      needsNameUpdate ? supplierNameToUse : undefined,
+                      needsPhoneUpdate ? supplierPhone : undefined,
+                      needsAddressUpdate ? supplierAddress : undefined,
+                    );
+                    const supplierUpdateDuration =
+                      Date.now() - supplierUpdateStart;
+                    apiTimings.push({
+                      name: 'Supplier Update',
+                      duration: supplierUpdateDuration,
+                      status: 'success',
+                    });
+                    console.log(
+                      `✅ [API CALL] Supplier update completed in ${supplierUpdateDuration}ms`,
+                    );
+                    if (supplierUpdateDuration > 1000) {
+                      console.warn(
+                        `⚠️ [WARNING] Supplier update took ${supplierUpdateDuration}ms (slow)`,
+                      );
+                    }
+                    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+                  } catch (updateErr: any) {
+                    const supplierUpdateDuration =
+                      Date.now() - supplierUpdateStart;
+                    apiTimings.push({
+                      name: 'Supplier Update',
+                      duration: supplierUpdateDuration,
+                      status: 'failed',
+                    });
+                    console.error(
+                      `❌ [API CALL] Supplier update failed after ${supplierUpdateDuration}ms`,
+                    );
+                    console.error(
+                      '❌ [ERROR] Supplier update error:',
+                      updateErr,
+                    );
+                    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+                    // Log but don't throw - supplier update failure shouldn't block transaction
+                  }
+
+                  if (!didRefreshSuppliers) {
+                    didRefreshSuppliers = true;
+                    fetchSuppliersCtx('').catch(() => {});
+                  }
+                  // Immediate UI sync after update
+                  try {
+                    setSelectedSupplier(existingSupplier as any);
+                    if (isValidPhoneValue(supplierPhone)) {
+                      setSupplierPhone(
+                        normalizePhoneForUI(String(supplierPhone)),
+                      );
+                    }
+                    if (isValidAddressValue(supplierAddress)) {
+                      setSupplierAddress(String(supplierAddress));
+                    }
+                  } catch {}
+                } catch (updateError) {
+                  console.error(
+                    '❌ PaymentScreen: Background supplier update failed:',
+                    updateError,
+                  );
+                }
+              })(),
             );
-            await persistAndConfirmSupplier(
-              (existingSupplier as any)?.id,
-              supplierNameToUse,
-              needsPhoneUpdate ? supplierPhone : undefined,
-              needsAddressUpdate ? supplierAddress : undefined,
-            );
-            if (!didRefreshSuppliers) {
-              didRefreshSuppliers = true;
-              fetchSuppliersCtx('').catch(() => {});
-            }
-            // Immediate UI sync after update
-            try {
-              setSelectedSupplier(existingSupplier as any);
-              if (isValidPhoneValue(supplierPhone)) {
-                setSupplierPhone(normalizePhoneForUI(String(supplierPhone)));
-              }
-              if (isValidAddressValue(supplierAddress)) {
-                setSupplierAddress(String(supplierAddress));
-              }
-            } catch {}
           }
         }
       } catch {}
@@ -2059,149 +2891,8 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         return;
       }
 
-      // Defer supplier patch/refresh to background to avoid blocking save
-      runInBackground(
-        (async () => {
-          try {
-            await persistSupplierDirectPatch(
-              resolvedCustomerId,
-              supplierInput?.trim() || undefined,
-              undefined,
-              isValidAddressValue(supplierAddress)
-                ? supplierAddress
-                : undefined,
-            );
-            if (!didRefreshSuppliers) {
-              didRefreshSuppliers = true;
-              fetchSuppliersCtx('').catch(() => {});
-            }
-            try {
-              const currentSuppliersAny: any[] = (suppliers as any[]) || [];
-              const latestSel = currentSuppliersAny.find(
-                (s: any) => Number(s.id) === Number(resolvedCustomerId),
-              );
-              if (latestSel) setSelectedSupplier(latestSel);
-              if (isValidAddressValue(supplierAddress)) {
-                setSupplierAddress(String(supplierAddress));
-              }
-            } catch {}
-          } catch {}
-        })(),
-      );
-
-      // If user changed name/address from the selected supplier, push an update
-      // For editing: always check for updates. For creating: only when manually typing
-      try {
-        if (existingSupplier && (editingItem || !selectedSupplier)) {
-          // When editing, compare against original values from editingItem
-          // When creating, compare against existing supplier values
-          const originalName = editingItem
-            ? editingItem.partyName || editingItem.supplierName || ''
-            : (existingSupplier as any).name ||
-              (existingSupplier as any).partyName ||
-              '';
-
-          const originalAddress = editingItem
-            ? editingItem.partyAddress || editingItem.supplierAddress || ''
-            : (existingSupplier as any).address || '';
-
-          const needsNameUpdate = supplierInput.trim() !== originalName.trim();
-          const needsAddressUpdate =
-            isValidAddressValue(supplierAddress) &&
-            supplierAddress !== originalAddress;
-
-          console.log('🔍 PaymentScreen: Checking supplier updates:', {
-            supplierId: (existingSupplier as any).id,
-            originalName,
-            originalAddress,
-            currentName: supplierInput.trim(),
-            currentAddress: supplierAddress,
-            needsNameUpdate,
-            needsAddressUpdate,
-            selectedSupplier: !!selectedSupplier,
-            editingItem: !!editingItem,
-            existingSupplierName: (existingSupplier as any).name,
-            existingSupplierPartyName: (existingSupplier as any).partyName,
-            existingSupplierAddress: (existingSupplier as any).address,
-          });
-
-          // Update supplier details when editing or creating
-          if (editingItem) {
-            if (needsNameUpdate || needsAddressUpdate) {
-              console.log(
-                '🔍 PaymentScreen: Updating supplier details (editing):',
-                {
-                  supplierId: (existingSupplier as any).id,
-                  needsNameUpdate,
-                  needsAddressUpdate,
-                  newName: supplierInput.trim(),
-                  newAddress: supplierAddress,
-                },
-              );
-              runInBackground(
-                (async () => {
-                  try {
-                    await persistSupplierDirectPatch(
-                      (existingSupplier as any).id,
-                      needsNameUpdate ? supplierInput.trim() : undefined,
-                      undefined,
-                      needsAddressUpdate ? supplierAddress : undefined,
-                    );
-                    if (!didRefreshSuppliers) {
-                      didRefreshSuppliers = true;
-                      fetchSuppliersCtx('').catch(() => {});
-                    }
-                    try {
-                      setSelectedSupplier(existingSupplier as any);
-                      if (isValidAddressValue(supplierAddress)) {
-                        setSupplierAddress(String(supplierAddress));
-                      }
-                    } catch {}
-                  } catch {}
-                })(),
-              );
-            }
-          } else {
-            // For creating: update both name and address if changed
-            if (needsNameUpdate || needsAddressUpdate) {
-              console.log(
-                '🔍 PaymentScreen: Updating supplier details (creating):',
-                {
-                  supplierId: (existingSupplier as any).id,
-                  needsNameUpdate,
-                  needsAddressUpdate,
-                  newName: supplierInput.trim(),
-                  newAddress: supplierAddress,
-                },
-              );
-              runInBackground(
-                (async () => {
-                  try {
-                    await persistSupplierDirectPatch(
-                      (existingSupplier as any).id,
-                      supplierInput.trim(),
-                      undefined,
-                      needsAddressUpdate ? supplierAddress : undefined,
-                    );
-                    if (!didRefreshSuppliers) {
-                      didRefreshSuppliers = true;
-                      fetchSuppliersCtx('').catch(() => {});
-                    }
-                    try {
-                      setSelectedSupplier(existingSupplier as any);
-                      if (isValidAddressValue(supplierAddress)) {
-                        setSupplierAddress(String(supplierAddress));
-                      }
-                    } catch {}
-                  } catch {}
-                })(),
-              );
-            }
-          }
-        }
-      } catch (error) {
-        console.error('❌ PaymentScreen: Error updating supplier:', error);
-      }
+      // OPTIMIZED: Removed redundant background supplier updates
+      // Supplier updates are now handled above (lines 1946-1998) in a single, optimized path
 
       // API body - ensure paymentDate is preserved exactly as selected
       console.log(
@@ -2245,10 +2936,17 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           billNumber: finalPaymentNumber || '', // Include billNumber (payment number like "PAY-1336")
         };
 
-        // Include user's primary role id for backend auditing/mapping
+        // Include user's primary role id for backend auditing/mapping (non-blocking with timeout)
         try {
-          const { addRoleIdToBody } = await import('../../utils/roleHelper');
-          await addRoleIdToBody(body);
+          const roleIdPromise = (async () => {
+            const { addRoleIdToBody } = await import('../../utils/roleHelper');
+            return addRoleIdToBody(body);
+          })();
+          // Race against 200ms timeout to prevent blocking if AsyncStorage is slow
+          await Promise.race([
+            roleIdPromise,
+            new Promise(resolve => setTimeout(resolve, 200)),
+          ]);
         } catch (e) {
           console.warn('⚠️ PaymentScreen: Failed to add role ID:', e);
         }
@@ -2285,8 +2983,35 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           return;
         }
         let res;
+        // Declare variables outside if/else block for use in state update
+        let updateResponse: any = null;
+        let finalPaymentNumberForUpdate = '';
         if (editingItem) {
           // PUT update (backend supports PUT). Send all relevant fields to ensure updates persist.
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          console.log('🚀 [API CALL] Updating Payment Transaction');
+          const updateStart = Date.now();
+          console.log(
+            '⏱️ [TIMING] Payment update start:',
+            new Date().toISOString(),
+          );
+          const updatePayloadSize = JSON.stringify({
+            user_id: body.user_id,
+            type: transactionType,
+            date: paymentDate,
+            amount: Number(body.amount),
+            status: statusToSend,
+            partyName: body.partyName,
+            partyId: body.partyId,
+            customer_id: body.customer_id,
+            partyPhone: body.partyPhone,
+            partyAddress: body.partyAddress,
+          }).length;
+          console.log(
+            '📦 [PAYLOAD] Payment update payload size:',
+            updatePayloadSize,
+            'bytes',
+          );
           console.log(
             '📅 PaymentScreen: Using paymentDate in PUT request:',
             paymentDate,
@@ -2297,11 +3022,13 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
             date: paymentDate, // ensure exact selected date is persisted
             amount: Number(body.amount),
             status: statusToSend,
-            partyName: body.partyName,
+            // CRITICAL: Always include partyName and partyAddress from current form values
+            partyName:
+              supplierInput.trim() || supplierNameToUse || body.partyName || '',
             partyId: body.partyId,
             customer_id: body.customer_id,
-            partyPhone: body.partyPhone,
-            partyAddress: body.partyAddress,
+            partyPhone: supplierPhone || body.partyPhone || '',
+            partyAddress: supplierAddress || body.partyAddress || '',
             // include date mirrors
             transactionDate: paymentDate,
             paymentDate: paymentDate,
@@ -2317,13 +3044,23 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                 supplierInput: supplierInput,
                 supplierAddress: supplierAddress,
                 supplierPhone: supplierPhone,
+                amount: amount,
+                paymentMethod: paymentMethod,
+                category: category,
+                description: description,
+                notes: notes,
               },
               bodyValues: {
                 partyName: body.partyName,
                 partyAddress: body.partyAddress,
                 partyPhone: body.partyPhone,
               },
-              putBody: putBody,
+              putBody: {
+                ...putBody,
+                partyName: putBody.partyName,
+                partyAddress: putBody.partyAddress,
+                partyPhone: putBody.partyPhone,
+              },
               originalEditingItem: {
                 partyName: editingItem.partyName,
                 partyAddress: editingItem.partyAddress,
@@ -2331,13 +3068,19 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
               },
             },
           );
+          console.log(
+            '✅ [PUT] Sending update with partyName:',
+            putBody.partyName,
+            'partyAddress:',
+            putBody.partyAddress,
+          );
           // Always include these optional fields too so edits persist consistently
           putBody.method = cleanBody.method;
           putBody.category = cleanBody.category;
           putBody.description = cleanBody.description;
           putBody.notes = cleanBody.notes;
           // Ensure paymentNumber is set for updates too
-          let finalPaymentNumberForUpdate =
+          finalPaymentNumberForUpdate =
             paymentNumber || editingItem.billNumber || '';
           if (
             !finalPaymentNumberForUpdate ||
@@ -2360,12 +3103,60 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           }
           putBody.billNumber = finalPaymentNumberForUpdate; // Include billNumber for updates
           // Use unified API for update
-          await unifiedApi.updateTransaction(editingItem.id, putBody);
+          try {
+            const response = (await unifiedApi.updateTransaction(
+              editingItem.id,
+              putBody,
+            )) as {
+              data: any;
+              status: number;
+              headers: Headers;
+            };
+            updateResponse = response?.data || response;
+            const updateDuration = Date.now() - updateStart;
+            apiTimings.push({
+              name: 'Payment Update',
+              duration: updateDuration,
+              status: 'success',
+            });
+            console.log(
+              `✅ [API CALL] Payment update completed in ${updateDuration}ms`,
+            );
+            console.log('📦 [RESPONSE] Update response:', updateResponse);
+            if (updateDuration > 2000) {
+              console.warn(
+                `⚠️ [WARNING] Payment update took ${updateDuration}ms (slow)`,
+              );
+            }
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          } catch (updateError: any) {
+            const updateDuration = Date.now() - updateStart;
+            apiTimings.push({
+              name: 'Payment Update',
+              duration: updateDuration,
+              status: 'failed',
+            });
+            console.error(
+              `❌ [API CALL] Payment update failed after ${updateDuration}ms`,
+            );
+            console.error('❌ [ERROR] Payment update error:', updateError);
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            throw updateError;
+          }
         } else {
           // POST create: send full body with all date fields
+          console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+          console.log('🚀 [API CALL] Creating Payment Transaction');
+          const createStart = Date.now();
           console.log(
-            '📅 PaymentScreen: POST request cleanBody with dates:',
-            JSON.stringify(cleanBody, null, 2),
+            '⏱️ [TIMING] Payment creation start:',
+            new Date().toISOString(),
+          );
+          const createPayloadSize = JSON.stringify(cleanBody).length;
+          console.log(
+            '📦 [PAYLOAD] Payment creation payload size:',
+            createPayloadSize,
+            'bytes',
           );
           console.log(
             '📅 PaymentScreen: POST request date field value:',
@@ -2376,129 +3167,191 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
             cleanBody.paymentDate,
           );
           // Use unified API for create
-          const newVoucher = (await unifiedApi.createTransaction(
-            cleanBody,
-          )) as {
-            data: any;
-            status: number;
-            headers: Headers;
-          };
-          appendVoucher(newVoucher?.data || newVoucher);
-        }
-
-        // Optimistically update the local list so changes appear immediately
-        try {
-          if (editingItem) {
-            const updatedFields = {
-              partyName: cleanBody.partyName,
-              partyAddress: cleanBody.partyAddress,
-              partyPhone: cleanBody.partyPhone,
-              method: cleanBody.method,
-              category: cleanBody.category,
-              description: cleanBody.description,
-              notes: cleanBody.notes,
-              amount: Number(cleanBody.amount || body.amount),
-              date: body.date,
-              status: statusToSend,
-              partyId: cleanBody.partyId || body.partyId,
-              customer_id: cleanBody.customer_id || body.customer_id,
-            } as any;
-
-            // For updates, we use the putBody response if available
-            const serverItem = updatedFields;
-            if (serverItem && serverItem.id) {
-              setApiPayments(prev =>
-                (prev || []).map(p =>
-                  String(p.id) === String(editingItem.id)
-                    ? {
-                        ...p,
-                        ...serverItem,
-                        partyName:
-                          serverItem.partyName ||
-                          cleanBody.partyName ||
-                          p.partyName ||
-                          '',
-                        partyAddress:
-                          serverItem.partyAddress ||
-                          cleanBody.partyAddress ||
-                          p.partyAddress ||
-                          '',
-                        partyPhone:
-                          serverItem.partyPhone ||
-                          cleanBody.partyPhone ||
-                          p.partyPhone ||
-                          '',
-                        _raw: { ...(p._raw || {}), ...serverItem },
-                      }
-                    : p,
-                ),
-              );
-            } else {
-              // Fallback to optimistic update if no server response
-              setApiPayments(prev =>
-                (prev || []).map(p =>
-                  String(p.id) === String(editingItem.id)
-                    ? {
-                        ...p,
-                        ...updatedFields,
-                        _raw: { ...(p._raw || {}), ...updatedFields },
-                      }
-                    : p,
-                ),
+          try {
+            const newVoucher = (await unifiedApi.createTransaction(
+              cleanBody,
+            )) as {
+              data: any;
+              status: number;
+              headers: Headers;
+            };
+            const createDuration = Date.now() - createStart;
+            apiTimings.push({
+              name: 'Payment Creation',
+              duration: createDuration,
+              status: 'success',
+            });
+            console.log(
+              `✅ [API CALL] Payment creation completed in ${createDuration}ms`,
+            );
+            if (createDuration > 2000) {
+              console.warn(
+                `⚠️ [WARNING] Payment creation took ${createDuration}ms (slow)`,
               );
             }
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            appendVoucher(newVoucher?.data || newVoucher);
+          } catch (createError: any) {
+            const createDuration = Date.now() - createStart;
+            apiTimings.push({
+              name: 'Payment Creation',
+              duration: createDuration,
+              status: 'failed',
+            });
+            console.error(
+              `❌ [API CALL] Payment creation failed after ${createDuration}ms`,
+            );
+            console.error('❌ [ERROR] Payment creation error:', createError);
+            console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+            throw createError;
           }
-        } catch {}
-
-        // Success - no popup needed
-
-        // For edits, don't refetch from server - use local state with latest supplier info
-        if (editingItem) {
-          // Update the local state with the form data that was just saved
-          setApiPayments(prev =>
-            (prev || []).map(p => {
-              if (String(p.id) === String(editingItem.id)) {
-                return {
-                  ...p,
-                  // Use the form data that was just saved (this is the updated data)
-                  partyName: cleanBody.partyName || p.partyName,
-                  partyAddress: cleanBody.partyAddress || p.partyAddress,
-                  partyPhone: cleanBody.partyPhone || p.partyPhone,
-                  method: cleanBody.method || p.method,
-                  category: cleanBody.category || p.category,
-                  description: cleanBody.description || p.description,
-                  notes: cleanBody.notes || p.notes,
-                  amount: Number(cleanBody.amount || body.amount) || p.amount,
-                  date: body.date || p.date,
-                  status: statusToSend || p.status,
-                  partyId: cleanBody.partyId || body.partyId || p.partyId,
-                  customer_id:
-                    cleanBody.customer_id || body.customer_id || p.customer_id,
-                  // Update the raw data too
-                  _raw: {
-                    ...(p._raw || {}),
-                    partyName: cleanBody.partyName || p.partyName,
-                    partyAddress: cleanBody.partyAddress || p.partyAddress,
-                    partyPhone: cleanBody.partyPhone || p.partyPhone,
-                  },
-                };
-              }
-              return p;
-            }),
-          );
-        } else {
-          // For new payments, refresh from server
-          await fetchPayments();
         }
+
+        // Update local state with server response for immediate UI update
+        try {
+          if (editingItem) {
+            // Use server response if available, otherwise use form data
+            const serverData = updateResponse?.data || updateResponse || {};
+            const updatedFields = {
+              partyName:
+                serverData.partyName ||
+                cleanBody.partyName ||
+                supplierInput.trim() ||
+                '',
+              partyAddress:
+                serverData.partyAddress ||
+                cleanBody.partyAddress ||
+                supplierAddress ||
+                '',
+              partyPhone:
+                serverData.partyPhone ||
+                cleanBody.partyPhone ||
+                supplierPhone ||
+                '',
+              method:
+                serverData.method || cleanBody.method || paymentMethod || '',
+              category:
+                serverData.category || cleanBody.category || category || '',
+              description:
+                serverData.description ||
+                cleanBody.description ||
+                description ||
+                '',
+              notes: serverData.notes || cleanBody.notes || notes || '',
+              amount:
+                Number(serverData.amount) ||
+                Number(cleanBody.amount || body.amount) ||
+                0,
+              date:
+                serverData.date || serverData.paymentDate || body.date || '',
+              status: serverData.status || statusToSend || 'Complete',
+              partyId:
+                serverData.partyId ||
+                serverData.customer_id ||
+                cleanBody.partyId ||
+                body.partyId ||
+                null,
+              customer_id:
+                serverData.customer_id ||
+                serverData.partyId ||
+                cleanBody.customer_id ||
+                body.customer_id ||
+                null,
+              billNumber:
+                serverData.billNumber ||
+                (editingItem ? finalPaymentNumberForUpdate : '') ||
+                paymentNumber ||
+                '',
+            } as any;
+
+            console.log('🔄 Updating local state with:', {
+              serverData: serverData,
+              updatedFields: updatedFields,
+              formData: {
+                supplierInput,
+                supplierAddress,
+                supplierPhone,
+              },
+            });
+
+            // Update local state immediately
+            setApiPayments(prev =>
+              (prev || []).map(p => {
+                if (String(p.id) === String(editingItem.id)) {
+                  return {
+                    ...p,
+                    ...updatedFields,
+                    // Ensure partyName and partyAddress are always updated
+                    partyName: updatedFields.partyName || p.partyName || '',
+                    partyAddress:
+                      updatedFields.partyAddress || p.partyAddress || '',
+                    partyPhone: updatedFields.partyPhone || p.partyPhone || '',
+                    _raw: {
+                      ...(p._raw || {}),
+                      ...serverData,
+                      ...updatedFields,
+                    },
+                  };
+                }
+                return p;
+              }),
+            );
+          }
+        } catch (updateStateError) {
+          console.error('❌ Error updating local state:', updateStateError);
+        }
+
+        // Refresh from server to ensure consistency (non-blocking for updates, blocking for creates)
+        if (editingItem) {
+          // For updates, refresh in background to get latest server state
+          runInBackground(fetchPayments());
+        } else {
+          // For new payments, refresh from server (non-blocking)
+          runInBackground(fetchPayments());
+        }
+
+        // Performance summary
+        const overallDuration = Date.now() - overallStartTime;
+        console.log(
+          '═══════════════════════════════════════════════════════════',
+        );
+        console.log('⏱️ [TIMING] PaymentScreen - PERFORMANCE SUMMARY');
+        console.log(`⏱️ [TIMING] Total duration: ${overallDuration}ms`);
+        if (overallDuration > 3000) {
+          console.warn(
+            `⚠️ [WARNING] Total operation took ${overallDuration}ms (slow)`,
+          );
+        }
+        console.table(apiTimings);
+        console.log(
+          '═══════════════════════════════════════════════════════════',
+        );
+        console.groupEnd();
 
         setEditingItem(null);
         setShowCreateForm(false);
         resetForm();
       } catch (apiError: any) {
+        const overallDuration = Date.now() - overallStartTime;
+        console.error(
+          '⏱️ [TIMING] handleSubmit FAILED after',
+          overallDuration,
+          'ms',
+        );
+        console.error('❌ [ERROR] Error handling payment:', apiError);
+        console.groupEnd();
         // Re-throw to outer catch
         throw apiError;
       }
     } catch (e: any) {
+      const overallDuration = Date.now() - overallStartTime;
+      console.error(
+        '⏱️ [TIMING] handleSubmit FAILED after',
+        overallDuration,
+        'ms',
+      );
+      console.error('❌ [ERROR] Error handling payment:', e);
+      console.groupEnd();
       // Import error handler
       const { handleApiError } = require('../../utils/apiErrorHandler');
       const errorInfo = handleApiError(e);
@@ -2517,6 +3370,89 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         );
         setTimeout(() => scrollToErrorField('api'), 100);
         return;
+      }
+
+      // Handle phone number specific errors (duplicate, invalid format, etc.)
+      try {
+        const backendMsg =
+          errorInfo.message ||
+          e?.response?.data?.message ||
+          e?.response?.data?.error ||
+          e?.message ||
+          '';
+        const errorMsgStr = String(backendMsg).toLowerCase();
+
+        console.log('🔍 [ERROR DEBUG] Checking phone errors:', {
+          status: e?.response?.status,
+          backendMsg,
+          errorMsg: e?.message,
+          responseData: e?.response?.data,
+        });
+
+        // Check for duplicate phone number (400 or 500 status)
+        if (
+          (e?.response?.status === 400 || e?.response?.status === 500) &&
+          backendMsg &&
+          (errorMsgStr.includes('phone number already exists') ||
+            errorMsgStr.includes('already exists') ||
+            errorMsgStr.includes('duplicate'))
+        ) {
+          setErrors(prev => ({
+            ...prev,
+            supplierPhone:
+              'This phone number is already used by another party.',
+          }));
+          setTimeout(
+            () => scrollToErrorField('validation', 'supplierPhone'),
+            100,
+          );
+          showAlert({
+            title: 'Duplicate Phone Number',
+            message:
+              'A party with this phone number already exists. Please use a different number.',
+            type: 'error',
+          });
+          setLoadingSave(false);
+          return;
+        }
+
+        // Check for invalid phone number format errors (400 or 500 status - sanitization errors can be 500)
+        if (
+          (e?.response?.status === 400 || e?.response?.status === 500) &&
+          backendMsg &&
+          (errorMsgStr.includes('invalid phone') ||
+            errorMsgStr.includes('phone must be') ||
+            errorMsgStr.includes('phone number format') ||
+            errorMsgStr.includes('must start with 6, 7, 8, or 9') ||
+            errorMsgStr.includes('expected 10 digits') ||
+            errorMsgStr.includes('indian mobile number'))
+        ) {
+          // Extract specific error message or use default
+          let phoneErrorMsg = 'Invalid phone number format.';
+          if (backendMsg) {
+            phoneErrorMsg = String(backendMsg);
+          }
+
+          setErrors(prev => ({
+            ...prev,
+            supplierPhone: phoneErrorMsg,
+          }));
+          setTimeout(
+            () => scrollToErrorField('validation', 'supplierPhone'),
+            100,
+          );
+          showAlert({
+            title: 'Invalid Phone Number',
+            message:
+              phoneErrorMsg +
+              ' Please enter a valid 10-digit Indian mobile number.',
+            type: 'error',
+          });
+          setLoadingSave(false);
+          return;
+        }
+      } catch (phoneError) {
+        console.warn('Error parsing phone number error:', phoneError);
       }
 
       // Handle 403 Forbidden errors with user-friendly message
@@ -2924,6 +3860,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
     setTriedSubmit(false);
     setError(null);
     setSuccess(null);
+    setErrors({});
   };
 
   // Add handleSync function
@@ -3149,6 +4086,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   };
 
   // Ensure renderPaymentItem is defined before FlatList usage
+  // IMPORTANT: Include apiPayments in dependencies so it re-renders when data updates
   const renderPaymentItem = useCallback(
     ({ item }: { item: any }) => (
       <View
@@ -3172,7 +4110,13 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
             </Text>
             <StatusBadge status={item.status} />
           </View>
-          <Text style={styles.customerName}>{item.partyName}</Text>
+          <Text
+            style={styles.customerName}
+            numberOfLines={1}
+            ellipsizeMode="tail"
+          >
+            {item.partyName || 'Unknown Supplier'}
+          </Text>
           <View style={styles.invoiceDetails}>
             <Text style={styles.invoiceDate}>{item.date?.slice(0, 10)}</Text>
             <Text style={styles.invoiceAmount}>
@@ -3199,7 +4143,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
         )}
       </View>
     ),
-    [],
+    [apiPayments], // Include apiPayments so component re-renders when data changes
   );
 
   const handleLoadMorePayments = () => {
@@ -5490,9 +6434,15 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
           </Text>
         ) : (
           <FlatList
+            key={`payment-list-${refreshKey}`}
             data={paginatedPayments}
             renderItem={renderPaymentItem}
-            keyExtractor={item => String(item.id)}
+            keyExtractor={item =>
+              `payment-${item.id}-${refreshKey}-${item._lastUpdated || 0}`
+            }
+            extraData={`${refreshKey}-${apiPayments.length}-${
+              apiPayments[0]?._lastUpdated || 0
+            }`}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={{ paddingBottom: 100 }}
             onEndReached={handleLoadMorePayments}
@@ -5705,6 +6655,8 @@ const invoiceLikeStyles: Record<string, ViewStyle | TextStyle> = {
     color: '#333', // Card content - darker for better readability
     marginBottom: scale(8),
     fontWeight: 'normal',
+    fontFamily: 'Roboto-Medium',
+    width: '85%',
   },
 
   invoiceDetails: {
