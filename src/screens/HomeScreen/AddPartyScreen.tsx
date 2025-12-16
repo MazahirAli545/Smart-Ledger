@@ -399,8 +399,10 @@ const AddPartyScreen: React.FC = () => {
   };
 
   const handleOpeningBalanceChange = (text: string) => {
-    setOpeningBalance(text);
-    if (text.trim() === '' || !isNaN(parseFloat(text))) {
+    // Normalize to a positive numeric value (strip non-numeric chars and minus sign)
+    const cleaned = text.replace(/[^0-9.]/g, '');
+    setOpeningBalance(cleaned);
+    if (cleaned.trim() === '' || !isNaN(parseFloat(cleaned))) {
       clearFieldError('openingBalance');
     }
   };
@@ -632,13 +634,14 @@ const AddPartyScreen: React.FC = () => {
     }
 
     // Validate opening balance - only when adding new party (not in edit mode)
-    // Note: Opening balance is not sent to backend, so validation is not critical
     if (!isEditMode && openingBalance.trim()) {
       const balance = parseFloat(openingBalance);
       if (isNaN(balance)) {
         newErrors.openingBalance = 'Opening balance must be a valid number';
+      } else if (balance <= 0) {
+        newErrors.openingBalance =
+          'Opening balance must be greater than zero (negative values are not allowed).';
       }
-      // Allow negative values for opening balance
     }
 
     setErrors(newErrors);
@@ -3039,7 +3042,7 @@ const AddPartyScreen: React.FC = () => {
         <TextInput
           ref={inputRef}
           style={[styles.amountInput, error ? styles.amountInputError : {}]}
-          placeholder="Enter amount (optional, +/-)"
+          placeholder={placeholder}
           value={value}
           onChangeText={onChangeText}
           placeholderTextColor="#666666"
@@ -3220,7 +3223,7 @@ const AddPartyScreen: React.FC = () => {
               Opening Balance (Optional)
             </Text>
             {renderAmountInput(
-              'Enter amount (optional, +/-)',
+              'Enter amount (optional)',
               openingBalance,
               handleOpeningBalanceChange,
               errors.openingBalance,

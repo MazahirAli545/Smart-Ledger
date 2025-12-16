@@ -4115,7 +4115,11 @@ const ReceiptScreen: React.FC<FolderProp> = ({ folder }) => {
                     focusedField === 'amount' && styles.inputFocused,
                   ]}
                   value={amount}
-                  onChangeText={setAmount}
+                  onChangeText={text => {
+                    // Keep only digits to prevent negative or invalid characters
+                    const numericValue = text.replace(/[^0-9]/g, '');
+                    setAmount(numericValue);
+                  }}
                   placeholder="0"
                   placeholderTextColor="#666666"
                   keyboardType="numeric"

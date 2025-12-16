@@ -2606,6 +2606,15 @@ const InvoiceScreen: React.FC = () => {
         return sum + q * r * (pct / 100);
       }, 0);
       const totalAmount = subTotal + gstAmount - discountAmount;
+
+      // Block API call if total is zero or negative
+      if (totalAmount <= 0) {
+        setError(
+          'Total amount must be greater than zero. Please adjust your items, tax or discount.',
+        );
+        // Do not call API
+        return;
+      }
       // Text-friendly representation for servers storing TEXT columns
       // Create minimized item payload strictly matching backend DTO
       const simpleItemPayload = itemPayload.map(it => ({
@@ -5064,34 +5073,53 @@ const InvoiceScreen: React.FC = () => {
               </View>
               <View
                 style={{
-                  flexDirection: 'row',
-                  justifyContent: 'space-between',
                   marginTop: scale(16),
                   paddingTop: scale(16),
                   borderTopWidth: 1,
                   borderTopColor: '#dee2e6',
-                  alignItems: 'center',
                 }}
               >
-                <Text
+                <View
                   style={{
-                    fontSize: 16,
-                    color: '#333333',
-                    fontFamily: 'Roboto-Medium',
+                    flexDirection: 'row',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
                   }}
                 >
-                  Total:
-                </Text>
-                <Text
-                  style={{
-                    fontSize: 16,
-                    color: '#333333',
-                    fontFamily: 'Roboto-Medium',
-                  }}
-                >
-                  {formatCurrency(calculateTotal())}
-                </Text>
+                  <Text
+                    style={{
+                      fontSize: 16,
+                      color: '#333333',
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
+                    Total:
+                  </Text>
+                  <Text
+                    style={{
+                      fontSize: 16,
+                      color: '#333333',
+                      fontFamily: 'Roboto-Medium',
+                    }}
+                  >
+                    {formatCurrency(calculateTotal())}
+                  </Text>
+                </View>
               </View>
+
+              {error && (
+                <View
+                  style={{
+                    marginTop: scale(10),
+                    paddingHorizontal: scale(12),
+                    paddingVertical: scale(8),
+                    borderRadius: scale(8),
+                    backgroundColor: '#fef2f2',
+                  }}
+                >
+                  <Text style={styles.errorTextField}>{error}</Text>
+                </View>
+              )}
             </View>
           </View>
 

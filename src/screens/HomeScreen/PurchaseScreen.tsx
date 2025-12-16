@@ -2933,6 +2933,15 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
       const gstAmount = subTotal * (gstPct / 100);
       const totalAmount = subTotal + gstAmount - discountAmount;
 
+      // Block API call if total is zero or negative
+      if (totalAmount <= 0) {
+        setError(
+          'Total amount must be greater than zero. Please adjust your items, tax or discount.',
+        );
+        // Do not call API
+        return;
+      }
+
       // Prepare item payloads (align with Sell): include per-line gstPct, array-of-arrays, and JSON mirrors
       const simpleItemPayload = validItemsForCalc.map(item => {
         const qtyNum = Number(item.quantity) || 0;
@@ -5179,34 +5188,53 @@ Notes: Delivery within 3 business days, warranty included for all items.`;
                 </View>
                 <View
                   style={{
-                    flexDirection: 'row',
-                    justifyContent: 'space-between',
                     marginTop: scale(16),
                     paddingTop: scale(16),
                     borderTopWidth: 1,
                     borderTopColor: '#dee2e6',
-                    alignItems: 'center',
                   }}
                 >
-                  <Text
+                  <View
                     style={{
-                      fontSize: 16,
-                      color: '#333333',
-                      fontFamily: 'Roboto-Medium',
+                      flexDirection: 'row',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
                     }}
                   >
-                    Total:
-                  </Text>
-                  <Text
-                    style={{
-                      fontSize: 16,
-                      color: '#333333',
-                      fontFamily: 'Roboto-Medium',
-                    }}
-                  >
-                    ₹{calculateTotal().toFixed(2)}
-                  </Text>
+                    <Text
+                      style={{
+                        fontSize: 16,
+                        color: '#333333',
+                        fontFamily: 'Roboto-Medium',
+                      }}
+                    >
+                      Total:
+                    </Text>
+                    <Text
+                      style={{
+                        fontSize: 16,
+                        color: '#333333',
+                        fontFamily: 'Roboto-Medium',
+                      }}
+                    >
+                      ₹{calculateTotal().toFixed(2)}
+                    </Text>
+                  </View>
                 </View>
+
+                {error && (
+                  <View
+                    style={{
+                      marginTop: scale(10),
+                      paddingHorizontal: scale(12),
+                      paddingVertical: scale(8),
+                      borderRadius: scale(8),
+                      backgroundColor: '#fef2f2',
+                    }}
+                  >
+                    <Text style={styles.errorTextField}>{error}</Text>
+                  </View>
+                )}
               </View>
             </View>
             {/* Notes Card */}

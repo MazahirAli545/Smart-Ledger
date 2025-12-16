@@ -8,6 +8,7 @@ import {
   Platform,
   Keyboard,
   TouchableWithoutFeedback,
+  StatusBar,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Ionicons from 'react-native-vector-icons/Ionicons';
@@ -844,26 +845,35 @@ const SignInOtpScreen = () => {
   return (
     <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
       <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
-        <KeyboardAwareScrollView
-          ref={scrollViewRef}
-          contentContainerStyle={{ flexGrow: 1 }}
-          enableOnAndroid
-          enableAutomaticScroll={true}
-          extraScrollHeight={80}
-          extraHeight={100}
-          keyboardOpeningTime={0}
-          keyboardShouldPersistTaps="handled"
-          scrollEnabled={true}
-          showsVerticalScrollIndicator={false}
+        <StatusBar
+          barStyle="light-content"
+          backgroundColor="#4f8cff"
+          translucent={false}
+        />
+        <LinearGradient
+          colors={['#4f8cff', '#4f8cff', '#f6fafc']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.backgroundGradient}
         >
-          <View style={styles.container}>
+          <KeyboardAwareScrollView
+            ref={scrollViewRef}
+            contentContainerStyle={styles.scrollContent}
+            enableOnAndroid
+            enableAutomaticScroll={true}
+            extraScrollHeight={80}
+            extraHeight={100}
+            keyboardOpeningTime={0}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
             {/* Back Button */}
             <TouchableOpacity
               style={styles.backButton}
               onPress={() => navigation.goBack()}
               activeOpacity={0.7}
             >
-              <Ionicons name="arrow-back" size={26} color="#2d3748" />
+              <Ionicons name="arrow-back" size={24} color="#ffffff" />
             </TouchableOpacity>
 
             {/* Header Section */}
@@ -879,6 +889,11 @@ const SignInOtpScreen = () => {
             {/* Main Content Card */}
             <View style={styles.mainContent}>
               <View style={styles.card}>
+                <View style={styles.stepPill}>
+                  <Text style={styles.stepPillText}>
+                    Step 2 of 2 · Enter code
+                  </Text>
+                </View>
                 <View style={styles.cardHeader}>
                   <Text style={styles.cardTitle}>OTP Verification</Text>
                   <Text style={styles.cardSubtitle}>
@@ -968,7 +983,7 @@ const SignInOtpScreen = () => {
 
                     {timer === 0 && (
                       <LinearGradient
-                        colors={['#6366f1', '#4f46e5', '#4338ca']}
+                        colors={['#4f8cff', '#4f8cff']}
                         start={{ x: 0, y: 0 }}
                         end={{ x: 1, y: 0 }}
                         style={styles.resendButton}
@@ -1025,8 +1040,8 @@ const SignInOtpScreen = () => {
                 </View>
               </View>
             </View>
-          </View>
-        </KeyboardAwareScrollView>
+          </KeyboardAwareScrollView>
+        </LinearGradient>
       </SafeAreaView>
     </TouchableWithoutFeedback>
   );
@@ -1035,16 +1050,23 @@ const SignInOtpScreen = () => {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#ffffff',
+    backgroundColor: '#4f8cff',
+  },
+  backgroundGradient: {
+    flex: 1,
+  },
+  scrollContent: {
+    flexGrow: 1,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 24,
+    justifyContent: 'flex-start',
   },
   container: {
     flex: 1,
-    backgroundColor: '#ffffff',
+    backgroundColor: 'transparent',
     alignItems: 'center',
     justifyContent: 'flex-start',
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 40,
     minHeight: '100%',
   },
   backButton: {
@@ -1053,31 +1075,33 @@ const styles = StyleSheet.create({
     left: 20,
     zIndex: 10,
     padding: 10,
-    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
     borderRadius: 22,
     shadowColor: '#000',
-    shadowOpacity: 0.08,
+    shadowOpacity: 0.1,
     shadowRadius: 8,
     shadowOffset: { width: 0, height: 2 },
     elevation: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
   },
   // Header Section
   headerSection: {
     width: '100%',
     alignItems: 'center',
-    marginBottom: 32,
-    marginTop: 15,
+    marginBottom: 20,
+    marginTop: 52,
   },
   titleSection: {
     alignItems: 'center',
     marginTop: 15,
   },
   welcome: {
-    fontSize: 32,
-    color: '#0f172a',
+    fontSize: 30,
+    color: '#ffffff',
     textAlign: 'center',
     marginBottom: 12,
-    fontWeight: '800',
+    fontWeight: '700',
     fontFamily: 'Roboto-Bold',
     letterSpacing: -0.5,
   },
@@ -1086,15 +1110,31 @@ const styles = StyleSheet.create({
     width: '100%',
     flex: 1,
     justifyContent: 'flex-start',
-    marginTop: 10,
+    marginTop: 0,
+    marginBottom: 16,
   },
   subtitle: {
-    fontSize: 17,
-    color: '#475569',
+    fontSize: 16,
+    color: 'rgba(255, 255, 255, 0.9)',
     textAlign: 'center',
-    lineHeight: 24,
+    lineHeight: 22,
     fontWeight: '500',
     fontFamily: 'Roboto-Medium',
+  },
+  stepPill: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: '#e0f2fe',
+    marginBottom: 16,
+  },
+  stepPillText: {
+    fontSize: 11,
+    color: '#0369a1',
+    fontFamily: 'Roboto-Medium',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
   },
 
   otpContainer: {
@@ -1128,9 +1168,9 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   otpInputFilled: {
-    borderColor: '#6366f1',
-    backgroundColor: '#f0f6ff',
-    shadowColor: '#6366f1',
+    borderColor: '#4f8cff',
+    backgroundColor: '#e0f2fe',
+    shadowColor: '#4f8cff',
     shadowOpacity: 0.2,
     shadowRadius: 12,
     elevation: 4,
@@ -1139,44 +1179,46 @@ const styles = StyleSheet.create({
   card: {
     backgroundColor: '#ffffff',
     borderRadius: 24,
-    padding: 32,
-    shadowColor: '#6366f1',
-    shadowOpacity: 0.12,
-    shadowRadius: 24,
+    padding: 24,
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 20,
     shadowOffset: { width: 0, height: 8 },
     elevation: 8,
     width: '100%',
-    maxWidth: 400,
+    maxWidth: 420,
     alignSelf: 'center',
-    borderWidth: 1.5,
-    borderColor: '#f1f5f9',
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
   },
   cardHeader: {
     alignItems: 'center',
-    marginBottom: 32,
+    marginBottom: 24,
   },
   cardTitle: {
-    fontSize: 28,
+    fontSize: 30,
     color: '#0f172a',
-    marginBottom: 10,
+    marginBottom: 8,
     textAlign: 'center',
     fontWeight: '700',
     fontFamily: 'Roboto-Bold',
-    letterSpacing: -0.3,
+    letterSpacing: -0.5,
   },
 
   cardSubtitle: {
     fontSize: 16,
     color: '#64748b',
     textAlign: 'center',
-    lineHeight: 24,
+    lineHeight: 22,
     fontWeight: '500',
     fontFamily: 'Roboto-Medium',
+    marginBottom: 8,
   },
 
   formSection: {
     width: '100%',
-    marginBottom: 24,
+    marginBottom: 16,
   },
   infoText: {
     fontSize: 15,
@@ -1191,21 +1233,21 @@ const styles = StyleSheet.create({
 
   inputSection: {
     width: '100%',
-    marginBottom: 24,
+    marginBottom: 20,
   },
   label: {
     fontSize: 15,
-    color: '#1e293b',
-    marginBottom: 12,
+    color: '#374151',
+    marginBottom: 10,
     alignSelf: 'flex-start',
     fontWeight: '700',
-    fontFamily: 'Roboto-Medium',
-    letterSpacing: 0.2,
+    fontFamily: 'Roboto-Bold',
+    letterSpacing: 0.1,
   },
 
   timerSection: {
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: 16,
   },
   timerContainer: {
     flexDirection: 'row',
@@ -1214,19 +1256,19 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     paddingHorizontal: 20,
     paddingVertical: 12,
-    backgroundColor: '#fafbfc',
+    backgroundColor: '#f8fafc',
     borderRadius: 12,
     borderWidth: 1.5,
-    borderColor: '#f1f5f9',
-    shadowColor: '#6366f1',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
-    elevation: 3,
+    borderColor: '#e2e8f0',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
   },
   timerText: {
     fontSize: 16,
-    color: '#1e293b',
+    color: '#0f172a',
     marginLeft: 8,
     fontFamily: 'Roboto-Bold',
     fontWeight: '700',
@@ -1238,21 +1280,21 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   resendButton: {
-    borderRadius: 16,
+    borderRadius: 12,
     width: '100%',
     marginBottom: 20,
-    shadowColor: '#6366f1',
-    shadowOffset: { width: 0, height: 8 },
+    shadowColor: '#4f8cff',
+    shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,
-    shadowRadius: 16,
-    elevation: 10,
+    shadowRadius: 8,
+    elevation: 6,
     overflow: 'hidden',
   },
   resendText: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 17,
     marginLeft: 8,
-    letterSpacing: 0.5,
+    letterSpacing: 0.4,
     fontWeight: '700',
     fontFamily: 'Roboto-Bold',
     textAlign: 'center',
@@ -1277,7 +1319,7 @@ const styles = StyleSheet.create({
   },
   errorText: {
     color: '#dc2626',
-    fontSize: 14,
+    fontSize: 13,
     marginLeft: 12,
     textAlign: 'left',
     flex: 1,
@@ -1311,16 +1353,16 @@ const styles = StyleSheet.create({
 
   footerSection: {
     alignItems: 'center',
-    paddingTop: 20,
+    paddingTop: 16,
     borderTopWidth: 1.5,
     borderTopColor: '#f1f5f9',
-    marginTop: 8,
+    marginTop: 4,
   },
   bottomText: {
     fontSize: 14,
     color: '#64748b',
     textAlign: 'center',
-    lineHeight: 22,
+    lineHeight: 20,
     fontWeight: '400',
     fontFamily: 'Roboto-Medium',
   },

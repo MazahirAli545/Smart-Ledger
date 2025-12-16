@@ -3727,6 +3727,42 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
   const filteredPayments = useMemo(
     () =>
       apiPayments.filter(pay => {
+        // First, hide subscription/plan upgrade payments from this screen
+        const rawCategory = (
+          (pay as any).category ||
+          (pay as any).Category ||
+          (pay as any).cat ||
+          ''
+        ).toString();
+        const category = rawCategory.toLowerCase();
+
+        const rawInvoiceNumber =
+          (pay as any).invoiceNumber ||
+          (pay as any).billNumber ||
+          (pay as any).paymentNumber ||
+          '';
+        const invoiceNumber = rawInvoiceNumber.toString().toUpperCase();
+
+        const hasPlanId = !!(
+          (pay as any).plan_id ||
+          (pay as any).planId ||
+          (pay as any).targetPlanId
+        );
+
+        const descriptionText = ((pay as any).description || '')
+          .toString()
+          .toLowerCase();
+
+        const isSubscriptionPayment =
+          category === 'subscription' ||
+          invoiceNumber.startsWith('SUB-') ||
+          hasPlanId ||
+          descriptionText.includes('subscription payment');
+
+        if (isSubscriptionPayment) {
+          return false;
+        }
+
         // Fuzzy search across all fields
         const s = searchFilter.searchText?.trim().toLowerCase();
         const matchesFuzzy =
@@ -4659,7 +4695,7 @@ const PaymentScreen: React.FC<FolderProp> = ({ folder }) => {
                   focusedField === 'amount' && styles.inputFocused,
                 ]}
                 value={amount}
-                onChangeText={setAmount}
+                onChangeText={handleAmountChange}
                 placeholder="0"
                 placeholderTextColor="#666666"
                 keyboardType="numeric"

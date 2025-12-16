@@ -14,12 +14,12 @@ import {
   Keyboard,
   TouchableWithoutFeedback,
   Modal,
+  StatusBar,
 } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation } from '@react-navigation/native';
 import type { StackNavigationProp } from '@react-navigation/stack';
 import { sendOtp } from '../../api';
-import { useAlert } from '../../context/AlertContext';
 import { SafeAreaView as SafeAreaViewRN } from 'react-native-safe-area-context';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-aware-scroll-view';
 
@@ -33,7 +33,6 @@ interface CountryType {
 
 const SignInScreen: React.FC = () => {
   const navigation = useNavigation<StackNavigationProp<any>>();
-  const { showAlert } = useAlert();
   const [mobile, setMobile] = useState('');
   const [callingCode] = useState('91');
   const [countryCode] = useState('IN');
@@ -71,11 +70,6 @@ const SignInScreen: React.FC = () => {
     const validationError = validatePhoneNumber(mobile);
     if (validationError) {
       setError(validationError);
-      showAlert({
-        title: 'Invalid Phone Number',
-        message: validationError,
-        type: 'error',
-      });
       return;
     }
 
@@ -116,20 +110,8 @@ const SignInScreen: React.FC = () => {
         err.message || 'Failed to send OTP. Please try again.';
       setLoading(false);
       setError(errorMessage);
-      showAlert({
-        title: 'Error',
-        message: errorMessage,
-        type: 'error',
-      });
     }
-  }, [
-    mobile,
-    callingCode,
-    countryCode,
-    validatePhoneNumber,
-    navigation,
-    showAlert,
-  ]);
+  }, [mobile, callingCode, countryCode, validatePhoneNumber, navigation]);
 
   // Optimized input handler - memoized to prevent unnecessary re-renders
   const handleMobileChange = useCallback(
@@ -146,109 +128,138 @@ const SignInScreen: React.FC = () => {
   return (
     <TouchableWithoutFeedback onPress={Keyboard.dismiss} accessible={false}>
       <SafeAreaViewRN style={styles.safeArea}>
-        <KeyboardAwareScrollView
-          contentContainerStyle={{ flexGrow: 1 }}
-          enableOnAndroid
-          extraScrollHeight={24}
-          keyboardShouldPersistTaps="handled"
+        <StatusBar
+          barStyle="light-content"
+          backgroundColor="#4f8cff"
+          translucent={false}
+        />
+        <LinearGradient
+          colors={['#4f8cff', '#4f8cff', '#f6fafc']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.backgroundGradient}
         >
-          <View style={styles.container}>
-            {/* Header Section */}
-            <View style={styles.headerSection}>
-              <View style={styles.logoContainer}>
+          <KeyboardAwareScrollView
+            enableOnAndroid
+            extraScrollHeight={40}
+            keyboardShouldPersistTaps="handled"
+            contentContainerStyle={styles.scrollContent}
+          >
+            {/* Brand strip */}
+            <View style={styles.brandBar}>
+              <View style={styles.brandLogoCircle}>
                 <Image
                   source={require('../../../android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png')}
-                  style={styles.logoIcon}
+                  style={styles.brandLogoIcon}
                   resizeMode="contain"
                 />
               </View>
-              <View style={styles.titleSection}>
-                <Text style={styles.welcome}>Welcome to Smart Ledger</Text>
-                <Text style={styles.subtitle}>
-                  Sign in or create your account
+              <View style={styles.brandTextContainer}>
+                <Text style={styles.brandTitle}>Utils Ledger</Text>
+                <Text style={styles.brandSubtitle}>
+                  Smart ledger for your business
                 </Text>
               </View>
             </View>
 
-            {/* Main Content Card */}
-            <View style={styles.mainContent}>
-              <View style={styles.card}>
-                <View style={styles.cardHeader}>
-                  <Text style={styles.cardTitle}>Sign In / Sign Up</Text>
-                  <Text style={styles.cardSubtitle}>
-                    Enter your mobile number to continue
-                  </Text>
-                </View>
+            {/* Main card */}
+            <View style={styles.sheetWrapper}>
+              <View style={styles.sheetGradient}>
+                <View style={styles.sheetInner}>
+                  <View style={styles.stepPill}>
+                    <Text style={styles.stepPillText}>
+                      Step 1 of 2 · Verify number
+                    </Text>
+                  </View>
 
-                <View style={styles.formSection}>
-                  <Text style={styles.infoText}>
-                    We'll automatically detect if you're new or existing user
-                    and send the appropriate OTP. New users get instant access
-                    with default settings.
-                  </Text>
+                  <View style={styles.headerSection}>
+                    <Text style={styles.screenTitle}>Sign in with OTP</Text>
+                    <Text style={styles.screenSubtitle}>
+                      Enter your mobile number to receive a one-time password.
+                    </Text>
+                  </View>
 
-                  <View style={styles.inputSection}>
-                    <Text style={styles.label}>Phone Number</Text>
-                    <View style={styles.phoneInputRow}>
-                      <View style={styles.countryTrigger}>
-                        <Text style={styles.flag}>{country?.flag || '🇮🇳'}</Text>
-                        <Text style={styles.code}>+{callingCode}</Text>
+                  <View style={styles.formSection}>
+                    <View style={styles.inputSection}>
+                      <Text style={styles.label}>Mobile number</Text>
+                      <View style={styles.phoneInputRow}>
+                        <TextInput
+                          style={styles.phoneInput}
+                          placeholder="12345 67890"
+                          placeholderTextColor="#64748b"
+                          value={mobile}
+                          onChangeText={handleMobileChange}
+                          keyboardType="number-pad"
+                          keyboardAppearance="dark"
+                          maxLength={10}
+                          autoComplete="tel"
+                          textContentType="telephoneNumber"
+                          selectionColor="#818cf8"
+                          accessibilityLabel="Mobile number"
+                        />
                       </View>
-                      <TextInput
-                        style={styles.phoneInput}
-                        placeholder="9999999999"
-                        placeholderTextColor="#a0aec0"
-                        value={mobile}
-                        onChangeText={handleMobileChange}
-                        keyboardType="number-pad"
-                        maxLength={10}
-                        autoComplete="tel"
-                        textContentType="telephoneNumber"
-                      />
                     </View>
+
+                    <Text style={styles.inlineHelperText}>
+                      We never share your number. It&apos;s used only for
+                      sign-in.
+                    </Text>
+
+                    {error && <Text style={styles.errorText}>{error}</Text>}
                   </View>
 
                   <View style={styles.buttonSection}>
                     <LinearGradient
                       colors={
-                        mobile.length !== 10
-                          ? ['#cbd5e1', '#94a3b8']
-                          : ['#6366f1', '#4f46e5', '#4338ca']
+                        mobile.length !== 10 || loading
+                          ? ['#9ca3af', '#9ca3af']
+                          : ['#4f8cff', '#4f8cff']
                       }
                       start={{ x: 0, y: 0 }}
                       end={{ x: 1, y: 0 }}
-                      style={styles.purpleButton}
+                      style={[
+                        styles.primaryButtonGradient,
+                        (mobile.length !== 10 || loading) &&
+                          styles.primaryButtonGradientDisabled,
+                      ]}
                     >
                       <TouchableOpacity
-                        style={[
-                          styles.button,
-                          (mobile.length !== 10 || loading) &&
-                            styles.buttonDisabled,
-                        ]}
+                        style={styles.button}
                         onPress={handleSendOtp}
                         disabled={mobile.length !== 10 || loading}
-                        activeOpacity={0.8}
+                        activeOpacity={0.9}
                       >
                         <Text style={styles.buttonText}>
-                          {loading ? 'Sending...' : 'Send OTP'}
+                          {loading ? 'Sending OTP…' : 'Send OTP'}
                         </Text>
                       </TouchableOpacity>
                     </LinearGradient>
+
+                    <Text style={styles.secondaryNote}>
+                      You agree to receive an OTP on this number.
+                    </Text>
                   </View>
 
-                  {error && <Text style={styles.errorText}>{error}</Text>}
-                </View>
-
-                <View style={styles.footerSection}>
-                  <Text style={styles.bottomText}>
-                    One mobile number, one account. New users get instant
-                    access, existing users login normally.
-                  </Text>
+                  <View style={styles.securityStrip}>
+                    <View style={styles.securityDot} />
+                    <Text style={styles.securityText}>
+                      Bank-grade encryption · No password to remember
+                    </Text>
+                  </View>
                 </View>
               </View>
             </View>
-          </View>
-        </KeyboardAwareScrollView>
+
+            <View style={styles.footerNoteContainer}>
+              <Text style={styles.footerNoteTitle}>
+                Why mobile verification?
+              </Text>
+              <Text style={styles.footerNoteSubtitle}>
+                It keeps your ledger secure, even if your phone is shared.
+              </Text>
+            </View>
+          </KeyboardAwareScrollView>
+        </LinearGradient>
 
         {/* Profile Complete Popup */}
         <Modal
@@ -262,43 +273,46 @@ const SignInScreen: React.FC = () => {
               flex: 1,
               justifyContent: 'center',
               alignItems: 'center',
-              backgroundColor: 'rgba(0,0,0,0.4)',
+              backgroundColor: 'rgba(15,23,42,0.85)',
             }}
           >
             <View
               style={{
-                backgroundColor: '#fff',
-                borderRadius: 12,
-                padding: 28,
+                backgroundColor: '#0f172a',
+                borderRadius: 18,
+                padding: 26,
                 alignItems: 'center',
-                width: 300,
+                width: 310,
+                borderWidth: 1,
+                borderColor: '#1f2937',
               }}
             >
               <Text
                 style={{
                   fontSize: 18,
-                  marginBottom: 12,
-                  color: '#222',
+                  marginBottom: 10,
+                  color: '#e5e7eb',
                   fontFamily: 'Roboto-Medium',
                 }}
               >
-                Profile Incomplete
+                Profile incomplete
               </Text>
               <Text
                 style={{
-                  fontSize: 15,
-                  color: '#444',
+                  fontSize: 14,
+                  color: '#9ca3af',
                   marginBottom: 18,
                   textAlign: 'center',
                   fontFamily: 'Roboto-Medium',
                 }}
               >
-                Please complete your profile
+                To unlock all features, we need a few more details about your
+                business profile.
               </Text>
               <TouchableOpacity
                 style={{
-                  backgroundColor: '#4f8cff',
-                  borderRadius: 8,
+                  backgroundColor: '#4f46e5',
+                  borderRadius: 999,
                   paddingVertical: 10,
                   paddingHorizontal: 32,
                 }}
@@ -314,12 +328,12 @@ const SignInScreen: React.FC = () => {
               >
                 <Text
                   style={{
-                    color: '#fff',
-                    fontSize: 16,
+                    color: '#f9fafb',
+                    fontSize: 15,
                     fontFamily: 'Roboto-Medium',
                   }}
                 >
-                  OK
+                  Complete profile
                 </Text>
               </TouchableOpacity>
             </View>
@@ -333,121 +347,136 @@ const SignInScreen: React.FC = () => {
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#ffffff',
+    backgroundColor: '#4f8cff',
+  },
+  backgroundGradient: {
+    flex: 1,
+  },
+  scrollContent: {
+    flexGrow: 1,
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 40,
+    justifyContent: 'flex-start',
   },
   container: {
     flex: 1,
-    backgroundColor: '#ffffff',
+    backgroundColor: 'transparent',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 20,
   },
-  // Header Section
   headerSection: {
-    width: '100%',
-    alignItems: 'center',
-    marginBottom: 32,
-    marginTop: 15,
+    alignItems: 'flex-start',
+    marginBottom: 24,
   },
   logoContainer: {
     alignItems: 'center',
-    marginBottom: 24,
-    padding: 12,
+    marginBottom: 16,
+    padding: 10,
     borderRadius: 20,
-    backgroundColor: 'transparent',
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
   },
   logoIcon: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-  },
-  titleSection: {
-    alignItems: 'center',
+    width: 56,
+    height: 56,
+    borderRadius: 18,
   },
   welcome: {
-    fontSize: 32,
+    fontSize: 26,
     color: '#0f172a',
     textAlign: 'center',
-    marginBottom: 12,
+    marginBottom: 4,
     fontWeight: '800',
     fontFamily: 'Roboto-Bold',
     letterSpacing: -0.5,
   },
 
-  mainContent: {
-    width: '100%',
-    flex: 1,
-    justifyContent: 'center',
-  },
+  // Card & content
   subtitle: {
-    fontSize: 17,
-    color: '#475569',
+    fontSize: 15,
+    color: '#4b5563',
     textAlign: 'center',
-    lineHeight: 24,
+    lineHeight: 20,
     fontWeight: '500',
     fontFamily: 'Roboto-Medium',
   },
+  heroTagline: {
+    marginTop: 4,
+    fontSize: 13,
+    color: '#6b7280',
+    textAlign: 'center',
+    lineHeight: 18,
+    fontWeight: '400',
+    fontFamily: 'Roboto-Medium',
+  },
 
+  cardOuter: {
+    borderRadius: 26,
+    padding: 1,
+    shadowColor: '#020617',
+    shadowOpacity: 0.18,
+    shadowRadius: 22,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 10,
+  },
   card: {
     backgroundColor: '#ffffff',
-    borderRadius: 24,
-    padding: 32,
-    shadowColor: '#6366f1',
-    shadowOpacity: 0.12,
-    shadowRadius: 24,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 8,
+    borderRadius: 26,
+    paddingHorizontal: 20,
+    paddingVertical: 22,
     width: '100%',
     maxWidth: 400,
     alignSelf: 'center',
-    borderWidth: 1.5,
-    borderColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
   },
   cardHeader: {
-    alignItems: 'center',
-    marginBottom: 32,
+    alignItems: 'flex-start',
+    marginBottom: 20,
   },
   cardTitle: {
-    fontSize: 28,
+    fontSize: 18,
     color: '#0f172a',
-    marginBottom: 10,
-    textAlign: 'center',
+    marginBottom: 4,
+    textAlign: 'left',
     fontWeight: '700',
     fontFamily: 'Roboto-Bold',
     letterSpacing: -0.3,
   },
 
   cardSubtitle: {
-    fontSize: 16,
+    fontSize: 14,
     color: '#64748b',
-    textAlign: 'center',
-    lineHeight: 24,
+    textAlign: 'left',
+    lineHeight: 20,
     fontWeight: '500',
     fontFamily: 'Roboto-Medium',
   },
 
   formSection: {
     width: '100%',
-    marginBottom: 24,
+    marginBottom: 20,
   },
   label: {
     fontSize: 15,
-    color: '#1e293b',
-    marginBottom: 12,
+    color: '#374151',
+    marginBottom: 10,
     alignSelf: 'flex-start',
     fontWeight: '700',
-    fontFamily: 'Roboto-Medium',
-    letterSpacing: 0.2,
+    fontFamily: 'Roboto-Bold',
+    letterSpacing: 0.1,
   },
 
   inputSection: {
     width: '100%',
-    marginBottom: 24,
+    marginBottom: 12,
   },
   button: {
-    paddingHorizontal: 28,
-    paddingVertical: 18,
-    borderRadius: 16,
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 12,
     backgroundColor: 'transparent',
     width: '100%',
     alignItems: 'center',
@@ -457,9 +486,9 @@ const styles = StyleSheet.create({
   },
   buttonText: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 17,
     textAlign: 'center',
-    letterSpacing: 0.5,
+    letterSpacing: 0.4,
     fontWeight: '700',
     fontFamily: 'Roboto-Bold',
   },
@@ -475,14 +504,16 @@ const styles = StyleSheet.create({
 
   errorText: {
     color: '#dc2626',
-    fontSize: 14,
-    marginTop: 8,
-    marginBottom: 8,
-    textAlign: 'center',
-    backgroundColor: '#fee2e2',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 10,
+    fontSize: 13,
+    marginTop: 10,
+    marginBottom: 0,
+    textAlign: 'left',
+    backgroundColor: '#fef2f2',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#fecaca',
     fontFamily: 'Roboto-Medium',
   },
 
@@ -490,17 +521,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     width: '100%',
-    backgroundColor: '#fafbfc',
-    borderRadius: 16,
+    backgroundColor: '#f8fafc',
+    borderRadius: 12,
     borderWidth: 1.5,
     borderColor: '#e2e8f0',
-    shadowColor: '#6366f1',
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 3,
-    overflow: 'hidden',
-    minHeight: 60,
+    minHeight: 56,
+    paddingHorizontal: 16,
   },
   countryTrigger: {
     flexDirection: 'row',
@@ -532,31 +558,51 @@ const styles = StyleSheet.create({
 
   phoneInput: {
     flex: 1,
-    height: 60,
-    paddingHorizontal: 14,
+    height: 56,
+    paddingHorizontal: 0,
     paddingVertical: 0,
     fontSize: 17,
     color: '#0f172a',
-    backgroundColor: '#fafbfc',
+    backgroundColor: 'transparent',
     minWidth: 0,
     textAlignVertical: 'center',
     includeFontPadding: false,
-    fontWeight: '700',
-    fontFamily: 'Roboto-Bold',
+    fontWeight: '500',
+    fontFamily: 'Roboto-Medium',
   },
 
   purpleButton: {
-    borderRadius: 16,
+    borderRadius: 12,
     width: '100%',
     shadowColor: '#6366f1',
     shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.3,
-    shadowRadius: 16,
-    elevation: 10,
+    shadowOpacity: 0.24,
+    shadowRadius: 18,
+    elevation: 8,
   },
   buttonSection: {
     width: '100%',
-    marginTop: 8,
+    marginTop: 4,
+  },
+
+  footerNoteContainer: {
+    marginTop: 24,
+    paddingHorizontal: 4,
+    alignItems: 'center',
+  },
+  footerNoteTitle: {
+    fontSize: 15,
+    color: '#1e293b',
+    fontWeight: '600',
+    fontFamily: 'Roboto-Medium',
+    marginBottom: 4,
+  },
+  footerNoteSubtitle: {
+    fontSize: 13,
+    color: '#64748b',
+    textAlign: 'center',
+    lineHeight: 20,
+    fontFamily: 'Roboto-Medium',
   },
 
   infoText: {
@@ -576,6 +622,167 @@ const styles = StyleSheet.create({
     borderTopWidth: 1.5,
     borderTopColor: '#f1f5f9',
     marginTop: 8,
+  },
+
+  // New layout styles
+  brandBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 32,
+    marginTop: 20,
+    alignSelf: 'center',
+  },
+  brandLogoCircle: {
+    width: 60,
+    height: 60,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  brandLogoIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+  },
+  brandTextContainer: {
+    marginLeft: 12,
+    flexShrink: 1,
+  },
+  brandTitle: {
+    fontSize: 24,
+    color: '#ffffff',
+    fontFamily: 'Roboto-Bold',
+    fontWeight: '700',
+    letterSpacing: -0.3,
+  },
+  brandSubtitle: {
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.85)',
+    fontFamily: 'Roboto-Medium',
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  sheetWrapper: {
+    flex: 0,
+    width: '100%',
+    maxWidth: 420,
+    alignSelf: 'center',
+  },
+  sheetGradient: {
+    borderRadius: 24,
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOpacity: 0.1,
+    shadowRadius: 20,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  sheetInner: {
+    borderRadius: 24,
+    paddingHorizontal: 24,
+    paddingVertical: 28,
+    backgroundColor: 'transparent',
+  },
+  stepPill: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: '#e0f2fe',
+    marginBottom: 20,
+  },
+  stepPillText: {
+    fontSize: 11,
+    color: '#0369a1',
+    fontFamily: 'Roboto-Medium',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+  },
+  screenTitle: {
+    fontSize: 30,
+    color: '#0f172a',
+    fontFamily: 'Roboto-Bold',
+    fontWeight: '700',
+    marginBottom: 8,
+    letterSpacing: -0.5,
+  },
+  screenSubtitle: {
+    fontSize: 16,
+    color: '#64748b',
+    fontFamily: 'Roboto-Medium',
+    lineHeight: 22,
+    marginBottom: 24,
+  },
+  countryBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRightWidth: 1,
+    borderRightColor: '#1f2937',
+  },
+  codeText: {
+    fontSize: 15,
+    color: '#e5e7eb',
+    marginLeft: 6,
+    fontFamily: 'Roboto-Bold',
+  },
+  inlineHelperText: {
+    fontSize: 13,
+    color: '#64748b',
+    marginTop: 10,
+    fontFamily: 'Roboto-Medium',
+    lineHeight: 18,
+  },
+  primaryButtonGradient: {
+    borderRadius: 12,
+    width: '100%',
+    shadowColor: '#4f8cff',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  primaryButtonGradientDisabled: {
+    shadowOpacity: 0,
+    elevation: 0,
+  },
+  secondaryNote: {
+    marginTop: 10,
+    fontSize: 12,
+    color: '#64748b',
+    textAlign: 'center',
+    fontFamily: 'Roboto-Medium',
+    lineHeight: 16,
+  },
+  securityStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 20,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    backgroundColor: '#f1f5f9',
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  securityDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 999,
+    backgroundColor: '#22c55e',
+    marginRight: 10,
+  },
+  securityText: {
+    fontSize: 12,
+    color: '#475569',
+    fontFamily: 'Roboto-Medium',
   },
 });
 
